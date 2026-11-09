@@ -120,6 +120,20 @@ def tailscale_auth_url(*parts):
     return ""
 
 
+def allowed_tailscale_open_url(url):
+    """Return a login.tailscale.com https URL hog may open, else empty."""
+    text = str(url or "").strip()
+    if not text or len(text) < 30 or len(text) >= 300 or any(ch.isspace() for ch in text):
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host != "login.tailscale.com":
+        return ""
+    if parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443):
+        return ""
+    return text
+
+
 def shares_root():
     return Path.home() / "hog-shares"
 

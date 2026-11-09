@@ -2109,6 +2109,18 @@ function maybeOpenTailscaleLogin(url) {
   const allowed = tailscaleEnableUrl(url);
   if (!allowed || allowed === lastOpenedLogin) return;
   lastOpenedLogin = allowed;
+  openTailscaleUrl(allowed);
+}
+
+function openTailscaleUrl(url) {
+  const allowed = tailscaleEnableUrl(url);
+  if (!allowed) return;
+  // Open Tailscale login/admin inside Hog so Brave/system browser is not needed.
+  if (desktopOn()) {
+    createTab();
+    openUrl(allowed);
+    return;
+  }
   desktopCommand(`open:${allowed}`);
 }
 
@@ -4539,9 +4551,7 @@ function bind() {
     desktopCommand("containers:tailscale-up");
   });
   $("tailscale-login-link").addEventListener("click", () => {
-    const url = tailscaleEnableUrl($("tailscale-login-link").dataset.url || "");
-    if (!url) return;
-    desktopCommand(`open:${url}`);
+    openTailscaleUrl($("tailscale-login-link").dataset.url || "");
   });
   $("share-computer").addEventListener("click", () => {
     const form = $("share-name-form");
@@ -4640,14 +4650,10 @@ function bind() {
     }
   });
   $("share-enable").addEventListener("click", () => {
-    const url = tailscaleEnableUrl($("share-enable").dataset.url || "");
-    if (!url) return;
-    desktopCommand(`open:${url}`);
+    openTailscaleUrl($("share-enable").dataset.url || "");
   });
   $("exit-node-admin").addEventListener("click", () => {
-    const url = tailscaleEnableUrl("https://login.tailscale.com/admin/machines");
-    if (!url) return;
-    desktopCommand(`open:${url}`);
+    openTailscaleUrl("https://login.tailscale.com/admin/machines");
   });
   window.addEventListener("resize", () => {
     const tab = activeTab();

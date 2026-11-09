@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from guard import PRESETS, Guard, launch_args
+from guard import PRESETS, Guard, allowed_tailscale_open_url, launch_args
 
 
 def info(**host):
@@ -94,6 +94,43 @@ class ExitNodeGuideTest(unittest.TestCase):
         self.assertLess(files.find('id="jellyfin-host"'), files.find('id="exit-node-guide"'))
         self.assertLess(files.find('id="exit-node-guide"'), files.find('id="media-library"'))
         self.assertIn("Open the running tailscale container, press Sign in", files)
+
+
+
+
+class TailscaleOpenInHogTest(unittest.TestCase):
+    def test_allowed_tailscale_open_url_is_strict(self):
+        good = "https://login.tailscale.com/a/exampletoken123"
+        self.assertEqual(allowed_tailscale_open_url(good), good)
+        self.assertEqual(
+            allowed_tailscale_open_url("https://login.tailscale.com/admin/machines"),
+            "https://login.tailscale.com/admin/machines",
+        )
+        self.assertEqual(allowed_tailscale_open_url("http://login.tailscale.com/a/exampletoken123"), "")
+        self.assertEqual(allowed_tailscale_open_url("https://evil.example/a/exampletoken123"), "")
+        self.assertEqual(allowed_tailscale_open_url("https://login.tailscale.com.evil/a/example"), "")
+        self.assertEqual(allowed_tailscale_open_url("https://user@login.tailscale.com/a/exampletoken"), "")
+        self.assertEqual(allowed_tailscale_open_url("https://login.tailscale.com/a/example#frag"), "")
+        self.assertEqual(allowed_tailscale_open_url("https://login.tailscale.com:8443/a/exampletoken"), "")
+        self.assertEqual(allowed_tailscale_open_url("not a url"), "")
+
+    def test_open_path_prefers_hog_tab_and_blocks_wallet_on_tailscale(self):
+        root = Path(__file__).resolve().parents[1]
+        hog = (root / "hog").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("allowed_tailscale_open_url", hog)
+        self.assertIn('"event": "popup"', hog)
+        self.assertIn("DAPP_PROVIDER_BLOCK_LIST", hog)
+        self.assertIn("https://login.tailscale.com/*", hog)
+        self.assertIn("DAPP_PROVIDER_BLOCK_LIST,", hog)
+        self.assertIn("function openTailscaleUrl", app)
+        self.assertIn("createTab();", app)
+        self.assertIn("openUrl(allowed);", app)
+        self.assertIn("openTailscaleUrl($(\"tailscale-login-link\").dataset.url", app)
+        self.assertIn("openTailscaleUrl(\"https://login.tailscale.com/admin/machines\")", app)
+        # OAuth provider popups stay inside Hog via the existing NEW_WINDOW_ACTION path.
+        self.assertIn("NEW_WINDOW_ACTION", hog)
+        self.assertIn('"event": "popup"', hog)
 
 
 

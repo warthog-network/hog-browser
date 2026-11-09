@@ -20,7 +20,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from guard import Guard
+from guard import Guard, allowed_tailscale_open_url
 
 import gi
 
@@ -32,6 +32,11 @@ from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo, WebKit2
 
 ROOT = Path(__file__).resolve().parent
 DAPP_PROVIDER_SCRIPT = (ROOT / "public" / "dapp-provider.js").read_text(encoding="utf-8")
+# Keep the wallet provider off Tailscale login/admin pages.
+DAPP_PROVIDER_BLOCK_LIST = [
+    "https://login.tailscale.com/*",
+    "https://*.tailscale.com/*",
+]
 PORT = int(os.environ.get("HOG_PORT", "4188"))
 URL = f"http://127.0.0.1:{PORT}/"
 DATA = Path(os.environ.get("HOG_DATA", Path.home() / ".local" / "share" / "hog-browser"))
@@ -809,7 +814,7 @@ class PageHost:
             WebKit2.UserContentInjectedFrames.TOP_FRAME,
             WebKit2.UserScriptInjectionTime.START,
             None,
-            None,
+            DAPP_PROVIDER_BLOCK_LIST,
         ))
 
     def allowed(self, uri):
@@ -1612,14 +1617,16 @@ class Hog(Gtk.Application):
                 self.grip = None
 
     def open_tailscale_login(self, url):
-        text = str(url or "").strip()
-        if not text or len(text) >= 300 or any(ch.isspace() for ch in text):
+        text = allowed_tailscale_open_url(url)
+        if not text:
             return
-        parsed = urllib.parse.urlparse(text)
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or host != "login.tailscale.com":
-            return
-        if parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443):
+        # Prefer a Hog tab so login stays in-app. Fall back only when pages are gone.
+        if self.pages is not None:
+            self.pages.tell({
+                "event": "popup",
+                "url": text,
+                "isolated": False,
+            })
             return
         if self.window is None:
             return
