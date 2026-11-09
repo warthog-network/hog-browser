@@ -439,7 +439,10 @@ function showSettingsPage(page) {
     desktopCommand("containers:list");
     requestAnimationFrame(reportShareDrop);
   }
-  if (next === "files") desktopCommand("containers:share-status");
+  if (next === "files") {
+    desktopCommand("containers:share-status");
+    desktopCommand("containers:browser-default");
+  }
 }
 
 function showHome() {
@@ -2476,6 +2479,44 @@ function paintQr(codes) {
   if (ready.length) host.scrollIntoView({ block: "nearest" });
 }
 
+
+function paintDefaultBrowser(payload) {
+  const button = $("default-browser-toggle");
+  const status = $("default-browser-status");
+  const error = $("default-browser-error");
+  if (!button || !status || !error || !payload) return;
+  if (!Object.prototype.hasOwnProperty.call(payload, "defaultBrowser")
+      && !Object.prototype.hasOwnProperty.call(payload, "defaultBrowserAvailable")) {
+    return;
+  }
+  delete button.dataset.busy;
+  button.disabled = false;
+  const available = payload.defaultBrowserAvailable !== false;
+  const on = Boolean(payload.defaultBrowser);
+  button.classList.toggle("is-on", on);
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+  button.textContent = on ? "Using Hog as default" : "Set as default browser";
+  const current = typeof payload.defaultBrowserId === "string" ? payload.defaultBrowserId : "";
+  const previous = typeof payload.defaultBrowserPrevious === "string" ? payload.defaultBrowserPrevious : "";
+  if (!available) {
+    status.textContent = "Install the hog-browser .deb to register Hog as a browser, then try again.";
+  } else if (on) {
+    status.textContent = previous
+      ? `Hog opens http(s) links. Turning this off restores ${previous.replace(/\.desktop$/, "")}.`
+      : "Hog opens http(s) links from other apps.";
+  } else if (current) {
+    status.textContent = `Currently ${current.replace(/\.desktop$/, "")}. Turn this on so Hog opens http(s) links.`;
+  } else {
+    status.textContent = "Turn this on so Hog opens http(s) links from other apps.";
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "error")) {
+    error.textContent = payload.error || "";
+  }
+  if (payload.ok && typeof payload.notice === "string" && payload.notice) {
+    status.textContent = payload.notice;
+  }
+}
+
 function paintDocker(payload) {
   const state = $("docker-state");
   const button = $("start-docker");
@@ -2492,7 +2533,15 @@ function renderContainers(payload) {
   const list = $("container-list");
   const error = $("container-error");
   if (!list || !error || !payload) return;
+  if (Object.prototype.hasOwnProperty.call(payload, "defaultBrowser")
+      && !Array.isArray(payload.items)
+      && !Array.isArray(payload.shares)
+      && !Array.isArray(payload.media)) {
+    paintDefaultBrowser(payload);
+    return;
+  }
   paintDocker(payload);
+  paintDefaultBrowser(payload);
   launchBusy(false);
   error.textContent = payload.error || "";
   if (typeof payload.wireguard === "boolean") wireguardModule = payload.wireguard;
@@ -4553,6 +4602,24 @@ function bind() {
   $("tailscale-login-link").addEventListener("click", () => {
     openTailscaleUrl($("tailscale-login-link").dataset.url || "");
   });
+
+  $("default-browser-toggle").addEventListener("click", () => {
+    const button = $("default-browser-toggle");
+    if (!button || button.dataset.busy === "1") return;
+    const on = button.getAttribute("aria-pressed") === "true";
+    button.dataset.busy = "1";
+    button.disabled = true;
+    const status = $("default-browser-status");
+    const error = $("default-browser-error");
+    if (error) error.textContent = "";
+    if (status) {
+      status.textContent = on
+        ? "Restoring the previous default browser…"
+        : "Setting Hog as the default browser…";
+    }
+    desktopCommand(on ? "containers:browser-default-clear" : "containers:browser-default-set");
+  });
+
   $("share-computer").addEventListener("click", () => {
     const form = $("share-name-form");
     form.hidden = false;

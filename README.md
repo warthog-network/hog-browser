@@ -27,7 +27,9 @@ User data (wallet, cache, shares) stays in `~/.local/share/hog-browser` and is n
 
 ## Set Hog as your default browser
 
-After installing the `.deb`, you can make Hog open http(s) links from other apps:
+After installing the `.deb`, open **Settings → File manager** in Hog and turn on **Set as default browser**. That saves your previous default and points http(s) links at Hog. Turn it off to restore the previous browser (or the next installed http handler if none was saved).
+
+You can still do it from a terminal:
 
 ```bash
 xdg-settings set default-web-browser org.hog.Browser.desktop

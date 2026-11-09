@@ -170,6 +170,23 @@ button { cursor: pointer; }
 #tailscale-setup #tailscale-up { margin-top: 6px; }
 #tailscale-login-link { display: inline-block; margin: 8px 0 0 10px; vertical-align: middle; }
 #jellyfin-connect + .exit-node-guide { margin-top: 10px; }
+
+#default-browser-card { margin-bottom: 12px; }
+.default-browser-row { margin-top: 8px; align-items: flex-start; }
+.default-browser-copy { flex: 1; min-width: 0; }
+.default-browser-copy strong { display: block; color: var(--text); font-size: 15px; }
+#default-browser-toggle {
+  border: 1px solid rgba(253, 185, 19, 0.55);
+  background: #18181b;
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+#default-browser-toggle.is-on { border-color: rgba(253, 185, 19, 0.7); color: var(--gold); background: rgba(253, 185, 19, 0.12); }
+#default-browser-toggle:disabled { opacity: 0.6; cursor: wait; }
+#default-browser-card + #jellyfin-connect { margin-top: 10px; }
+
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }
 #endpoint-lan, #endpoint-public, #tailscale-up, #share-publish, #share-enable, #jellyfin-copy, .share-name button {

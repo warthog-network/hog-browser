@@ -2,7 +2,15 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from guard import PRESETS, Guard, allowed_browser_open_url, allowed_tailscale_open_url, launch_args
+from guard import (
+    HOG_DESKTOP,
+    PRESETS,
+    Guard,
+    allowed_browser_open_url,
+    allowed_tailscale_open_url,
+    launch_args,
+    valid_desktop_id,
+)
 
 
 def info(**host):
@@ -165,6 +173,128 @@ class BrowserOpenUrlTest(unittest.TestCase):
         self.assertIn("def do_open", hog)
         self.assertIn("allowed_browser_open_url", hog)
         self.assertIn("xdg-settings set default-web-browser org.hog.Browser.desktop", readme)
+
+
+
+class DefaultBrowserToggleTest(unittest.TestCase):
+    def test_ui_exposes_default_browser_toggle(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        hog = (root / "hog").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        files = html.split('id="settings-files"', 1)[1]
+        self.assertIn('id="default-browser-card"', files)
+        self.assertIn('id="default-browser-toggle"', files)
+        self.assertIn("Set as default browser", files)
+        self.assertLess(files.find('id="default-browser-card"'), files.find('id="jellyfin-host"'))
+        self.assertIn("function paintDefaultBrowser", app)
+        self.assertIn("containers:browser-default-set", app)
+        self.assertIn("containers:browser-default-clear", app)
+        self.assertIn("containers:browser-default", app)
+        self.assertIn("browser-default-set", hog)
+        self.assertIn("browser-default-clear", hog)
+        self.assertIn("Set as default browser", readme)
+        self.assertIn("File manager", readme)
+
+    def test_valid_desktop_id_is_strict(self):
+        self.assertTrue(valid_desktop_id("brave-browser-beta.desktop"))
+        self.assertTrue(valid_desktop_id(HOG_DESKTOP))
+        self.assertFalse(valid_desktop_id("../evil.desktop"))
+        self.assertFalse(valid_desktop_id("evil;rm.desktop"))
+        self.assertFalse(valid_desktop_id("evil desktop.desktop"))
+        self.assertFalse(valid_desktop_id("nope"))
+        self.assertFalse(valid_desktop_id(""))
+
+    def test_browser_default_set_saves_previous_and_uses_fixed_argv(self):
+        import subprocess
+        import tempfile
+        import guard as guard_mod
+
+        guard = Guard(tempfile.mkdtemp())
+        calls = []
+
+        def run_argv(args, timeout=8):
+            calls.append(list(args))
+            if args[:3] == ["xdg-settings", "get", "default-web-browser"]:
+                return subprocess.CompletedProcess(args, 0, "brave-browser-beta.desktop\n", "")
+            if args[:3] == ["xdg-settings", "set", "default-web-browser"]:
+                self.assertEqual(args[3], HOG_DESKTOP)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:2] == ["xdg-mime", "default"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return subprocess.CompletedProcess(args, 1, "", "no")
+
+        guard.run_argv = run_argv
+        original = guard_mod.hog_desktop_installed
+        guard_mod.hog_desktop_installed = lambda: True
+        try:
+            payload = guard.handle("browser-default-set")
+        finally:
+            guard_mod.hog_desktop_installed = original
+        self.assertTrue(payload["ok"])
+        self.assertEqual(guard.read_previous_default(), "brave-browser-beta.desktop")
+        self.assertIn(["xdg-settings", "set", "default-web-browser", HOG_DESKTOP], calls)
+        self.assertIn(
+            ["xdg-mime", "default", HOG_DESKTOP, "x-scheme-handler/http"],
+            calls,
+        )
+        self.assertIn(
+            ["xdg-mime", "default", HOG_DESKTOP, "x-scheme-handler/https"],
+            calls,
+        )
+
+    def test_browser_default_clear_restores_saved_browser(self):
+        import subprocess
+        import tempfile
+        import guard as guard_mod
+
+        guard = Guard(tempfile.mkdtemp())
+        guard.write_previous_default("brave-browser-beta.desktop")
+        calls = []
+
+        def run_argv(args, timeout=8):
+            calls.append(list(args))
+            if args[:3] == ["xdg-settings", "get", "default-web-browser"]:
+                return subprocess.CompletedProcess(args, 0, f"{HOG_DESKTOP}\n", "")
+            if args[:3] == ["xdg-settings", "set", "default-web-browser"]:
+                self.assertEqual(args[3], "brave-browser-beta.desktop")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:2] == ["xdg-mime", "default"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return subprocess.CompletedProcess(args, 1, "", "no")
+
+        guard.run_argv = run_argv
+        original = guard_mod.hog_desktop_installed
+        guard_mod.hog_desktop_installed = lambda: True
+        try:
+            payload = guard.handle("browser-default-clear")
+        finally:
+            guard_mod.hog_desktop_installed = original
+        self.assertTrue(payload["ok"])
+        self.assertIn("brave-browser-beta", payload["notice"])
+        self.assertIn(
+            ["xdg-settings", "set", "default-web-browser", "brave-browser-beta.desktop"],
+            calls,
+        )
+
+    def test_browser_default_set_requires_desktop_file(self):
+        import subprocess
+        import tempfile
+        import guard as guard_mod
+
+        guard = Guard(tempfile.mkdtemp())
+        calls = []
+        guard.run_argv = lambda args, timeout=8: calls.append(list(args)) or subprocess.CompletedProcess(args, 0, "", "")
+        original = guard_mod.hog_desktop_installed
+        guard_mod.hog_desktop_installed = lambda: False
+        try:
+            payload = guard.handle("browser-default-set")
+        finally:
+            guard_mod.hog_desktop_installed = original
+        self.assertFalse(payload["ok"])
+        self.assertIn(".deb", payload["error"])
+        self.assertFalse(any(args[:3] == ["xdg-settings", "set", "default-web-browser"] for args in calls))
 
 
 

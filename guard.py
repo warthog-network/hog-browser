@@ -69,6 +69,9 @@ TAILSCALE_NETWORK = "hog-tailscale"
 TAILSCALE_IPV6_SUBNET = "fd00:686f:6700:1::/64"
 TAILSCALE_STATE_MOUNT = "hog-tailscale-state:/var/lib/tailscale"
 
+HOG_DESKTOP = "org.hog.Browser.desktop"
+DESKTOP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,120}\.desktop$")
+
 
 def wallet_dir(path=None):
     if path is not None:
@@ -83,6 +86,24 @@ def valid_name(name):
 def valid_image(image):
     text = str(image or "")
     return bool(IMAGE_RE.fullmatch(text)) and ".." not in text and not text.startswith("-")
+
+
+def valid_desktop_id(value):
+    text = str(value or "").strip()
+    return bool(DESKTOP_ID_RE.fullmatch(text)) and ".." not in text and "/" not in text and "\\" not in text
+
+
+def hog_desktop_paths():
+    home = Path.home() / ".local" / "share" / "applications" / HOG_DESKTOP
+    return (
+        Path("/usr/share/applications") / HOG_DESKTOP,
+        home,
+    )
+
+
+def hog_desktop_installed():
+    return any(path.is_file() for path in hog_desktop_paths())
+
 
 
 def image_brings_command(image):
@@ -1715,7 +1736,193 @@ class Guard:
         notice = "The phone can open the links while Tailscale is connected." if not error and not enable else ""
         return self.share_payload(shares, dns, live, error=error, enable=enable, notice=notice)
 
+
+    def previous_default_path(self):
+        return self.data / "previous-default-browser"
+
+    def read_previous_default(self):
+        try:
+            raw = self.previous_default_path().read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+        return raw if valid_desktop_id(raw) and raw != HOG_DESKTOP else ""
+
+    def write_previous_default(self, desktop_id):
+        if not valid_desktop_id(desktop_id) or desktop_id == HOG_DESKTOP:
+            return
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.previous_default_path()
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(desktop_id + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+
+    def clear_previous_default(self):
+        try:
+            self.previous_default_path().unlink()
+        except OSError:
+            pass
+
+    def _xdg(self, args, timeout=5):
+        try:
+            return self.run_argv(["xdg-settings", *args], timeout=timeout)
+        except FileNotFoundError as exc:
+            raise RuntimeError("xdg-settings is not installed.") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("xdg-settings took too long.") from exc
+
+    def _xdg_mime_default(self, desktop_id):
+        if not valid_desktop_id(desktop_id):
+            return
+        for mime in ("x-scheme-handler/http", "x-scheme-handler/https"):
+            try:
+                self.run_argv(["xdg-mime", "default", desktop_id, mime], timeout=5)
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+
+    def current_default_browser(self):
+        try:
+            result = self._xdg(["get", "default-web-browser"])
+        except RuntimeError:
+            return ""
+        value = (result.stdout or "").strip()
+        if result.returncode != 0 or not valid_desktop_id(value):
+            return ""
+        return value
+
+    def list_http_browsers(self):
+        found = []
+        try:
+            result = self.run_argv(["gio", "mime", "x-scheme-handler/http"], timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            result = None
+        if result and result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                text = line.strip()
+                lower = text.lower()
+                if lower.startswith("default application for"):
+                    continue
+                if ":" in text and not text.endswith(".desktop"):
+                    # "Default application for …: foo.desktop"
+                    maybe = text.rsplit(":", 1)[-1].strip()
+                    if valid_desktop_id(maybe):
+                        found.append(maybe)
+                    continue
+                if valid_desktop_id(text):
+                    found.append(text)
+        # Also ask xdg-mime for the current default as a candidate.
+        try:
+            mime = self.run_argv(["xdg-mime", "query", "default", "x-scheme-handler/http"], timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            mime = None
+        if mime and mime.returncode == 0:
+            value = (mime.stdout or "").strip()
+            if valid_desktop_id(value):
+                found.append(value)
+        ordered = []
+        seen = set()
+        for item in found:
+            if item in seen or item == HOG_DESKTOP:
+                continue
+            seen.add(item)
+            ordered.append(item)
+        return ordered
+
+    def fallback_default_browser(self):
+        previous = self.read_previous_default()
+        if previous:
+            return previous
+        browsers = self.list_http_browsers()
+        return browsers[0] if browsers else ""
+
+    def browser_default_payload(self, ok=True, error="", notice=""):
+        current = ""
+        try:
+            current = self.current_default_browser()
+        except Exception:
+            current = ""
+        available = hog_desktop_installed()
+        is_default = current == HOG_DESKTOP
+        previous = self.read_previous_default()
+        return {
+            "ok": ok,
+            "error": error,
+            "notice": notice,
+            "defaultBrowser": is_default,
+            "defaultBrowserId": current,
+            "defaultBrowserPrevious": previous,
+            "defaultBrowserAvailable": available,
+        }
+
+    def browser_default_status(self):
+        if not hog_desktop_installed():
+            return self.browser_default_payload(
+                ok=True,
+                notice="Install the hog-browser .deb first so Hog can register as a browser.",
+            )
+        try:
+            return self.browser_default_payload()
+        except RuntimeError as exc:
+            return self.browser_default_payload(ok=False, error=str(exc))
+
+    def browser_default_set(self):
+        if not hog_desktop_installed():
+            return self.browser_default_payload(
+                ok=False,
+                error="Install the hog-browser .deb first so Hog can register as a browser.",
+            )
+        try:
+            current = self.current_default_browser()
+        except RuntimeError as exc:
+            return self.browser_default_payload(ok=False, error=str(exc))
+        if current and current != HOG_DESKTOP:
+            self.write_previous_default(current)
+        try:
+            result = self._xdg(["set", "default-web-browser", HOG_DESKTOP])
+        except RuntimeError as exc:
+            return self.browser_default_payload(ok=False, error=str(exc))
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Could not set the default browser.").strip().splitlines()
+            message = detail[-1][:180] if detail else "Could not set the default browser."
+            return self.browser_default_payload(ok=False, error=message)
+        self._xdg_mime_default(HOG_DESKTOP)
+        return self.browser_default_payload(notice="Hog is the default browser for http and https links.")
+
+    def browser_default_clear(self):
+        try:
+            current = self.current_default_browser()
+        except RuntimeError as exc:
+            return self.browser_default_payload(ok=False, error=str(exc))
+        if current != HOG_DESKTOP:
+            return self.browser_default_payload(notice="Hog is already not the default browser.")
+        target = self.fallback_default_browser()
+        if not target or target == HOG_DESKTOP:
+            return self.browser_default_payload(
+                ok=False,
+                error="No other browser was saved. Choose one in Settings → Default Apps, then try again.",
+            )
+        try:
+            result = self._xdg(["set", "default-web-browser", target])
+        except RuntimeError as exc:
+            return self.browser_default_payload(ok=False, error=str(exc))
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Could not restore the previous browser.").strip().splitlines()
+            message = detail[-1][:180] if detail else "Could not restore the previous browser."
+            return self.browser_default_payload(ok=False, error=message)
+        self._xdg_mime_default(target)
+        label = target.removesuffix(".desktop") if hasattr(target, "removesuffix") else target[:-8]
+        return self.browser_default_payload(
+            notice=f"Default browser restored to {label}.",
+        )
+
     def handle(self, action, name="", image=""):
+        if action == "browser-default":
+            return self.browser_default_status()
+        if action == "browser-default-set":
+            return self.browser_default_set()
+        if action == "browser-default-clear":
+            return self.browser_default_clear()
         if action == "engine":
             return self.engine_status()
         if action == "share-list":
