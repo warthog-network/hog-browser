@@ -25,6 +25,16 @@ hog-browser
 
 User data (wallet, cache, shares) stays in `~/.local/share/hog-browser` and is not touched by package upgrades or removals.
 
+## Set Hog as your default browser
+
+After installing the `.deb`, you can make Hog open http(s) links from other apps:
+
+```bash
+xdg-settings set default-web-browser org.hog.Browser.desktop
+```
+
+Or use **Settings → Default Apps** (sometimes labeled Default Applications) and choose **Hog Browser** for Web. Hog only accepts `http` and `https` URLs from the desktop; `file:`, `javascript:`, and other schemes are ignored. Opening a link while Hog is already running sends it to that window as a new tab.
+
 ## Run from source
 
 Needs Ubuntu packages for the GTK shell, plus Node 18+. `warthog-js` is pulled from GitHub by `npm ci` (pinned in `package.json`).

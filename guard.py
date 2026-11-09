@@ -134,6 +134,29 @@ def allowed_tailscale_open_url(url):
     return text
 
 
+def allowed_browser_open_url(url):
+    """Return an http(s) URL Hog may open from the desktop or CLI, else empty.
+
+    Rejects file:, javascript:, data:, and other schemes so Hog can register as
+    a default browser without opening local files or script URLs from argv.
+    """
+    text = str(url or "").strip()
+    if not text or len(text) < 8 or len(text) >= 2000 or any(ch.isspace() for ch in text):
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return ""
+    host = (parsed.hostname or "").strip("[]").lower()
+    if not host:
+        return ""
+    if parsed.username or parsed.password:
+        return ""
+    if host in ("metadata.google.internal", "169.254.169.254"):
+        return ""
+    return text
+
+
 def shares_root():
     return Path.home() / "hog-shares"
 

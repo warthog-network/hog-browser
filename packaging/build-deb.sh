@@ -104,10 +104,11 @@ cat > "${STAGE}/usr/share/applications/org.hog.Browser.desktop" << 'DESKTOP'
 Type=Application
 Name=Hog Browser
 Comment=A small local browser with a Warthog wallet in the sidebar
-Exec=hog-browser
+Exec=hog-browser %U
 Icon=org.hog.Browser
 Terminal=false
 Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;application/xhtml+xml;
 StartupWMClass=hog
 DESKTOP
 

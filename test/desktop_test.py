@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from guard import PRESETS, Guard, allowed_tailscale_open_url, launch_args
+from guard import PRESETS, Guard, allowed_browser_open_url, allowed_tailscale_open_url, launch_args
 
 
 def info(**host):
@@ -131,6 +131,40 @@ class TailscaleOpenInHogTest(unittest.TestCase):
         # OAuth provider popups stay inside Hog via the existing NEW_WINDOW_ACTION path.
         self.assertIn("NEW_WINDOW_ACTION", hog)
         self.assertIn('"event": "popup"', hog)
+
+
+
+class BrowserOpenUrlTest(unittest.TestCase):
+    def test_allowed_browser_open_url_filters_schemes(self):
+        self.assertEqual(
+            allowed_browser_open_url("https://example.com/path?q=1"),
+            "https://example.com/path?q=1",
+        )
+        self.assertEqual(
+            allowed_browser_open_url("http://example.com"),
+            "http://example.com",
+        )
+        self.assertEqual(allowed_browser_open_url("file:///etc/passwd"), "")
+        self.assertEqual(allowed_browser_open_url("javascript:alert(1)"), "")
+        self.assertEqual(allowed_browser_open_url("data:text/html,hi"), "")
+        self.assertEqual(allowed_browser_open_url("about:blank"), "")
+        self.assertEqual(allowed_browser_open_url("https://user:pass@example.com/"), "")
+        self.assertEqual(allowed_browser_open_url("https://169.254.169.254/"), "")
+        self.assertEqual(allowed_browser_open_url("https://metadata.google.internal/"), "")
+        self.assertEqual(allowed_browser_open_url("not a url"), "")
+        self.assertEqual(allowed_browser_open_url(""), "")
+
+    def test_desktop_file_registers_as_browser(self):
+        script = (Path(__file__).resolve().parents[1] / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        hog = (Path(__file__).resolve().parents[1] / "hog").read_text(encoding="utf-8")
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Exec=hog-browser %U", script)
+        self.assertIn("MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;application/xhtml+xml;", script)
+        self.assertIn("StartupWMClass=hog", script)
+        self.assertIn("HANDLES_OPEN", hog)
+        self.assertIn("def do_open", hog)
+        self.assertIn("allowed_browser_open_url", hog)
+        self.assertIn("xdg-settings set default-web-browser org.hog.Browser.desktop", readme)
 
 
 

@@ -20,7 +20,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from guard import Guard, allowed_tailscale_open_url
+from guard import Guard, allowed_browser_open_url, allowed_tailscale_open_url
 
 import gi
 
@@ -28,7 +28,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("WebKit2", "4.1")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo, WebKit2
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo, WebKit2
 
 ROOT = Path(__file__).resolve().parent
 DAPP_PROVIDER_SCRIPT = (ROOT / "public" / "dapp-provider.js").read_text(encoding="utf-8")
@@ -1532,7 +1532,10 @@ def drop_copy_note(lines):
 
 class Hog(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID)
+        super().__init__(
+            application_id=APP_ID,
+            flags=Gio.ApplicationFlags.HANDLES_OPEN,
+        )
         self.server = None
         self.grip = None
         self.using_edge_cursor = False
@@ -1545,6 +1548,8 @@ class Hog(Gtk.Application):
         self.tabs_spot = None
         self.wallet_spot = None
         self.grip_boxes = [None, None]
+        self.pending_urls = []
+        self.chrome_ready = False
 
     def on_window_message(self, _manager, result, window):
         try:
@@ -1634,6 +1639,32 @@ class Hog(Gtk.Application):
             Gtk.show_uri_on_window(self.window, text, Gdk.CURRENT_TIME)
         except Exception:
             pass
+
+    def open_external_url(self, url):
+        text = allowed_browser_open_url(url)
+        if not text:
+            return
+        if self.pages is not None and self.chrome_ready:
+            self.pages.tell({
+                "event": "popup",
+                "url": text,
+                "isolated": False,
+            })
+            return
+        if text not in self.pending_urls and len(self.pending_urls) < 20:
+            self.pending_urls.append(text)
+
+    def flush_pending_urls(self):
+        if self.pages is None:
+            return
+        pending = list(self.pending_urls)
+        self.pending_urls.clear()
+        for url in pending:
+            self.pages.tell({
+                "event": "popup",
+                "url": url,
+                "isolated": False,
+            })
 
     def place_share_drop(self, text):
         target = getattr(self, "share_drop", None)
@@ -2029,7 +2060,9 @@ class Hog(Gtk.Application):
             os.killpg(self.server.pid, signal.SIGTERM)
         Gtk.Application.do_shutdown(self)
 
-    def do_activate(self):
+    def ensure_window(self):
+        if self.window is not None:
+            return
         self.ensure_server()
         Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
         window = Gtk.ApplicationWindow(application=self, title="Hog")
@@ -2132,6 +2165,8 @@ class Hog(Gtk.Application):
         def on_load(web_view, event):
             if event == WebKit2.LoadEvent.FINISHED:
                 print(f"Hog is open at {URL}", flush=True)
+                self.chrome_ready = True
+                self.flush_pending_urls()
 
         view.connect("load-changed", on_load)
         window.add(overlay)
@@ -2146,6 +2181,23 @@ class Hog(Gtk.Application):
         self.tabs_spot.hide()
         self.wallet_spot.hide()
         window.present()
+
+
+    def do_activate(self):
+        self.ensure_window()
+        if self.window is not None:
+            self.window.present()
+
+    def do_open(self, files, hint):
+        self.ensure_window()
+        for item in files or []:
+            try:
+                uri = item.get_uri()
+            except Exception:
+                continue
+            self.open_external_url(uri)
+        if self.window is not None:
+            self.window.present()
 
 
 def main():
