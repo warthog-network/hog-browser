@@ -61,7 +61,10 @@ mkdir -p \
   "${APP}" \
   "${STAGE}/usr/bin" \
   "${STAGE}/usr/share/applications" \
+  "${STAGE}/usr/share/icons/hicolor/48x48/apps" \
+  "${STAGE}/usr/share/icons/hicolor/128x128/apps" \
   "${STAGE}/usr/share/icons/hicolor/256x256/apps" \
+  "${STAGE}/usr/share/icons/hicolor/scalable/apps" \
   "${STAGE}/etc/sysctl.d" \
   "${STAGE}/DEBIAN"
 
@@ -108,8 +111,14 @@ Categories=Network;WebBrowser;
 StartupWMClass=hog
 DESKTOP
 
+install -m 644 "${HB}/public/hog-icon-48.png" \
+  "${STAGE}/usr/share/icons/hicolor/48x48/apps/org.hog.Browser.png"
+install -m 644 "${HB}/public/hog-icon-128.png" \
+  "${STAGE}/usr/share/icons/hicolor/128x128/apps/org.hog.Browser.png"
 install -m 644 "${HB}/public/hog-icon.png" \
   "${STAGE}/usr/share/icons/hicolor/256x256/apps/org.hog.Browser.png"
+install -m 644 "${HB}/public/hog-icon.svg" \
+  "${STAGE}/usr/share/icons/hicolor/scalable/apps/org.hog.Browser.svg"
 
 INSTALLED_SIZE="$(du -sk "${STAGE}" | awk '{print $1}')"
 

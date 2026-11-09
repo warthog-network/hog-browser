@@ -2033,10 +2033,16 @@ class Hog(Gtk.Application):
                 window.set_visual(visual)
         window.set_decorated(False)
         window.set_default_size(1180, 760)
-        icon = ROOT / "public" / "hog-icon.png"
-        if not icon.is_file():
-            icon = ROOT / "public" / "favicon.svg"
-        if icon.is_file():
+        icon = None
+        for candidate in (
+            ROOT / "public" / "hog-icon.png",
+            ROOT / "public" / "hog-icon.svg",
+            ROOT / "public" / "favicon.svg",
+        ):
+            if candidate.is_file():
+                icon = candidate
+                break
+        if icon is not None:
             try:
                 Gtk.Window.set_default_icon_from_file(str(icon))
                 window.set_icon_from_file(str(icon))
