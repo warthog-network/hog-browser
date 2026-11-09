@@ -69,6 +69,161 @@ TAILSCALE_NETWORK = "hog-tailscale"
 TAILSCALE_IPV6_SUBNET = "fd00:686f:6700:1::/64"
 TAILSCALE_STATE_MOUNT = "hog-tailscale-state:/var/lib/tailscale"
 
+ENGINE_DOCKER_SOCK = Path("/var/run/docker.sock")
+DESKTOP_DOCKER_SOCK = Path.home() / ".docker" / "desktop" / "docker.sock"
+JELLYFIN_CONFIG_VOLUME = "hog-jellyfin-config"
+JELLYFIN_CACHE_VOLUME = "hog-jellyfin-cache"
+NVIDIA_VISIBLE_ENV = "NVIDIA_VISIBLE_DEVICES=all"
+NVIDIA_CAPS_ENV = "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"
+NVIDIA_DEV_RE = re.compile(r"^/dev/nvidia[A-Za-z0-9_/-]*$")
+
+
+def docker_host_env(sock):
+    env = os.environ.copy()
+    env["DOCKER_HOST"] = f"unix://{sock}"
+    env.pop("DOCKER_CONTEXT", None)
+    env.pop("DOCKER_MACHINE_NAME", None)
+    return env
+
+
+def nvidia_device_path(text):
+    path = str(text or "")
+    if ".." in path or "//" in path:
+        return False
+    return bool(NVIDIA_DEV_RE.fullmatch(path))
+
+
+def is_desktop_engine(info):
+    if not isinstance(info, dict):
+        return False
+    operating = str(info.get("OperatingSystem") or "")
+    name = str(info.get("Name") or "")
+    return operating == "Docker Desktop" or name == "docker-desktop"
+
+
+def nvidia_runtime_configured(info):
+    if not isinstance(info, dict):
+        return False
+    if str(info.get("DefaultRuntime") or "") == "nvidia":
+        return True
+    runtimes = info.get("Runtimes")
+    if isinstance(runtimes, dict) and "nvidia" in runtimes:
+        return True
+    blob = json.dumps(info)
+    return "nvidia.com/gpu" in blob or "nvidia.com/gpu=" in blob
+
+
+def parse_nvidia_gpu_name(text):
+    match = re.search(
+        r"NVIDIA(?:\s+GeForce)?\s+(RTX|GTX|Quadro|Tesla|TITAN|Iris)\s+[A-Z0-9][A-Za-z0-9 -]*",
+        str(text or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r"NVIDIA\s+[A-Za-z0-9][A-Za-z0-9 -]{2,40}", str(text or ""))
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(0)).strip(" -")
+
+
+def os_release_fields():
+    fields = {}
+    try:
+        raw = Path("/etc/os-release").read_text(encoding="utf-8")
+    except OSError:
+        return fields
+    for line in raw.splitlines():
+        if "=" not in line or line.startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        fields[key] = value.strip().strip("\"'")
+    return fields
+
+
+def docker_engine_install_commands():
+    fields = os_release_fields()
+    ident = str(fields.get("ID") or "ubuntu").lower()
+    distro = "debian" if ident == "debian" else "ubuntu"
+    codename_expr = '${UBUNTU_CODENAME:-$VERSION_CODENAME}' if distro == "ubuntu" else "$VERSION_CODENAME"
+    return [
+        "sudo apt-get update",
+        "sudo apt-get install -y ca-certificates curl",
+        "sudo install -m 0755 -d /etc/apt/keyrings",
+        f"sudo curl -fsSL https://download.docker.com/linux/{distro}/gpg -o /etc/apt/keyrings/docker.asc",
+        "sudo chmod a+r /etc/apt/keyrings/docker.asc",
+        (
+            'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] '
+            f'https://download.docker.com/linux/{distro} $(. /etc/os-release && echo "'
+            f'{codename_expr}") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null'
+        ),
+        "sudo apt-get update",
+        "sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+        "sudo systemctl enable --now docker",
+        'sudo usermod -aG docker "$USER"',
+    ]
+
+
+def nvidia_driver_install_commands():
+    return [
+        "sudo apt-get update",
+        "sudo apt-get install -y ubuntu-drivers-common",
+        "sudo ubuntu-drivers autoinstall",
+    ]
+
+
+def nvidia_toolkit_install_commands(configure_only=False):
+    configure = [
+        "sudo nvidia-ctk runtime configure --runtime=docker",
+        "sudo systemctl restart docker",
+    ]
+    if configure_only:
+        return configure
+    return [
+        "sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg2",
+        (
+            "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | "
+            "sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && "
+            "curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | "
+            "sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | "
+            "sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+        ),
+        "sudo apt-get update",
+        "sudo apt-get install -y nvidia-container-toolkit",
+        *configure,
+    ]
+
+
+def docker_group_commands():
+    return ['sudo usermod -aG docker "$USER"']
+
+
+VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
+
+
+def valid_volume_name(name):
+    text = str(name or "")
+    return bool(VOLUME_NAME_RE.fullmatch(text)) and ".." not in text
+
+
+def jellyfin_volume_map(info):
+    found = {}
+    if not isinstance(info, dict):
+        return found
+    for mount in info.get("Mounts") or []:
+        if not isinstance(mount, dict):
+            continue
+        dest = str(mount.get("Destination") or "")
+        name = str(mount.get("Name") or "")
+        if dest in {"/config", "/cache"} and valid_volume_name(name):
+            found[dest[1:]] = name
+    return found
+
+
+def container_image(info, fallback="jellyfin/jellyfin:latest"):
+    config = info.get("Config") if isinstance(info, dict) and isinstance(info.get("Config"), dict) else {}
+    return str(config.get("Image") or fallback) or fallback
+
+
 HOG_DESKTOP = "org.hog.Browser.desktop"
 DESKTOP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,120}\.desktop$")
 
@@ -567,13 +722,15 @@ def format_publish(port):
     return spec
 
 
-def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"), env=(), sysctls=(), mounts=(), network=""):
+def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"), env=(), sysctls=(), mounts=(), network="", gpus=False):
     args = ["run", "-d", "--name", name, "--cap-drop=ALL"]
     args.extend(f"--cap-add={cap}" for cap in SSH_CAPS)
     if vpn:
         args.append("--cap-add=NET_ADMIN")
         args.extend(["--device", "/dev/net/tun"])
     args.extend(["--pids-limit", "1024", "--memory", "2g", "--memory-swap", "2g"])
+    if gpus:
+        args.extend(["--gpus", "all"])
     if network:
         args.extend(["--network", network])
     if network not in HOST_MODES:
@@ -853,6 +1010,8 @@ def mount_problem(source, data):
     if not text.startswith("/"):
         return ""
     path = Path(text)
+    if nvidia_device_path(text):
+        return ""
     if path == Path("/") or path.parts[1:2] and path.parts[1] in {"proc", "sys", "dev", "run"}:
         return "It mounts a host system directory."
     if str(path) in {"/var/run", "/run"}:
@@ -905,7 +1064,7 @@ def assess(info, name, data):
     for device in host.get("Devices") or []:
         if isinstance(device, dict):
             source = str(device.get("PathOnHost") or "")
-            if source == "/dev/net/tun":
+            if source == "/dev/net/tun" or nvidia_device_path(source):
                 continue
             sources.append(source)
     for source in sources:
@@ -951,14 +1110,467 @@ class Guard:
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Docker took too long.") from exc
 
-    def run_argv(self, args, timeout=8):
-        return subprocess.run(
-            list(args),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+    def run_argv(self, args, timeout=8, env=None):
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": timeout,
+            "check": False,
+        }
+        if env is not None:
+            kwargs["env"] = env
+        return subprocess.run(list(args), **kwargs)
+
+    def run_on(self, args, timeout=8, sock=None):
+        argv = [self.docker, *args]
+        if sock:
+            try:
+                return self.run_argv(argv, timeout=timeout, env=docker_host_env(sock))
+            except FileNotFoundError as exc:
+                raise RuntimeError("Docker is not installed.") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("Docker took too long.") from exc
+        return self.run(args, timeout=timeout)
+
+    def gpu_state_path(self):
+        return self.data / "jellyfin-gpu.json"
+
+    def read_gpu_state(self):
+        try:
+            raw = json.loads(self.gpu_state_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        desktop = raw.get("desktopVolumes") if isinstance(raw.get("desktopVolumes"), dict) else {}
+        engine = raw.get("engineVolumes") if isinstance(raw.get("engineVolumes"), dict) else {}
+        return {
+            "enabled": bool(raw.get("enabled")),
+            "desktopVolumes": {
+                "config": str(desktop.get("config") or ""),
+                "cache": str(desktop.get("cache") or ""),
+            },
+            "engineVolumes": {
+                "config": str(engine.get("config") or ""),
+                "cache": str(engine.get("cache") or ""),
+            },
+        }
+
+    def write_gpu_state(self, enabled=None, desktop_volumes=None, engine_volumes=None):
+        state = self.read_gpu_state()
+        if enabled is not None:
+            state["enabled"] = bool(enabled)
+        if desktop_volumes:
+            state["desktopVolumes"].update({key: value for key, value in desktop_volumes.items() if value})
+        if engine_volumes:
+            state["engineVolumes"].update({key: value for key, value in engine_volumes.items() if value})
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.gpu_state_path()
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        return state
+
+    def gpu_enabled(self):
+        return self.read_gpu_state()["enabled"]
+
+    def engine_sock(self):
+        return ENGINE_DOCKER_SOCK
+
+    def desktop_sock(self):
+        return DESKTOP_DOCKER_SOCK if DESKTOP_DOCKER_SOCK.exists() else None
+
+    def container_sock(self, name=""):
+        if str(name or "") == "jellyfin" and self.gpu_enabled():
+            return self.engine_sock()
+        return None
+
+    def docker_info_on(self, sock, timeout=4):
+        if not sock:
+            return None
+        try:
+            result = self.run_on(["info", "--format", "{{json .}}"], timeout=timeout, sock=sock)
+        except RuntimeError:
+            return None
+        blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+        if result.returncode != 0 or docker_offline(blob):
+            return None
+        try:
+            payload = json.loads((result.stdout or "").strip() or "null")
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _socket_usable(self, path):
+        try:
+            return Path(path).exists() and Path(path).is_socket()
+        except OSError:
+            return False
+
+    def _same_socket(self, first, second):
+        if not first or not second:
+            return False
+        try:
+            return os.path.samefile(first, second)
+        except OSError:
+            return False
+
+    def _nvidia_smi(self):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False, ""
+        if result.returncode != 0:
+            return False, ""
+        return True, parse_nvidia_gpu_name(result.stdout or "")
+
+    def _nvidia_ctk_installed(self):
+        return bool(shutil.which("nvidia-ctk"))
+
+    def _native_engine_status(self):
+        sock = self.engine_sock()
+        desktop = self.desktop_sock()
+        status = {
+            "ok": False,
+            "installed": False,
+            "running": False,
+            "permission": True,
+            "info": None,
+        }
+        if not self._socket_usable(sock) or self._same_socket(sock, desktop):
+            return status
+        status["installed"] = True
+        try:
+            result = self.run_on(["info", "--format", "{{json .}}"], timeout=4, sock=sock)
+        except RuntimeError:
+            return status
+        blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+        lowered = blob.lower()
+        if "permission denied" in lowered:
+            status["permission"] = False
+            return status
+        if result.returncode != 0 or docker_offline(blob):
+            return status
+        try:
+            info = json.loads((result.stdout or "").strip() or "null")
+        except json.JSONDecodeError:
+            info = None
+        if not isinstance(info, dict) or is_desktop_engine(info):
+            return status
+        status["running"] = True
+        status["ok"] = True
+        status["info"] = info
+        return status
+
+    def gpu_is_ready(self):
+        return all(item.get("ok") for item in self.gpu_readiness())
+
+    def gpu_readiness(self):
+        nvidia_ok, gpu_name = self._nvidia_smi()
+        engine = self._native_engine_status()
+        toolkit_installed = self._nvidia_ctk_installed()
+        toolkit_configured = bool(engine.get("ok") and nvidia_runtime_configured(engine.get("info")))
+        in_group = engine.get("permission", True)
+        nvidia_detail = "NVIDIA GPU and driver are ready"
+        if nvidia_ok and gpu_name:
+            nvidia_detail = f"NVIDIA GPU and driver are ready ({gpu_name})"
+        elif nvidia_ok:
+            nvidia_detail = "NVIDIA GPU and driver are ready (nvidia-smi works)"
+        else:
+            nvidia_detail = "Install an NVIDIA driver, then reboot if the installer asks you to."
+        if engine.get("ok"):
+            engine_detail = "Native Docker Engine is installed and running (separate from Docker Desktop)."
+            engine_commands = []
+        elif engine.get("installed") and not in_group:
+            engine_detail = "Docker Engine is installed, but this user cannot use /var/run/docker.sock. Add the user to the docker group, then log out and back in."
+            engine_commands = docker_group_commands()
+        elif engine.get("installed"):
+            engine_detail = "Docker Engine is installed but not running, or it is Docker Desktop's socket rather than docker-ce."
+            engine_commands = ["sudo systemctl enable --now docker"]
+        else:
+            engine_detail = "Install Docker Engine (docker-ce) next to Docker Desktop, then add this user to the docker group and log out and back in."
+            engine_commands = docker_engine_install_commands()
+        if toolkit_installed and toolkit_configured:
+            toolkit_detail = "NVIDIA Container Toolkit is installed and configured for Docker Engine."
+            toolkit_commands = []
+        elif toolkit_installed:
+            toolkit_detail = "NVIDIA Container Toolkit is installed, but Docker Engine does not have the NVIDIA runtime yet."
+            toolkit_commands = nvidia_toolkit_install_commands(configure_only=True)
+        else:
+            toolkit_detail = "Install the NVIDIA Container Toolkit and configure the Docker Engine runtime. Restarting docker-ce does not stop Docker Desktop containers."
+            toolkit_commands = nvidia_toolkit_install_commands()
+        return [
+            {
+                "id": "nvidia",
+                "label": "NVIDIA GPU and driver",
+                "ok": bool(nvidia_ok),
+                "detail": nvidia_detail,
+                "commands": [] if nvidia_ok else nvidia_driver_install_commands(),
+            },
+            {
+                "id": "engine",
+                "label": "Native Docker Engine",
+                "ok": bool(engine.get("ok")),
+                "detail": engine_detail,
+                "commands": engine_commands,
+            },
+            {
+                "id": "toolkit",
+                "label": "NVIDIA Container Toolkit",
+                "ok": bool(toolkit_installed and toolkit_configured),
+                "detail": toolkit_detail,
+                "commands": toolkit_commands,
+            },
+        ]
+
+    def jellyfin_gpu_fields(self):
+        checks = self.gpu_readiness()
+        return {
+            "jellyfinGpu": self.gpu_enabled(),
+            "jellyfinGpuReady": all(item.get("ok") for item in checks),
+            "jellyfinGpuChecks": checks,
+        }
+
+    def _attach_gpu(self, payload):
+        if not isinstance(payload, dict):
+            return payload
+        try:
+            payload.update(self.jellyfin_gpu_fields())
+        except Exception:
+            payload.setdefault("jellyfinGpu", self.gpu_enabled())
+            payload.setdefault("jellyfinGpuReady", False)
+            payload.setdefault("jellyfinGpuChecks", [])
+        return payload
+
+    def inspect_on(self, name, sock=None):
+        try:
+            result = self.run_on(["inspect", name], sock=sock)
+        except RuntimeError as exc:
+            return None, str(exc)
+        if result.returncode != 0:
+            blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+            if docker_offline(blob):
+                return None, "Docker is not running."
+            detail = blob.strip().splitlines()
+            return None, detail[-1][:180] if detail else "Docker did not find that container."
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None, "Docker returned an unreadable description."
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+            return None, "Docker returned an unreadable description."
+        return payload[0], ""
+
+    def container_run(self, name, args, timeout=8):
+        sock = self.container_sock(name)
+        if sock is not None:
+            return self.run_on(args, timeout=timeout, sock=sock)
+        return self.run(args, timeout=timeout)
+
+    def jellyfin_volume_names(self, info=None, side="desktop"):
+        state = self.read_gpu_state()
+        saved = state["desktopVolumes" if side == "desktop" else "engineVolumes"]
+        config = saved.get("config") or JELLYFIN_CONFIG_VOLUME
+        cache = saved.get("cache") or JELLYFIN_CACHE_VOLUME
+        found = jellyfin_volume_map(info)
+        if found.get("config"):
+            config = found["config"]
+        if found.get("cache"):
+            cache = found["cache"]
+        return {"config": config, "cache": cache}
+
+    def save_jellyfin_volumes(self, info, side="desktop"):
+        found = jellyfin_volume_map(info)
+        if not found:
+            return
+        if side == "engine":
+            self.write_gpu_state(engine_volumes=found)
+        else:
+            self.write_gpu_state(desktop_volumes=found)
+
+    def jellyfin_mounts(self, info=None, side="desktop"):
+        root = shares_root()
+        root.mkdir(parents=True, exist_ok=True)
+        os.chmod(root, 0o755)
+        volumes = self.jellyfin_volume_names(info, side=side)
+        return (
+            f"{root.resolve()}:/media:ro",
+            f"{volumes['config']}:/config",
+            f"{volumes['cache']}:/cache",
         )
+
+    def _stop_rm_keep_volumes(self, name, sock=None):
+        info, error = self.inspect_on(name, sock=sock)
+        if info is None:
+            if error == "Docker is not running.":
+                return error
+            return ""
+        state = info.get("State") if isinstance(info.get("State"), dict) else {}
+        runner = (lambda args, timeout=30: self.run_on(args, timeout=timeout, sock=sock)) if sock is not None else (
+            lambda args, timeout=30: self.run(args, timeout=timeout)
+        )
+        if state.get("Running") is True:
+            stopped = runner(["stop", name], 40)
+            if stopped.returncode != 0:
+                detail = f"{stopped.stderr or ''}\n{stopped.stdout or ''}".strip().splitlines()
+                return detail[-1][:180] if detail else "Docker did not stop that container."
+        removed = runner(["rm", name], 30)
+        if removed.returncode != 0:
+            detail = f"{removed.stderr or ''}\n{removed.stdout or ''}".strip().splitlines()
+            return detail[-1][:180] if detail else "Docker did not remove that container."
+        return ""
+
+    def _start_jellyfin_on(self, side, image="jellyfin/jellyfin:latest"):
+        sock = self.engine_sock() if side == "engine" else None
+        info, _error = self.inspect_on("jellyfin", sock=sock)
+        if info is not None:
+            config = info.get("Config") if isinstance(info.get("Config"), dict) else {}
+            image = str(config.get("Image") or image) or image
+            self.save_jellyfin_volumes(info, side=side)
+        mounts = self.jellyfin_mounts(info, side=side)
+        env = ()
+        gpus = side == "engine"
+        if gpus:
+            env = (NVIDIA_VISIBLE_ENV, NVIDIA_CAPS_ENV)
+        volumes = self.jellyfin_volume_names(info, side=side)
+        if side == "engine":
+            self.write_gpu_state(engine_volumes=volumes)
+        else:
+            self.write_gpu_state(desktop_volumes=volumes)
+        args = compose_run(
+            "jellyfin",
+            image,
+            (("127.0.0.1", "8096", "8096", "tcp"),),
+            False,
+            (),
+            env,
+            (),
+            mounts,
+            "",
+            gpus=gpus,
+        )
+        result = self.run_on(args, timeout=300, sock=sock) if sock is not None else self.run(args, timeout=300)
+        blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+        if result.returncode != 0:
+            if docker_offline(blob):
+                return None, "Docker is not running."
+            detail = [line.strip() for line in blob.splitlines() if line.strip()]
+            return None, detail[-1][:180] if detail else "Docker did not start Jellyfin."
+        started, error = self.inspect_on("jellyfin", sock=sock)
+        reason = assess(started, "jellyfin", self.data) if started else (error or "Docker did not describe that container.")
+        if reason:
+            if sock is not None:
+                self.run_on(["rm", "-f", "jellyfin"], timeout=20, sock=sock)
+            else:
+                self.run(["rm", "-f", "jellyfin"], timeout=20)
+            return None, reason
+        self.remember("jellyfin")
+        return started, ""
+
+    def set_jellyfin_gpu(self, enabled):
+        enabled = bool(enabled)
+        if enabled and not self.gpu_is_ready():
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "GPU acceleration needs the checks below to be ready first. Copy the install commands, then try again."
+            return payload
+        currently = self.gpu_enabled()
+        if enabled == currently:
+            payload = self.engine_status()
+            payload["notice"] = (
+                "Jellyfin is already using the NVIDIA GPU on Docker Engine."
+                if enabled
+                else "Jellyfin is already on Docker Desktop (CPU)."
+            )
+            return payload
+        desktop_info, _desktop_error = self.inspect_on("jellyfin", sock=None)
+        engine_info, _engine_error = self.inspect_on("jellyfin", sock=self.engine_sock())
+        started = False
+        if enabled:
+            if desktop_info:
+                self.save_jellyfin_volumes(desktop_info, side="desktop")
+                problem = self._stop_rm_keep_volumes("jellyfin", sock=None)
+                if problem:
+                    payload = self.engine_status()
+                    payload["ok"] = False
+                    payload["error"] = problem
+                    return payload
+            self.write_gpu_state(enabled=True)
+            if desktop_info or engine_info:
+                _info, error = self._start_jellyfin_on(
+                    "engine",
+                    image=container_image(engine_info) if engine_info else container_image(desktop_info),
+                )
+                if error:
+                    self.write_gpu_state(enabled=False)
+                    payload = self.engine_status()
+                    payload["ok"] = False
+                    payload["error"] = error
+                    return payload
+                started = True
+                notice = (
+                    "Jellyfin is running on Docker Engine with the NVIDIA GPU. "
+                    "In Jellyfin Dashboard → Playback → Transcoding, pick NVIDIA NVENC. "
+                    "Login and libraries from Docker Desktop do not carry over; this engine has its own config volume. "
+                    "~/hog-shares is the same folder. Tailscale stays on Docker Desktop and still reaches Jellyfin at host.docker.internal:8096."
+                )
+            else:
+                notice = (
+                    "GPU acceleration is on. Start Jellyfin and it will run on Docker Engine with the NVIDIA GPU. "
+                    "Login and libraries from Docker Desktop do not carry over. "
+                    "After it starts, in Dashboard → Playback → Transcoding pick NVIDIA NVENC."
+                )
+        else:
+            if engine_info:
+                self.save_jellyfin_volumes(engine_info, side="engine")
+                problem = self._stop_rm_keep_volumes("jellyfin", sock=self.engine_sock())
+                if problem:
+                    payload = self.engine_status()
+                    payload["ok"] = False
+                    payload["error"] = problem
+                    return payload
+            self.write_gpu_state(enabled=False)
+            if desktop_info or engine_info:
+                _info, error = self._start_jellyfin_on(
+                    "desktop",
+                    image=container_image(desktop_info) if desktop_info else container_image(engine_info),
+                )
+                if error:
+                    self.write_gpu_state(enabled=True)
+                    payload = self.engine_status()
+                    payload["ok"] = False
+                    payload["error"] = error
+                    return payload
+                started = True
+                notice = (
+                    "Jellyfin is back on Docker Desktop (CPU). "
+                    "Settings from this Desktop engine are reused when those volumes were kept. "
+                    "GPU Engine settings stay on Docker Engine's volumes."
+                )
+            else:
+                notice = "GPU acceleration is off. Start Jellyfin and it will run on Docker Desktop (CPU)."
+        payload = self.engine_status()
+        payload["notice"] = notice
+        if started:
+            dns, live = self.tailscale_dns()
+            if live:
+                problem, enable = self.publish_port(8096)
+                if enable:
+                    payload["enableUrl"] = enable
+                elif problem:
+                    payload["notice"] = f"{notice} {problem}"
+        return payload
+
+    def jellyfin_gpu_status(self):
+        return self.engine_status()
 
     def docker_running(self):
         try:
@@ -1006,7 +1618,7 @@ class Guard:
                 except (RuntimeError, OSError):
                     url = ""
         media_path, media_rows = self.media_view()
-        return {
+        return self._attach_gpu({
             "ok": True,
             "error": "",
             "docker": running,
@@ -1018,7 +1630,7 @@ class Guard:
             "tailscaleLoginUrl": ts_login,
             "media": media_rows,
             "mediaPath": media_path,
-        }
+        })
 
     def start_engine(self, wait=90, pause=1.0):
         if self.docker_running():
@@ -1075,23 +1687,10 @@ class Guard:
                 payload["docker"] = True
             else:
                 payload["docker"] = self.docker_running()
-        return payload
+        return self._attach_gpu(payload)
 
     def inspect(self, name):
-        result = self.run(["inspect", name])
-        if result.returncode != 0:
-            blob = f"{result.stderr or ''}\n{result.stdout or ''}"
-            if docker_offline(blob):
-                return None, "Docker is not running."
-            detail = blob.strip().splitlines()
-            return None, detail[-1][:180] if detail else "Docker did not find that container."
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return None, "Docker returned an unreadable description."
-        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
-            return None, "Docker returned an unreadable description."
-        return payload[0], ""
+        return self.inspect_on(name, sock=self.container_sock(name))
 
     def snapshot(self, name):
         info, error = self.inspect(name)
@@ -1117,9 +1716,12 @@ class Guard:
         if name in names:
             self.write_names([item for item in names if item != name])
 
-    def listed_names(self):
+    def _ps_names(self, sock=None):
         try:
-            result = self.run(["ps", "-a", "--format", "{{.Names}}"], timeout=15)
+            if sock is not None:
+                result = self.run_on(["ps", "-a", "--format", "{{.Names}}"], timeout=15, sock=sock)
+            else:
+                result = self.run(["ps", "-a", "--format", "{{.Names}}"], timeout=15)
         except RuntimeError:
             return None
         blob = f"{result.stderr or ''}\n{result.stdout or ''}"
@@ -1132,6 +1734,19 @@ class Guard:
             name = line.strip().split(",")[0]
             if valid_name(name) and name not in names:
                 names.append(name)
+        return names
+
+    def listed_names(self):
+        names = self._ps_names()
+        if names is None:
+            return None
+        if self.gpu_enabled():
+            names = [name for name in names if name != "jellyfin"]
+            engine_names = self._ps_names(sock=self.engine_sock())
+            if engine_names:
+                for name in engine_names:
+                    if name == "jellyfin" and name not in names:
+                        names.append(name)
         for name in self.read_names():
             if name not in names:
                 names.append(name)
@@ -1923,6 +2538,12 @@ class Guard:
             return self.browser_default_set()
         if action == "browser-default-clear":
             return self.browser_default_clear()
+        if action == "jellyfin-gpu":
+            return self.jellyfin_gpu_status()
+        if action == "jellyfin-gpu-set":
+            return self._mark_docker(self.set_jellyfin_gpu(True))
+        if action == "jellyfin-gpu-clear":
+            return self._mark_docker(self.set_jellyfin_gpu(False))
         if action == "engine":
             return self.engine_status()
         if action == "share-list":
@@ -1987,7 +2608,7 @@ class Guard:
         if info is None:
             return {"ok": False, "error": error, "items": self.items()}
         if action == "logs":
-            result = self.run(["logs", "--tail", "150", name])
+            result = self.container_run(name, ["logs", "--tail", "150", name])
             text = (result.stdout or "") + (result.stderr or "")
             if result.returncode != 0 and not text.strip():
                 return {"ok": False, "error": "Docker did not return logs.", "items": self.items()}
@@ -1996,7 +2617,7 @@ class Guard:
                 text = strip_ascii_qr(text)
             return {"ok": True, "error": "", "logs": text[-12000:], "qr": codes, "items": self.items()}
         if action in {"start", "stop"}:
-            result = self.run([action, name])
+            result = self.container_run(name, [action, name])
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout or "Docker refused.").strip().splitlines()
                 return {"ok": False, "error": detail[-1][:180], "items": self.items()}
@@ -2062,6 +2683,14 @@ class Guard:
             problem = self.load_wireguard_module()
             if problem:
                 return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
+        jellyfin = "jellyfin" in image.lower() or name == "jellyfin"
+        if jellyfin and self.gpu_enabled() and not self.gpu_is_ready():
+            return {
+                "ok": False,
+                "error": "GPU acceleration is on, but this computer is not ready yet. Use the checklist in the Jellyfin GPU card.",
+                "items": self.items(),
+                "command": command_text,
+            }
         info, error = self.inspect(name)
         if error == "Docker is not running.":
             return {"ok": False, "error": error, "items": self.items(), "command": command_text}
@@ -2073,9 +2702,11 @@ class Guard:
                     "items": self.items(),
                     "command": command_text,
                 }
+            if jellyfin:
+                self.save_jellyfin_volumes(info, side="engine" if self.gpu_enabled() else "desktop")
             state = info.get("State") if isinstance(info.get("State"), dict) else {}
             if state.get("Running") is True:
-                stopped = self.run(["stop", name], timeout=40)
+                stopped = self.container_run(name, ["stop", name], timeout=40)
                 if stopped.returncode != 0:
                     detail = f"{stopped.stderr or ''}\n{stopped.stdout or ''}".strip().splitlines()
                     return {
@@ -2084,7 +2715,7 @@ class Guard:
                         "items": self.items(),
                         "command": command_text,
                     }
-            removed = self.run(["rm", name], timeout=30)
+            removed = self.container_run(name, ["rm", name], timeout=30)
             if removed.returncode != 0:
                 detail = f"{removed.stderr or ''}\n{removed.stdout or ''}".strip().splitlines()
                 return {
@@ -2094,21 +2725,25 @@ class Guard:
                     "command": command_text,
                 }
         mounts = ()
-        if "jellyfin" in image.lower():
-            root = shares_root()
-            root.mkdir(parents=True, exist_ok=True)
-            os.chmod(root, 0o755)
-            mounts = (f"{root.resolve()}:/media:ro",)
+        gpus = False
+        if jellyfin:
+            mounts = self.jellyfin_mounts(info, side="engine" if self.gpu_enabled() else "desktop")
+            if self.gpu_enabled():
+                gpus = True
+                extra = []
+                if NVIDIA_VISIBLE_ENV not in env:
+                    extra.append(NVIDIA_VISIBLE_ENV)
+                if NVIDIA_CAPS_ENV not in env:
+                    extra.append(NVIDIA_CAPS_ENV)
+                env = tuple(env) + tuple(extra)
         if "tailscale" in image.lower():
             mounts = (*mounts, TAILSCALE_STATE_MOUNT)
             network = TAILSCALE_NETWORK
             problem = self.ensure_tailscale_network()
             if problem:
                 return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
-        result = self.run(
-            compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network),
-            timeout=300 if mounts else 180,
-        )
+        run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus)
+        result = self.container_run(name, run_args, timeout=300 if mounts else 180)
         blob = f"{result.stderr or ''}\n{result.stdout or ''}"
         if result.returncode != 0:
             if docker_offline(blob):
@@ -2123,7 +2758,7 @@ class Guard:
         info, error = self.inspect(name)
         reason = assess(info, name, self.data) if info else (error or "Docker did not describe that container.")
         if reason:
-            self.run(["rm", "-f", name], timeout=20)
+            self.container_run(name, ["rm", "-f", name], timeout=20)
             return {"ok": False, "error": reason, "items": self.items(), "command": command_text}
         self.remember(name)
         problem = self.prepare_tailscale_firewall(name, info)
@@ -2144,6 +2779,8 @@ class Guard:
                     notice = f"{verb} {name}. On this computer open http://127.0.0.1:8096. In the phone app, the host is http://{self.tailscale_ipv4()}:8096. In Jellyfin, add a library at /media."
             else:
                 notice = f"{verb} {name}. Start tailscale, open its card, and press Publish to the phone. In Jellyfin, add a library at /media."
+            if self.gpu_enabled():
+                notice = f"{notice} In Dashboard → Playback → Transcoding, pick NVIDIA NVENC. Docker Desktop settings do not carry over to Docker Engine."
         return {
             "ok": True,
             "error": "",
@@ -2486,7 +3123,7 @@ class Guard:
         state = info.get("State") if isinstance(info.get("State"), dict) else {}
         if state.get("Running") is True:
             return {"ok": False, "error": "Stop the container first.", "items": self.items()}
-        result = self.run(["rm", name], timeout=30)
+        result = self.container_run(name, ["rm", name], timeout=30)
         if result.returncode != 0:
             detail = f"{result.stderr or ''}\n{result.stdout or ''}".strip().splitlines()
             return {

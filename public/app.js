@@ -2517,6 +2517,92 @@ function paintDefaultBrowser(payload) {
   }
 }
 
+function paintJellyfinGpu(payload) {
+  const button = $("jellyfin-gpu-toggle");
+  const status = $("jellyfin-gpu-status");
+  const error = $("jellyfin-gpu-error");
+  const list = $("jellyfin-gpu-checks");
+  const hint = $("jellyfin-gpu-hint");
+  if (!button || !status || !error || !list || !payload) return;
+  if (!Object.prototype.hasOwnProperty.call(payload, "jellyfinGpu")
+      && !Object.prototype.hasOwnProperty.call(payload, "jellyfinGpuChecks")) {
+    return;
+  }
+  delete button.dataset.busy;
+  button.disabled = false;
+  const on = Boolean(payload.jellyfinGpu);
+  const ready = Boolean(payload.jellyfinGpuReady);
+  button.classList.toggle("is-on", on);
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+  button.textContent = on ? "Using NVIDIA GPU" : "Use NVIDIA GPU";
+  if (on) {
+    status.textContent = "Jellyfin runs on Docker Engine with the NVIDIA GPU. Turn this off to go back to Docker Desktop (CPU). Login and libraries do not carry over between engines; ~/hog-shares stays the same.";
+  } else if (ready) {
+    status.textContent = "This computer is ready. Turn this on to recreate Jellyfin on Docker Engine with --gpus all. Docker Desktop settings will not carry over. Tailscale stays on Docker Desktop.";
+  } else {
+    status.textContent = "GPU transcoding needs the three checks below. Hog only shows the commands; it does not run sudo.";
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "error") && (payload.jellyfinGpu === true || payload.jellyfinGpu === false || payload.jellyfinGpuChecks)) {
+    error.textContent = payload.error || "";
+  }
+  if (payload.ok && typeof payload.notice === "string" && payload.notice && (on || Object.prototype.hasOwnProperty.call(payload, "jellyfinGpu"))) {
+    if (/NVIDIA|GPU|Docker Engine|Docker Desktop \(CPU\)/.test(payload.notice)) {
+      status.textContent = payload.notice;
+    }
+  }
+  const checks = Array.isArray(payload.jellyfinGpuChecks) ? payload.jellyfinGpuChecks : [];
+  list.replaceChildren();
+  for (const check of checks) {
+    if (!check || typeof check !== "object") continue;
+    const item = document.createElement("li");
+    item.classList.toggle("is-ready", Boolean(check.ok));
+    const head = document.createElement("div");
+    head.className = "gpu-check-head";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = check.label || "Check";
+    const detail = document.createElement("p");
+    detail.className = "note";
+    detail.textContent = check.detail || (check.ok ? "Ready." : "Not ready.");
+    copy.append(title, detail);
+    const mark = document.createElement("span");
+    mark.className = "gpu-check-mark";
+    mark.textContent = check.ok ? "Ready" : "Missing";
+    head.append(copy, mark);
+    item.append(head);
+    const commands = Array.isArray(check.commands) ? check.commands.filter((line) => typeof line === "string" && line.trim()) : [];
+    if (commands.length) {
+      const pre = document.createElement("pre");
+      pre.className = "mono";
+      pre.textContent = commands.join("\n");
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "gpu-copy";
+      copyBtn.textContent = "Copy commands";
+      copyBtn.addEventListener("click", async () => {
+        const blob = commands.join("\n");
+        try {
+          await navigator.clipboard.writeText(blob);
+          copyBtn.textContent = "Copied";
+        } catch (_err) {
+          copyBtn.textContent = "Select the commands";
+          const range = document.createRange();
+          range.selectNodeContents(pre);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        window.setTimeout(() => {
+          copyBtn.textContent = "Copy commands";
+        }, 1500);
+      });
+      item.append(pre, copyBtn);
+    }
+    list.append(item);
+  }
+  if (hint) hint.hidden = !on;
+}
+
 function paintDocker(payload) {
   const state = $("docker-state");
   const button = $("start-docker");
@@ -2542,6 +2628,7 @@ function renderContainers(payload) {
   }
   paintDocker(payload);
   paintDefaultBrowser(payload);
+  paintJellyfinGpu(payload);
   launchBusy(false);
   error.textContent = payload.error || "";
   if (typeof payload.wireguard === "boolean") wireguardModule = payload.wireguard;
@@ -4518,7 +4605,7 @@ function bind() {
         return;
       }
       if (kind === "jellyfin") {
-        fillLaunch(kind, button.dataset.image, "In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media.", {
+        fillLaunch(kind, button.dataset.image, "In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media. Use GPU acceleration (NVIDIA) on this page for NVENC.", {
           ports: [{ bind: "127.0.0.1", host: "8096", dest: "8096", proto: "tcp" }],
           command: [],
         });
@@ -4618,6 +4705,27 @@ function bind() {
         : "Setting Hog as the default browser…";
     }
     desktopCommand(on ? "containers:browser-default-clear" : "containers:browser-default-set");
+  });
+
+  $("jellyfin-gpu-toggle").addEventListener("click", () => {
+    const button = $("jellyfin-gpu-toggle");
+    if (!button || button.dataset.busy === "1") return;
+    const on = button.getAttribute("aria-pressed") === "true";
+    const message = on
+      ? "Move Jellyfin back to Docker Desktop (CPU)? Settings from Docker Engine stay on that engine. Docker Desktop settings are restored if those volumes were kept."
+      : "Move Jellyfin onto Docker Engine with the NVIDIA GPU? Login and libraries from Docker Desktop do not carry over; this engine has its own config volume. ~/hog-shares stays the same, and Tailscale stays on Docker Desktop.";
+    if (!window.confirm(message)) return;
+    button.dataset.busy = "1";
+    button.disabled = true;
+    const status = $("jellyfin-gpu-status");
+    const error = $("jellyfin-gpu-error");
+    if (error) error.textContent = "";
+    if (status) {
+      status.textContent = on
+        ? "Moving Jellyfin back to Docker Desktop…"
+        : "Starting Jellyfin with the NVIDIA GPU…";
+    }
+    desktopCommand(on ? "containers:jellyfin-gpu-clear" : "containers:jellyfin-gpu-set");
   });
 
   $("share-computer").addEventListener("click", () => {

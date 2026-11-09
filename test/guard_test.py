@@ -9,6 +9,10 @@ from share_page import listing_page, safe_target
 from guard import drop_destination, drop_file_path, format_bytes, library_folder, media_listing, remove_media_entry, take_drop
 from guard import (
     ENGINE_START,
+    JELLYFIN_CACHE_VOLUME,
+    JELLYFIN_CONFIG_VOLUME,
+    NVIDIA_CAPS_ENV,
+    NVIDIA_VISIBLE_ENV,
     PRESETS,
     SHARE_NAME_RE,
     CommandError,
@@ -17,11 +21,15 @@ from guard import (
     assign_share_port,
     canonical_command,
     compose_run,
+    docker_engine_install_commands,
     docker_offline,
     docker_volume_data,
     folder_problem,
     launch_args,
     mount_problem,
+    nvidia_device_path,
+    nvidia_toolkit_install_commands,
+    parse_nvidia_gpu_name,
     parse_run,
     valid_name,
 )
@@ -1196,6 +1204,291 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual(result["shares"][0]["name"], "films")
             self.assertEqual(result["shares"][0]["url"], "")
             self.assertEqual(result["mediaPath"], "")
+
+class JellyfinGpuTest(unittest.TestCase):
+    def test_nvidia_paths_and_compose_flag(self):
+        self.assertTrue(nvidia_device_path("/dev/nvidia0"))
+        self.assertTrue(nvidia_device_path("/dev/nvidiactl"))
+        self.assertTrue(nvidia_device_path("/dev/nvidia-uvm"))
+        self.assertTrue(nvidia_device_path("/dev/nvidia-caps/nvidia-cap1"))
+        self.assertFalse(nvidia_device_path("/dev/nvidia/../sda"))
+        self.assertFalse(nvidia_device_path("/dev/sda"))
+        self.assertEqual(mount_problem("/dev/nvidia0", Path("/tmp/data")), "")
+        args = compose_run("jellyfin", "jellyfin/jellyfin:latest", gpus=True)
+        self.assertIn("--gpus", args)
+        self.assertEqual(args[args.index("--gpus") + 1], "all")
+        self.assertNotIn("--gpus", compose_run("jellyfin", "jellyfin/jellyfin:latest"))
+        self.assertIn("RTX 3060", parse_nvidia_gpu_name("NVIDIA GeForce RTX 3060        Off"))
+
+    def test_install_commands_are_official(self):
+        engine = "\n".join(docker_engine_install_commands())
+        self.assertIn("download.docker.com/linux/", engine)
+        self.assertIn("docker-ce", engine)
+        self.assertIn('usermod -aG docker "$USER"', engine)
+        toolkit = "\n".join(nvidia_toolkit_install_commands())
+        self.assertIn("nvidia.github.io/libnvidia-container", toolkit)
+        self.assertIn("nvidia-container-toolkit", toolkit)
+        self.assertIn("sudo nvidia-ctk runtime configure --runtime=docker", toolkit)
+        self.assertIn("sudo systemctl restart docker", toolkit)
+        configure = nvidia_toolkit_install_commands(configure_only=True)
+        self.assertEqual(
+            configure,
+            [
+                "sudo nvidia-ctk runtime configure --runtime=docker",
+                "sudo systemctl restart docker",
+            ],
+        )
+
+    def test_assess_allows_nvidia_devices(self):
+        payload = {
+            "Name": "/jellyfin",
+            "State": {"Status": "running", "Running": True},
+            "Config": {"Image": "jellyfin/jellyfin:latest"},
+            "HostConfig": {
+                "Privileged": False,
+                "NetworkMode": "bridge",
+                "PidMode": "",
+                "IpcMode": "private",
+                "CapAdd": None,
+                "Binds": [],
+                "Devices": [{"PathOnHost": "/dev/nvidia0"}],
+            },
+            "Mounts": [],
+        }
+        self.assertEqual(assess(payload, "jellyfin", Path("/tmp/data")), "")
+
+    def _ready_checks(self, ready=True):
+        def check(label, ok=ready):
+            return {"id": label, "label": label, "ok": ok, "detail": "x", "commands": [] if ok else ["sudo true"]}
+        return [check("nvidia"), check("engine"), check("toolkit")]
+
+    def _jellyfin_info(self, running=True, config="abcconfig", cache="abccache", image="jellyfin/jellyfin:latest"):
+        return {
+            "Name": "/jellyfin",
+            "State": {"Status": "running" if running else "exited", "Running": running},
+            "Config": {"Image": image},
+            "HostConfig": {
+                "Privileged": False,
+                "NetworkMode": "bridge",
+                "PidMode": "",
+                "IpcMode": "private",
+                "CapAdd": None,
+                "Binds": ["/media-host:/media:ro"],
+                "Devices": None,
+            },
+            "Mounts": [
+                {"Source": "/media-host", "Destination": "/media", "Type": "bind"},
+                {"Source": f"/var/lib/docker/volumes/{config}/_data", "Destination": "/config", "Type": "volume", "Name": config},
+                {"Source": f"/var/lib/docker/volumes/{cache}/_data", "Destination": "/cache", "Type": "volume", "Name": cache},
+            ],
+        }
+
+    def test_readiness_reports_missing_toolkit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard._nvidia_smi = lambda: (True, "NVIDIA GeForce RTX 3060")
+            guard._native_engine_status = lambda: {
+                "ok": True,
+                "installed": True,
+                "running": True,
+                "permission": True,
+                "info": {"OperatingSystem": "Ubuntu 26.04.1 LTS", "Name": "whitefang", "Runtimes": {"runc": {}}},
+            }
+            guard._nvidia_ctk_installed = lambda: False
+            checks = {item["id"]: item for item in guard.gpu_readiness()}
+            self.assertTrue(checks["nvidia"]["ok"])
+            self.assertIn("RTX 3060", checks["nvidia"]["detail"])
+            self.assertTrue(checks["engine"]["ok"])
+            self.assertFalse(checks["toolkit"]["ok"])
+            self.assertIn("sudo nvidia-ctk runtime configure --runtime=docker", "\n".join(checks["toolkit"]["commands"]))
+            self.assertFalse(guard.gpu_is_ready())
+
+    def test_enable_refuses_when_not_ready_and_does_not_touch_docker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+            guard.gpu_readiness = lambda: self._ready_checks(False)
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard.media_view = lambda: ("", [])
+            guard.inspect_on = lambda name, sock=None: calls.append(("inspect", name, sock)) or (None, "missing")
+            guard.run = lambda args, timeout=8: calls.append(("run", args)) or subprocess.CompletedProcess(args, 0, "", "")
+            guard.run_on = lambda args, timeout=8, sock=None: calls.append(("run_on", args, sock)) or subprocess.CompletedProcess(args, 0, "", "")
+            payload = guard.handle("jellyfin-gpu-set")
+            self.assertFalse(payload["ok"])
+            self.assertIn("ready", payload["error"].lower())
+            self.assertFalse(guard.gpu_enabled())
+            self.assertFalse(any(item[0] in {"run", "run_on"} for item in calls))
+
+    def test_enable_recreates_jellyfin_on_engine_with_gpu(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            desktop = self._jellyfin_info(config="deskcfg", cache="deskcache")
+            boxes = {"desktop": desktop, "engine": None}
+            calls = []
+
+            def inspect_on(name, sock=None):
+                if name != "jellyfin":
+                    return None, "missing"
+                if sock is None:
+                    info = boxes["desktop"]
+                else:
+                    info = boxes["engine"]
+                if info is None:
+                    return None, "missing"
+                return info, ""
+
+            def run_on(args, timeout=8, sock=None):
+                calls.append((list(args), sock, timeout))
+                if args and args[0] == "run":
+                    boxes["engine"] = self._jellyfin_info(config=JELLYFIN_CONFIG_VOLUME, cache=JELLYFIN_CACHE_VOLUME)
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[:1] == ["stop"] or args[:1] == ["rm"]:
+                    if sock is None:
+                        boxes["desktop"] = None
+                    else:
+                        boxes["engine"] = None
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[:1] == ["inspect"]:
+                    info, error = inspect_on("jellyfin", sock=sock)
+                    if info is None:
+                        return subprocess.CompletedProcess(args, 1, "", error)
+                    return subprocess.CompletedProcess(args, 0, json.dumps([info]), "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            def run(args, timeout=8):
+                return run_on(args, timeout=timeout, sock=None)
+
+            guard.gpu_readiness = lambda: self._ready_checks(True)
+            guard.docker_running = lambda: True
+            guard.items = lambda: [{"name": "jellyfin", "state": "running", "image": "jellyfin/jellyfin:latest", "reason": ""}]
+            guard.media_view = lambda: ("", [])
+            guard.tailscale_dns = lambda: ("", False)
+            guard.inspect_on = inspect_on
+            guard.run_on = run_on
+            guard.run = run
+            payload = guard.handle("jellyfin-gpu-set")
+            self.assertTrue(payload["ok"], payload)
+            self.assertTrue(guard.gpu_enabled())
+            self.assertIn("NVENC", payload["notice"])
+            self.assertIn("do not carry over", payload["notice"].lower())
+            stop = next(item for item in calls if item[0][:1] == ["stop"] and item[1] is None)
+            remove = next(item for item in calls if item[0][:1] == ["rm"] and item[1] is None)
+            self.assertNotIn("-v", remove[0])
+            created = next(item for item in calls if item[0][:1] == ["run"])
+            args, sock, _timeout = created
+            self.assertTrue(str(sock).endswith("docker.sock") or sock == guard.engine_sock())
+            self.assertIn("--gpus", args)
+            self.assertEqual(args[args.index("--gpus") + 1], "all")
+            self.assertIn(NVIDIA_VISIBLE_ENV, args)
+            self.assertIn(NVIDIA_CAPS_ENV, args)
+            self.assertIn("-p", args)
+            self.assertIn("127.0.0.1:8096:8096/tcp", args)
+            volumes = [args[i + 1] for i, token in enumerate(args) if token == "-v"]
+            self.assertTrue(any(item.endswith(":/media:ro") for item in volumes))
+            self.assertIn(f"{JELLYFIN_CONFIG_VOLUME}:/config", volumes)
+            self.assertIn(f"{JELLYFIN_CACHE_VOLUME}:/cache", volumes)
+            self.assertEqual(guard.read_gpu_state()["desktopVolumes"]["config"], "deskcfg")
+
+    def test_disable_returns_jellyfin_to_desktop_volumes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.write_gpu_state(
+                enabled=True,
+                desktop_volumes={"config": "deskcfg", "cache": "deskcache"},
+                engine_volumes={"config": JELLYFIN_CONFIG_VOLUME, "cache": JELLYFIN_CACHE_VOLUME},
+            )
+            boxes = {
+                "desktop": None,
+                "engine": self._jellyfin_info(config=JELLYFIN_CONFIG_VOLUME, cache=JELLYFIN_CACHE_VOLUME),
+            }
+            calls = []
+
+            def inspect_on(name, sock=None):
+                if name != "jellyfin":
+                    return None, "missing"
+                info = boxes["desktop"] if sock is None else boxes["engine"]
+                if info is None:
+                    return None, "missing"
+                return info, ""
+
+            def run_on(args, timeout=8, sock=None):
+                calls.append((list(args), sock))
+                if args and args[0] == "run":
+                    boxes["desktop"] = self._jellyfin_info(config="deskcfg", cache="deskcache")
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[:1] in (["stop"], ["rm"]):
+                    if sock is None:
+                        boxes["desktop"] = None
+                    else:
+                        boxes["engine"] = None
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.gpu_readiness = lambda: self._ready_checks(True)
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard.media_view = lambda: ("", [])
+            guard.tailscale_dns = lambda: ("", False)
+            guard.inspect_on = inspect_on
+            guard.run_on = run_on
+            guard.run = lambda args, timeout=8: run_on(args, timeout=timeout, sock=None)
+            payload = guard.handle("jellyfin-gpu-clear")
+            self.assertTrue(payload["ok"], payload)
+            self.assertFalse(guard.gpu_enabled())
+            created = next(item for item in calls if item[0][:1] == ["run"])
+            args, sock = created
+            self.assertIsNone(sock)
+            self.assertNotIn("--gpus", args)
+            volumes = [args[i + 1] for i, token in enumerate(args) if token == "-v"]
+            self.assertIn("deskcfg:/config", volumes)
+            self.assertIn("deskcache:/cache", volumes)
+
+    def test_apply_command_adds_named_volumes_without_putting_them_in_the_command(self):
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / "data"
+            shares = Path(folder) / "hog-shares"
+            guard = Guard(data, docker="docker")
+            calls = []
+            state = {"up": False}
+            old_root = guard_module.shares_root
+            guard_module.shares_root = lambda: shares
+
+            def inspect(name):
+                if name != "jellyfin" or not state["up"]:
+                    return None, "missing"
+                return self._jellyfin_info(), ""
+
+            def run(args, timeout=8):
+                calls.append(list(args))
+                if args[0] == "run":
+                    state["up"] = True
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.inspect = inspect
+            guard.run = run
+            guard.items = lambda: []
+            guard.docker_running = lambda: True
+            guard.gpu_readiness = lambda: self._ready_checks(False)
+            try:
+                line = canonical_command(
+                    "jellyfin",
+                    "jellyfin/jellyfin:latest",
+                    (("127.0.0.1", "8096", "8096", "tcp"),),
+                    False,
+                    (),
+                )
+                result = guard.handle("run", line)
+            finally:
+                guard_module.shares_root = old_root
+            self.assertTrue(result["ok"], result.get("error"))
+            self.assertNotIn("-v", result["command"])
+            self.assertNotIn("--gpus", result["command"])
+            run_args = calls[0]
+            volumes = [run_args[i + 1] for i, token in enumerate(run_args) if token == "-v"]
+            self.assertTrue(volumes[0].endswith(":/media:ro"))
+            self.assertIn(f"{JELLYFIN_CONFIG_VOLUME}:/config", volumes)
+            self.assertIn(f"{JELLYFIN_CACHE_VOLUME}:/cache", volumes)
 
 
 if __name__ == "__main__":

@@ -186,6 +186,49 @@ button { cursor: pointer; }
 #default-browser-toggle.is-on { border-color: rgba(253, 185, 19, 0.7); color: var(--gold); background: rgba(253, 185, 19, 0.12); }
 #default-browser-toggle:disabled { opacity: 0.6; cursor: wait; }
 #default-browser-card + #jellyfin-connect { margin-top: 10px; }
+#jellyfin-gpu-card { margin: 16px 0 8px; max-width: 720px; }
+#jellyfin-gpu-toggle {
+  border: 1px solid rgba(253, 185, 19, 0.55);
+  background: #18181b;
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+#jellyfin-gpu-toggle.is-on { border-color: rgba(253, 185, 19, 0.7); color: var(--gold); background: rgba(253, 185, 19, 0.12); }
+#jellyfin-gpu-toggle:disabled { opacity: 0.6; cursor: wait; }
+.gpu-checks { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.gpu-checks li {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.gpu-checks li.is-ready { border-color: rgba(253, 185, 19, 0.28); }
+.gpu-check-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.gpu-check-head strong { display: block; font-size: 13px; color: var(--text); }
+.gpu-check-mark { flex: none; font-size: 12px; color: var(--gold); }
+.gpu-checks li:not(.is-ready) .gpu-check-mark { color: #f87171; }
+.gpu-checks pre {
+  margin: 8px 0 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 160px;
+  overflow: auto;
+}
+.gpu-copy {
+  margin-top: 8px;
+  border: 1px solid rgba(253, 185, 19, 0.55);
+  background: #18181b;
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
 
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }

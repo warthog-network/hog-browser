@@ -37,6 +37,19 @@ xdg-settings set default-web-browser org.hog.Browser.desktop
 
 Or use **Settings → Default Apps** (sometimes labeled Default Applications) and choose **Hog Browser** for Web. Hog only accepts `http` and `https` URLs from the desktop; `file:`, `javascript:`, and other schemes are ignored. Opening a link while Hog is already running sends it to that window as a new tab.
 
+
+## Jellyfin GPU acceleration (NVIDIA)
+
+Docker Desktop on Linux runs containers inside a small virtual machine, so it cannot pass through an NVIDIA GPU. Hog can instead run Jellyfin on native Docker Engine (`/var/run/docker.sock`, docker-ce) with `--gpus all`, while the Tailscale container stays on Docker Desktop and still publishes port 8096 to `host.docker.internal:8096`. That hostname already reaches this computer's loopback, which is how folder shares work today, so Jellyfin bound to `127.0.0.1:8096` on the host stays reachable from the phone.
+
+On the Docker page, the **GPU acceleration (NVIDIA)** card checks three things and shows copyable install commands when something is missing. Hog never runs `sudo` for you:
+
+1. An NVIDIA GPU and driver (`nvidia-smi` works).
+2. Native Docker Engine, separate from Docker Desktop, with this user in the `docker` group.
+3. The NVIDIA Container Toolkit, configured for that engine (`sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`).
+
+When all three are ready, turn the toggle on to recreate Jellyfin on Docker Engine. Named volumes `hog-jellyfin-config` and `hog-jellyfin-cache` hold that engine's login and libraries. Docker Desktop volumes do not carry over. `~/hog-shares` is still mounted at `/media`. After it starts, in Jellyfin go to **Dashboard → Playback → Transcoding** and pick **NVIDIA NVENC**. Turn the toggle off to return Jellyfin to Docker Desktop (CPU) and reuse the Desktop volumes if they were kept.
+
 ## Run from source
 
 Needs Ubuntu packages for the GTK shell, plus Node 18+. `warthog-js` is pulled from GitHub by `npm ci` (pinned in `package.json`).

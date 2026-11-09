@@ -298,5 +298,32 @@ class DefaultBrowserToggleTest(unittest.TestCase):
 
 
 
+class JellyfinGpuToggleTest(unittest.TestCase):
+    def test_ui_exposes_jellyfin_gpu_toggle(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        hog = (root / "hog").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        docker = html.split('id="settings-docker"', 1)[1].split('id="settings-files"', 1)[0]
+        self.assertIn('id="jellyfin-gpu-card"', docker)
+        self.assertIn('id="jellyfin-gpu-toggle"', docker)
+        self.assertIn("GPU acceleration (NVIDIA)", docker)
+        self.assertIn('id="jellyfin-gpu-checks"', docker)
+        self.assertLess(docker.find('data-launch="jellyfin"'), docker.find('id="jellyfin-gpu-card"'))
+        self.assertIn("function paintJellyfinGpu", app)
+        self.assertIn("containers:jellyfin-gpu-set", app)
+        self.assertIn("containers:jellyfin-gpu-clear", app)
+        self.assertIn("Copy commands", app)
+        self.assertIn("jellyfin-gpu-set", hog)
+        self.assertIn("jellyfin-gpu-clear", hog)
+        self.assertIn("GPU acceleration (NVIDIA)", readme)
+        self.assertIn("NVIDIA NVENC", readme)
+        self.assertIn("do not carry over", readme.lower())
+        self.assertIn("host.docker.internal", readme)
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

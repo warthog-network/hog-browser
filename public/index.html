@@ -97,7 +97,7 @@
               <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Flat Fedora</span><small>fedora:latest · name fedora</small></button></li>
               <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
               <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>In Docker, click Tailscale, then Run.</small></button></li>
-              <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media. Use GPU acceleration (NVIDIA) below if you want NVENC transcoding.</small></button></li>
               <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
               <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
             </ul>
@@ -133,6 +133,18 @@
             <p class="note">This computer needs the WireGuard kernel module before the tunnel can start. The button runs sudo modprobe wireguard. Ubuntu asks for your password.</p>
             <button type="button" id="load-wireguard">Load kernel module</button>
           </div>
+          <section id="jellyfin-gpu-card" class="connect-card" aria-label="GPU acceleration">
+            <p class="eyebrow">Jellyfin</p>
+            <div class="engine-row default-browser-row">
+              <div class="default-browser-copy">
+                <strong>GPU acceleration (NVIDIA)</strong>
+                <p id="jellyfin-gpu-status" class="note" role="status">Checking whether this computer can pass a GPU to Jellyfin…</p>
+                <p id="jellyfin-gpu-error" class="error" role="status"></p>
+              </div>
+              <button type="button" id="jellyfin-gpu-toggle" aria-pressed="false">Use NVIDIA GPU</button>
+            </div>
+            <ul id="jellyfin-gpu-checks" class="gpu-checks"></ul>
+          </section>
           <p id="container-status" class="note" role="status"></p>
           <p id="container-error" class="error" role="status"></p>
           <div class="picker">
@@ -176,6 +188,7 @@
               </div>
               <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
               <p class="note">On this computer, Jellyfin is 127.0.0.1:8096.</p>
+              <p id="jellyfin-gpu-hint" class="note" hidden>Jellyfin is using the NVIDIA GPU on Docker Engine. In Dashboard → Playback → Transcoding, pick NVIDIA NVENC.</p>
             </section>
             <details id="exit-node-guide" class="connect-card exit-node-guide">
               <summary>Setting up your exit node</summary>
