@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout hog-browser
+        uses: actions/checkout@v4
+        with:
+          path: hog-browser
+
+      # wallet-core.js imports ../../warthog-js (sibling of hog-browser).
+      - name: Checkout warthog-js
+        uses: actions/checkout@v4
+        with:
+          repository: warthog-network/warthog-js
+          path: warthog-js
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: hog-browser/package-lock.json
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev rsync
+
+      - name: Install dependencies
+        working-directory: hog-browser
+        run: npm ci
+
+      - name: Build bundles
+        working-directory: hog-browser
+        run: npm run build
+
+      - name: Test
+        working-directory: hog-browser
+        run: npm test
+
+      - name: Build .deb
+        working-directory: hog-browser
+        run: |
+          chmod +x packaging/build-deb.sh
+          ./packaging/build-deb.sh
+
+      - name: Read version
+        working-directory: hog-browser
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Check if release tag already exists
+        id: tag
+        working-directory: hog-browser
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${VERSION} already exists; skipping release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub release
+        if: steps.tag.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: hog-browser ${{ env.VERSION }}
+          files: hog-browser/dist/hog-browser_${{ env.VERSION }}_*.deb
+          fail_on_unmatched_files: true
