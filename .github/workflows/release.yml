@@ -24,6 +24,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: warthog-network/warthog-js
+          # price.js and the other helpers hog-browser uses are only on dev so far.
+          ref: dev
           path: warthog-js
 
       - uses: actions/setup-node@v4
