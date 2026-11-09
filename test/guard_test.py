@@ -1,6 +1,9 @@
+import hashlib
 import json
+import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -34,6 +37,17 @@ from guard import (
     parse_nvidia_gpu_name,
     parse_run,
     valid_name,
+    SELF_UPDATE_HELPER,
+    allowed_update_url,
+    canonical_update_path,
+    deb_field,
+    file_sha256,
+    hog_version,
+    parse_latest_release,
+    parse_sha256_digest,
+    parse_sha256sums,
+    parse_version,
+    version_newer,
 )
 
 
@@ -1620,6 +1634,342 @@ class ToolkitInstallTest(unittest.TestCase):
             self.assertIn("dismissed", payload["error"].lower())
             self.assertIn("Request dismissed", payload["jellyfinGpuInstallLog"])
 
+
+
+
+
+def make_test_deb(folder, version="9.9.9", package="hog-browser", architecture="amd64"):
+    src = Path(folder) / "pkg"
+    control = src / "DEBIAN"
+    control.mkdir(parents=True)
+    (control / "control").write_text(
+        f"Package: {package}\nVersion: {version}\nArchitecture: {architecture}\n"
+        "Maintainer: Hog Tests <hog@localhost>\nDescription: test package\n",
+        encoding="utf-8",
+    )
+    (src / "usr").mkdir(exist_ok=True)
+    out = Path(folder) / f"{package}_{version}_{architecture}.deb"
+    result = subprocess.run(
+        ["dpkg-deb", "-b", str(src), str(out)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout or "dpkg-deb failed")
+    return out
+
+
+class SelfUpdateTest(unittest.TestCase):
+    def setUp(self):
+        self._hog_version = guard_module.hog_version
+        guard_module.hog_version = lambda root=None: "0.1.10"
+
+    def tearDown(self):
+        guard_module.hog_version = self._hog_version
+
+    def test_semver_and_release_parsing(self):
+        self.assertEqual(parse_version("0.1.10"), (0, 1, 10))
+        self.assertEqual(parse_version("v0.1.9"), (0, 1, 9))
+        self.assertIsNone(parse_version("0.1"))
+        self.assertIsNone(parse_version("0.1.10-beta"))
+        self.assertTrue(version_newer("0.1.10", "0.1.9"))
+        self.assertTrue(version_newer("v0.1.11", "0.1.10"))
+        self.assertFalse(version_newer("0.1.9", "0.1.10"))
+        self.assertFalse(version_newer("0.1.10", "0.1.10"))
+        self.assertTrue(version_newer("1.0.0", "0.9.10"))
+        self.assertEqual(hog_version(Path(__file__).resolve().parents[1]), "0.1.11")
+        self.assertEqual(
+            allowed_update_url("https://api.github.com/repos/warthog-network/hog-browser/releases/latest"),
+            "https://api.github.com/repos/warthog-network/hog-browser/releases/latest",
+        )
+        self.assertEqual(
+            allowed_update_url("https://github.com/warthog-network/hog-browser/releases/download/0.1.11/hog-browser_0.1.11_amd64.deb"),
+            "https://github.com/warthog-network/hog-browser/releases/download/0.1.11/hog-browser_0.1.11_amd64.deb",
+        )
+        self.assertEqual(allowed_update_url("http://api.github.com/repos/warthog-network/hog-browser/releases/latest"), "")
+        self.assertEqual(allowed_update_url("https://evil.example/hog-browser_0.1.11_amd64.deb"), "")
+        self.assertEqual(allowed_update_url("https://api.github.com/../evil"), "")
+        self.assertEqual(allowed_update_url("https://user@api.github.com/repos/warthog-network/hog-browser/releases/latest"), "")
+        self.assertEqual(
+            parse_sha256_digest("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        self.assertEqual(parse_sha256_digest("md5:deadbeef"), "")
+        digest = "a" * 64
+        self.assertEqual(parse_sha256sums(f"{digest}  hog-browser_0.1.11_amd64.deb\n", "hog-browser_0.1.11_amd64.deb"), digest)
+        self.assertEqual(parse_sha256sums(f"{digest} *hog-browser_0.1.11_amd64.deb\n", "hog-browser_0.1.11_amd64.deb"), digest)
+        self.assertEqual(parse_sha256sums(f"{digest}  other.deb\n", "hog-browser_0.1.11_amd64.deb"), "")
+        release = parse_latest_release(
+            {
+                "tag_name": "v0.1.11",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://github.com/warthog-network/hog-browser/releases/tag/0.1.11",
+                "assets": [
+                    {
+                        "name": "hog-browser_0.1.11_amd64.deb",
+                        "browser_download_url": "https://github.com/warthog-network/hog-browser/releases/download/0.1.11/hog-browser_0.1.11_amd64.deb",
+                        "size": 5000,
+                        "digest": "sha256:" + digest,
+                    },
+                    {
+                        "name": "SHA256SUMS",
+                        "browser_download_url": "https://github.com/warthog-network/hog-browser/releases/download/0.1.11/SHA256SUMS",
+                    },
+                ],
+            },
+            "0.1.10",
+        )
+        self.assertEqual(release["version"], "0.1.11")
+        self.assertTrue(release["newer"])
+        self.assertEqual(release["digest"], digest)
+        self.assertTrue(release["sha256sumsUrl"].endswith("/SHA256SUMS"))
+        missing = parse_latest_release(
+            {
+                "tag_name": "0.1.11",
+                "html_url": "https://github.com/warthog-network/hog-browser/releases/tag/0.1.11",
+                "assets": [
+                    {
+                        "name": "hog-browser_0.1.11_amd64.deb",
+                        "browser_download_url": "https://github.com/warthog-network/hog-browser/releases/download/0.1.11/hog-browser_0.1.11_amd64.deb",
+                        "size": 5000,
+                    }
+                ],
+            },
+            "0.1.10",
+        )
+        self.assertEqual(missing["digest"], "")
+        self.assertEqual(missing["sha256sumsUrl"], "")
+        with self.assertRaises(ValueError):
+            parse_latest_release({"tag_name": "0.1.11", "assets": []}, "0.1.10")
+
+    def test_helper_script_policy_and_workflow(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "packaging" / "hog-self-update").read_text(encoding="utf-8")
+        self.assertIn("#!/bin/sh", script)
+        self.assertIn("must run as root via pkexec", script)
+        self.assertIn("apt-get install -y --", script)
+        self.assertIn("/var/lib/hog-browser/update", script)
+        self.assertIn("dpkg --compare-versions", script)
+        self.assertIn("Package", script)
+        self.assertIn("hog-browser", script)
+        self.assertIn("/home/", script)
+        self.assertIn(".local/share/hog-browser/updates", script)
+        self.assertNotIn("sudo", script)
+        self.assertNotIn("eval ", script)
+        self.assertNotIn("GH_TOKEN", script)
+        self.assertIn("*[2367]*)", script)
+        policy = (root / "packaging" / "org.hog.Browser.self-update.policy").read_text(encoding="utf-8")
+        self.assertIn("/opt/hog-browser/libexec/hog-self-update", policy)
+        self.assertIn("org.freedesktop.policykit.exec.path", policy)
+        self.assertIn("org.hog.Browser.self-update", policy)
+        deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        self.assertIn('install -m 755 "${ROOT}/packaging/hog-self-update"', deb)
+        self.assertIn("${APP}/libexec/hog-self-update", deb)
+        self.assertIn("org.hog.Browser.self-update.policy", deb)
+        workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("sha256sum", workflow)
+        self.assertIn("SHA256SUMS", workflow)
+        self.assertIn("dist/SHA256SUMS", workflow)
+        self.assertEqual(str(SELF_UPDATE_HELPER), "/opt/hog-browser/libexec/hog-self-update")
+        source = (root / "guard.py").read_text(encoding="utf-8")
+        self.assertNotIn("GH_TOKEN", source)
+        result = subprocess.run(
+            [str(root / "packaging" / "hog-self-update")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        result = subprocess.run(
+            [str(root / "packaging" / "hog-self-update"), "/tmp/x.deb"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("expected updates folder", result.stderr)
+        result = subprocess.run(
+            [str(root / "packaging" / "hog-self-update"), "/home/whitefang/.local/share/hog-browser/updates/hog-browser_9.9.9_amd64.deb"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pkexec", result.stderr)
+
+    def test_cache_and_check_never_hit_the_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+
+            def boom(*args, **kwargs):
+                calls.append((args, kwargs))
+                raise AssertionError("tests must not call GitHub")
+
+            guard.update_http_get = boom
+            payload = guard.handle("update-status")
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["currentVersion"], "0.1.10")
+            self.assertFalse(payload["updateAvailable"])
+            self.assertFalse(calls)
+            release = {
+                "version": "0.1.11",
+                "current": "0.1.10",
+                "newer": True,
+                "htmlUrl": "https://github.com/warthog-network/hog-browser/releases/tag/0.1.11",
+                "assetName": "hog-browser_0.1.11_amd64.deb",
+                "assetUrl": "https://github.com/warthog-network/hog-browser/releases/download/0.1.11/hog-browser_0.1.11_amd64.deb",
+                "assetSize": 5000,
+                "digest": "a" * 64,
+                "sha256sumsUrl": "",
+            }
+            guard.write_update_cache({"checkedAt": time.time(), "release": release})
+            cached = guard.handle("update-check")
+            self.assertTrue(cached["ok"])
+            self.assertTrue(cached["updateAvailable"])
+            self.assertEqual(cached["latestVersion"], "0.1.11")
+            self.assertIn("0.1.11", cached["notice"])
+            self.assertFalse(calls)
+            forced = []
+
+            def fake_get(url, timeout=20, dest=None, limit=0):
+                forced.append(url)
+                body = json.dumps({
+                    "tag_name": "0.1.11",
+                    "html_url": "https://github.com/warthog-network/hog-browser/releases/tag/0.1.11",
+                    "assets": [{
+                        "name": "hog-browser_0.1.11_amd64.deb",
+                        "browser_download_url": "https://github.com/warthog-network/hog-browser/releases/download/0.1.11/hog-browser_0.1.11_amd64.deb",
+                        "size": 5000,
+                        "digest": "sha256:" + "b" * 64,
+                    }],
+                }).encode("utf-8")
+                return body
+
+            guard.update_http_get = fake_get
+            fresh = guard.handle("update-check-now")
+            self.assertTrue(fresh["ok"], fresh)
+            self.assertEqual(forced, ["https://api.github.com/repos/warthog-network/hog-browser/releases/latest"])
+            self.assertEqual(fresh["latestVersion"], "0.1.11")
+
+    def test_install_verifies_deb_and_checksum_then_calls_pkexec(self):
+        with tempfile.TemporaryDirectory() as folder:
+            deb = make_test_deb(folder, "9.9.9")
+            digest = file_sha256(deb)
+            self.assertEqual(deb_field(deb, "Package"), "hog-browser")
+            self.assertEqual(deb_field(deb, "Version"), "9.9.9")
+            self.assertEqual(deb_field(deb, "Architecture"), "amd64")
+            dest = canonical_update_path("9.9.9")
+            self.assertIsNotNone(dest)
+            self.assertTrue(str(dest).endswith("hog-browser_9.9.9_amd64.deb"))
+            if dest.exists() or dest.is_symlink():
+                dest.unlink()
+            calls = []
+            try:
+                guard_module.hog_version = lambda root=None: "0.1.10"
+                guard = Guard(folder, docker="docker")
+                release = {
+                    "version": "9.9.9",
+                    "current": "0.1.10",
+                    "newer": True,
+                    "htmlUrl": "https://github.com/warthog-network/hog-browser/releases/tag/9.9.9",
+                    "assetName": "hog-browser_9.9.9_amd64.deb",
+                    "assetUrl": "https://github.com/warthog-network/hog-browser/releases/download/9.9.9/hog-browser_9.9.9_amd64.deb",
+                    "assetSize": deb.stat().st_size,
+                    "digest": digest,
+                    "sha256sumsUrl": "",
+                }
+                guard.write_update_cache({"checkedAt": time.time(), "release": release})
+
+                def fake_get(url, timeout=20, dest=None, limit=0):
+                    self.assertEqual(url, release["assetUrl"])
+                    self.assertIsNotNone(dest)
+                    Path(dest).write_bytes(deb.read_bytes())
+                    return Path(dest).stat().st_size
+
+                def run_argv(args, timeout=8):
+                    calls.append((list(args), timeout))
+                    guard_module.hog_version = lambda root=None: "9.9.9"
+                    return subprocess.CompletedProcess(args, 0, "Installed hog-browser 9.9.9. Restart Hog to finish.\n", "")
+
+                guard.update_http_get = fake_get
+                guard.self_update_helper_status = lambda: (True, "")
+                guard.run_argv = run_argv
+                payload = guard.handle("update-install")
+                self.assertTrue(payload["ok"], payload)
+                self.assertTrue(payload["updateRestart"])
+                self.assertFalse(payload["updateAvailable"])
+                self.assertIn((["pkexec", "/opt/hog-browser/libexec/hog-self-update", str(dest)], 600), calls)
+                self.assertEqual(sum(1 for item in calls if item[0][:1] == ["pkexec"]), 1)
+                self.assertEqual(os.stat(dest.parent).st_mode & 0o777, 0o700)
+                self.assertEqual(os.stat(dest).st_mode & 0o777, 0o600)
+                self.assertEqual(file_sha256(dest), digest)
+            finally:
+                if dest is not None and dest.exists():
+                    dest.unlink()
+
+    def test_install_falls_back_without_helper_and_rejects_bad_hash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            deb = make_test_deb(folder, "9.9.8")
+            dest = canonical_update_path("9.9.8")
+            if dest.exists() or dest.is_symlink():
+                dest.unlink()
+            calls = []
+            try:
+                guard = Guard(folder, docker="docker")
+                release = {
+                    "version": "9.9.8",
+                    "current": "0.1.10",
+                    "newer": True,
+                    "htmlUrl": "https://github.com/warthog-network/hog-browser/releases/tag/9.9.8",
+                    "assetName": "hog-browser_9.9.8_amd64.deb",
+                    "assetUrl": "https://github.com/warthog-network/hog-browser/releases/download/9.9.8/hog-browser_9.9.8_amd64.deb",
+                    "assetSize": deb.stat().st_size,
+                    "digest": file_sha256(deb),
+                    "sha256sumsUrl": "",
+                }
+                guard.write_update_cache({"checkedAt": time.time(), "release": release})
+                guard.update_http_get = lambda url, timeout=20, dest=None, limit=0: Path(dest).write_bytes(deb.read_bytes()) or Path(dest).stat().st_size
+                guard.self_update_helper_status = lambda: (False, "Install the hog-browser .deb to update from this window. Until then, download the release and install it by hand.")
+                guard.run_argv = lambda args, timeout=8: calls.append((list(args), timeout)) or subprocess.CompletedProcess(args, 0, "", "")
+                payload = guard.handle("update-install")
+                self.assertTrue(payload["ok"], payload)
+                self.assertFalse(payload["updateCanInstall"])
+                self.assertIn("sudo apt install ./hog-browser_9.9.8_amd64.deb", payload["manualCommand"])
+                self.assertIn(".deb", payload["notice"])
+                self.assertFalse(calls)
+                # bad digest
+                release["digest"] = "c" * 64
+                release["version"] = "9.9.8"
+                guard.write_update_cache({"checkedAt": time.time(), "release": release})
+                guard.self_update_helper_status = lambda: (True, "")
+                bad = guard.handle("update-install")
+                self.assertFalse(bad["ok"])
+                self.assertIn("checksum", bad["error"])
+                self.assertFalse(dest.exists())
+                self.assertFalse(calls)
+            finally:
+                if dest is not None and dest.exists():
+                    dest.unlink()
+
+    def test_install_refuses_without_digest_or_sums(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            release = {
+                "version": "9.9.7",
+                "current": "0.1.10",
+                "newer": True,
+                "htmlUrl": "https://github.com/warthog-network/hog-browser/releases/tag/9.9.7",
+                "assetName": "hog-browser_9.9.7_amd64.deb",
+                "assetUrl": "https://github.com/warthog-network/hog-browser/releases/download/9.9.7/hog-browser_9.9.7_amd64.deb",
+                "assetSize": 5000,
+                "digest": "",
+                "sha256sumsUrl": "",
+            }
+            guard.write_update_cache({"checkedAt": time.time(), "release": release})
+            calls = []
+            guard.update_http_get = lambda *a, **k: calls.append((a, k)) or b""
+            guard.self_update_helper_status = lambda: (True, "")
+            payload = guard.handle("update-install")
+            self.assertFalse(payload["ok"])
+            self.assertIn("SHA256SUMS", payload["error"])
+            self.assertFalse(calls)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,22 @@ hog-browser
 
 User data (wallet, cache, shares) stays in `~/.local/share/hog-browser` and is not touched by package upgrades or removals.
 
+## Update Hog from the app
+
+After 0.1.11 is installed, **Settings → File manager** has an **Updates** card that shows the current version and a **Check for updates** button. Hog also checks the latest GitHub release once a day when it starts (quietly, in the background) and puts a small **Update available** mark on the Settings gear when a newer version exists.
+
+**Update** downloads `hog-browser_<version>_amd64.deb` into a private folder (`~/.local/share/hog-browser/updates`, mode 0700). Hog checks that the file name and `dpkg-deb` metadata are a `hog-browser` amd64 build of that version, then verifies the SHA-256 digest from the GitHub release asset (`digest: sha256:…`). If the API does not include a digest, Hog uses the `SHA256SUMS` file published with the release. It will not install a package that has neither. Installation uses the packaged helper `/opt/hog-browser/libexec/hog-self-update` through `pkexec`, so Ubuntu can ask for your password in a system prompt. Hog never stores or types that password. The helper only accepts a regular file from that updates folder, copies it to a root-owned directory, checks that the package is exactly `hog-browser` and newer than the installed version, and runs `apt-get install`. After it finishes, press **Restart hog**.
+
+This updater ships in 0.1.11. To go from 0.1.10 or earlier, install 0.1.11 once by hand:
+
+```bash
+sudo apt install ./hog-browser_0.1.11_amd64.deb
+```
+
+Later versions can then be installed with the in-app **Update** button.
+
+If you are running Hog from source, or the helper or `pkexec` is missing, the **Update** button is hidden and the card shows the [release page](https://github.com/warthog-network/hog-browser/releases/latest) and `sudo apt install ./hog-browser_<version>_amd64.deb`.
+
 ## Set Hog as your default browser
 
 After installing the `.deb`, open **Settings → File manager** in Hog and turn on **Set as default browser**. That saves your previous default and points http(s) links at Hog. Turn it off to restore the previous browser (or the next installed http handler if none was saved).

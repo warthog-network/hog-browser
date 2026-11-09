@@ -17,7 +17,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
+import hashlib
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
@@ -78,6 +81,25 @@ NVIDIA_CAPS_ENV = "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"
 NVIDIA_DEV_RE = re.compile(r"^/dev/nvidia[A-Za-z0-9_/-]*$")
 NVIDIA_TOOLKIT_HELPER = Path("/opt/hog-browser/libexec/hog-nvidia-toolkit-install")
 NVIDIA_TOOLKIT_INSTALL_TIMEOUT = 600
+SELF_UPDATE_HELPER = Path("/opt/hog-browser/libexec/hog-self-update")
+SELF_UPDATE_TIMEOUT = 600
+UPDATE_CACHE_TTL = 24 * 60 * 60
+UPDATE_MAX_BYTES = 200 * 1024 * 1024
+RELEASES_API_URL = "https://api.github.com/repos/warthog-network/hog-browser/releases/latest"
+RELEASES_PAGE_URL = "https://github.com/warthog-network/hog-browser/releases/latest"
+VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+DEB_NAME_RE = re.compile(r"^hog-browser_(\d+\.\d+\.\d+)_amd64\.deb$")
+UPDATE_PATH_RE = re.compile(
+    r"^/home/[A-Za-z0-9._][A-Za-z0-9._-]{0,31}/\.local/share/hog-browser/updates/hog-browser_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb$"
+)
+UPDATE_HOSTS = {
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "media.githubusercontent.com",
+}
 
 
 def docker_host_env(sock):
@@ -199,10 +221,10 @@ def docker_group_commands():
     return ['sudo usermod -aG docker "$USER"']
 
 
-def nvidia_toolkit_helper_status(path=None, pkexec_path=None):
+def nvidia_toolkit_helper_status(path=None, pkexec_path=None, missing=None):
     helper = Path(path) if path is not None else NVIDIA_TOOLKIT_HELPER
     if not helper.is_file():
-        return False, (
+        return False, missing or (
             "Install the hog-browser .deb to install the toolkit from this button. "
             "Until then, copy the commands below."
         )
@@ -210,20 +232,246 @@ def nvidia_toolkit_helper_status(path=None, pkexec_path=None):
     if not pkexec:
         return False, (
             "pkexec is not installed, so Hog cannot open a password prompt. "
-            "Copy the commands below, or install pkexec (policykit-1)."
+            "Install pkexec (policykit-1), or use the command below."
         )
     try:
         st = helper.stat()
     except OSError:
-        return False, "The toolkit installer could not be read. Copy the commands below."
+        return False, "The packaged helper could not be read. Use the command below."
     if st.st_uid != 0:
-        return False, "The toolkit installer is not the packaged root helper. Copy the commands below."
+        return False, "The packaged helper is not the root helper from the hog-browser .deb. Use the command below."
     if st.st_mode & 0o022:
-        return False, "The toolkit installer is writable and will not be run. Copy the commands below."
+        return False, "The packaged helper is writable and will not be run. Use the command below."
     if not os.access(helper, os.X_OK):
-        return False, "The toolkit installer is not executable. Copy the commands below."
+        return False, "The packaged helper is not executable. Use the command below."
     return True, ""
 
+
+def hog_version(root=None):
+    path = Path(root or Path(__file__).resolve().parent) / "package.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    parsed = parse_version(raw.get("version"))
+    return format_version(parsed) if parsed else ""
+
+
+def parse_version(text):
+    match = VERSION_RE.fullmatch(str(text or "").strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def format_version(parts):
+    if not parts:
+        return ""
+    return ".".join(str(part) for part in parts)
+
+
+def version_newer(candidate, current):
+    left = parse_version(candidate)
+    right = parse_version(current)
+    if not left or not right:
+        return False
+    return left > right
+
+
+def allowed_update_url(url):
+    text = str(url or "").strip()
+    if not text or len(text) > 500 or any(ch.isspace() for ch in text):
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.params:
+        # allow query on API? latest has no query. asset urls usually no query. be strict, no query unless needed.
+        if parsed.scheme != "https" or parsed.username or parsed.password:
+            return ""
+        if parsed.params:
+            return ""
+        # github API might not need query; asset download shouldn't need it
+        if parsed.query:
+            return ""
+    host = (parsed.hostname or "").lower()
+    if host not in UPDATE_HOSTS:
+        return ""
+    if ".." in parsed.path or "//" in parsed.path:
+        return ""
+    if not parsed.path.startswith("/"):
+        return ""
+    return urllib.parse.urlunparse((
+        "https",
+        host,
+        parsed.path,
+        "",
+        "",
+        "",
+    ))
+
+
+def parse_sha256_digest(value):
+    text = str(value or "").strip()
+    if text.lower().startswith("sha256:"):
+        text = text[7:]
+    text = text.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", text):
+        return ""
+    return text
+
+
+def parse_sha256sums(text, filename):
+    name = str(filename or "")
+    if not DEB_NAME_RE.fullmatch(name):
+        return ""
+    for line in str(text or "").splitlines():
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        match = re.fullmatch(r"([0-9a-fA-F]{64})  [ *]?" + re.escape(name), body)
+        # official sha256sum is "HASH  filename" (two spaces) or "HASH *filename"
+        if not match:
+            match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?" + re.escape(name) + r"$", body)
+        if match:
+            return parse_sha256_digest(match.group(1))
+    return ""
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_update_dir():
+    return Path.home() / ".local" / "share" / "hog-browser" / "updates"
+
+
+def canonical_update_path(version):
+    parsed = parse_version(version)
+    if not parsed:
+        return None
+    name = f"hog-browser_{format_version(parsed)}_amd64.deb"
+    path = canonical_update_dir() / name
+    if not UPDATE_PATH_RE.fullmatch(str(path)):
+        return None
+    return path
+
+
+def deb_field(path, field, timeout=10):
+    if field not in {"Package", "Version", "Architecture"}:
+        return ""
+    try:
+        result = subprocess.run(
+            ["dpkg-deb", "-f", "--", str(path), field],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def parse_latest_release(payload, current):
+    if not isinstance(payload, dict):
+        raise ValueError("GitHub returned an unreadable release.")
+    if payload.get("draft") or payload.get("prerelease"):
+        raise ValueError("The latest GitHub release is not a stable build.")
+    tag = str(payload.get("tag_name") or "").strip()
+    version = format_version(parse_version(tag))
+    if not version:
+        raise ValueError("The latest GitHub release has no version tag.")
+    name = f"hog-browser_{version}_amd64.deb"
+    asset = None
+    sums = None
+    for item in payload.get("assets") or []:
+        if not isinstance(item, dict):
+            continue
+        item_name = str(item.get("name") or "")
+        if item_name == name:
+            asset = item
+        elif item_name == "SHA256SUMS":
+            sums = item
+    if asset is None:
+        raise ValueError(f"The latest release does not include {name}.")
+    asset_url = allowed_update_url(asset.get("browser_download_url"))
+    if not asset_url:
+        raise ValueError("The release asset URL is not valid.")
+    try:
+        size = int(asset.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size < 1024 or size > UPDATE_MAX_BYTES:
+        raise ValueError("The release asset size is not valid.")
+    digest = parse_sha256_digest(asset.get("digest"))
+    sums_url = allowed_update_url(sums.get("browser_download_url")) if sums else ""
+    html = allowed_update_url(payload.get("html_url")) or f"https://github.com/warthog-network/hog-browser/releases/tag/{version}"
+    if not allowed_update_url(html):
+        html = f"https://github.com/warthog-network/hog-browser/releases/tag/{version}"
+    return {
+        "version": version,
+        "current": format_version(parse_version(current)) or str(current or ""),
+        "newer": version_newer(version, current),
+        "htmlUrl": html,
+        "assetName": name,
+        "assetUrl": asset_url,
+        "assetSize": size,
+        "digest": digest,
+        "sha256sumsUrl": sums_url,
+    }
+
+
+class SafeUpdateRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not allowed_update_url(newurl):
+            raise urllib.error.URLError("Unexpected redirect host for a Hog update.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def update_http_get(url, timeout=20, dest=None, limit=UPDATE_MAX_BYTES):
+    target = allowed_update_url(url)
+    if not target:
+        raise ValueError("That update address is not allowed.")
+    request = urllib.request.Request(
+        target,
+        headers={
+            "User-Agent": f"hog-browser/{hog_version() or '0'}",
+            "Accept": "application/vnd.github+json, application/octet-stream",
+        },
+        method="GET",
+    )
+    opener = urllib.request.build_opener(SafeUpdateRedirect)
+    with opener.open(request, timeout=timeout) as response:
+        final = allowed_update_url(response.geturl())
+        if not final:
+            raise ValueError("Unexpected redirect host for a Hog update.")
+        if dest is None:
+            data = response.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("The download is too large.")
+            return data
+        written = 0
+        temporary = Path(str(dest) + ".part")
+        with open(temporary, "wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > limit:
+                    handle.close()
+                    temporary.unlink(missing_ok=True)
+                    raise ValueError("The download is too large.")
+                handle.write(chunk)
+        temporary.replace(dest)
+        return written
 
 VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
 
@@ -1451,6 +1699,262 @@ class Guard:
             payload.setdefault("jellyfinGpuChecks", [])
         return payload
 
+    def update_cache_path(self):
+        return self.data / "update-check.json"
+
+    def read_update_cache(self):
+        try:
+            raw = json.loads(self.update_cache_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def write_update_cache(self, payload):
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.update_cache_path()
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+
+    def self_update_helper_status(self):
+        return nvidia_toolkit_helper_status(
+            path=SELF_UPDATE_HELPER,
+            missing=(
+                "Install the hog-browser .deb to update from this window. "
+                "Until then, download the release and install it by hand."
+            ),
+        )
+
+    def _update_payload(self, release=None, ok=True, error="", notice="", log="", restart=False):
+        current = hog_version()
+        can_install, reason = self.self_update_helper_status()
+        latest = (release or {}).get("version") or ""
+        newer = version_newer(latest, current) if latest and current else False
+        html = (release or {}).get("htmlUrl") or RELEASES_PAGE_URL
+        asset = (release or {}).get("assetName") or ""
+        manual = f"sudo apt install ./{asset}" if asset else ""
+        if not can_install and newer and not notice and not error:
+            notice = reason
+        return {
+            "ok": ok,
+            "error": error,
+            "notice": notice,
+            "currentVersion": current,
+            "latestVersion": latest,
+            "updateAvailable": newer,
+            "releaseUrl": html,
+            "assetName": asset,
+            "manualCommand": manual,
+            "updateCanInstall": bool(can_install and newer),
+            "updateHelperReady": bool(can_install),
+            "updateHelperReason": "" if can_install else reason,
+            "updateLog": log,
+            "updateRestart": bool(restart),
+        }
+
+    def update_status(self):
+        cache = self.read_update_cache()
+        release = cache.get("release") if isinstance(cache.get("release"), dict) else None
+        if release:
+            current = hog_version()
+            if release.get("current") != current:
+                release = dict(release)
+                release["current"] = current
+                release["newer"] = version_newer(release.get("version"), current)
+        return self._update_payload(release)
+
+    def update_check(self, force=False):
+        current = hog_version()
+        if not current:
+            return self._update_payload(ok=False, error="Hog could not read its current version.")
+        cache = self.read_update_cache()
+        checked = cache.get("checkedAt")
+        try:
+            checked = float(checked)
+        except (TypeError, ValueError):
+            checked = 0
+        release = cache.get("release") if isinstance(cache.get("release"), dict) else None
+        fresh = (not force) and release and (time.time() - checked) < UPDATE_CACHE_TTL
+        if fresh:
+            release = dict(release)
+            release["current"] = current
+            release["newer"] = version_newer(release.get("version"), current)
+            payload = self._update_payload(release)
+            if release.get("newer"):
+                payload["notice"] = f"Hog {release.get('version')} is available."
+            else:
+                payload["notice"] = f"Hog {current} is the latest release."
+            return payload
+        try:
+            raw = self.update_http_get(RELEASES_API_URL, timeout=20)
+            payload = json.loads(raw.decode("utf-8"))
+            release = parse_latest_release(payload, current)
+        except json.JSONDecodeError as exc:
+            return self._update_payload(ok=False, error="GitHub returned an unreadable release list.")
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+            return self._update_payload(ok=False, error=str(exc) or "Hog could not check GitHub for updates.")
+        self.write_update_cache({"checkedAt": time.time(), "release": release})
+        result = self._update_payload(release)
+        if release.get("newer"):
+            result["notice"] = f"Hog {release.get('version')} is available."
+        else:
+            result["notice"] = f"Hog {current} is the latest release."
+        return result
+
+    def update_http_get(self, url, timeout=20, dest=None, limit=UPDATE_MAX_BYTES):
+        return update_http_get(url, timeout=timeout, dest=dest, limit=limit)
+
+    def _resolve_update_digest(self, release, timeout=20):
+        digest = parse_sha256_digest((release or {}).get("digest"))
+        if digest:
+            return digest, "GitHub asset digest"
+        sums_url = (release or {}).get("sha256sumsUrl") or ""
+        if not sums_url:
+            return "", ""
+        raw = self.update_http_get(sums_url, timeout=timeout, limit=64 * 1024)
+        digest = parse_sha256sums(raw.decode("utf-8", errors="replace"), release.get("assetName"))
+        if digest:
+            return digest, "SHA256SUMS"
+        return "", ""
+
+    def _verify_deb(self, path, version):
+        name = path.name
+        match = DEB_NAME_RE.fullmatch(name)
+        if not match or match.group(1) != version:
+            return "The downloaded file name does not match the release."
+        package = deb_field(path, "Package")
+        found = deb_field(path, "Version")
+        arch = deb_field(path, "Architecture")
+        if package != "hog-browser" or arch != "amd64" or found != version:
+            return "The package metadata is not a hog-browser amd64 build of that version."
+        return ""
+
+    def _ensure_canonical_deb(self, source, version):
+        dest = canonical_update_path(version)
+        if dest is None:
+            raise ValueError("Hog could not choose a private folder for the update.")
+        folder = dest.parent
+        folder.mkdir(parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+        if Path(source).resolve() != dest.resolve():
+            dest.write_bytes(Path(source).read_bytes())
+        os.chmod(dest, 0o600)
+        return dest
+
+    def install_update(self):
+        status = self.update_check(force=False)
+        if not status.get("ok"):
+            return status
+        if not status.get("updateAvailable"):
+            status["notice"] = status.get("notice") or f"Hog {status.get('currentVersion')} is already the latest release."
+            return status
+        cache = self.read_update_cache()
+        release = cache.get("release") if isinstance(cache.get("release"), dict) else None
+        if not release or not release.get("newer"):
+            return self._update_payload(ok=False, error="Hog could not find a newer release to install.")
+        version = release.get("version")
+        dest = canonical_update_path(version)
+        if dest is None:
+            return self._update_payload(release, ok=False, error="Hog could not choose a private folder for the update.")
+        try:
+            digest, source = self._resolve_update_digest(release)
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+            return self._update_payload(release, ok=False, error=str(exc) or "Hog could not read the release checksum.")
+        if not digest:
+            return self._update_payload(
+                release,
+                ok=False,
+                error="The release has no SHA-256 digest or SHA256SUMS file, so Hog will not install it.",
+            )
+        folder = dest.parent
+        folder.mkdir(parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+        try:
+            if dest.exists() or dest.is_symlink():
+                dest.unlink()
+        except OSError:
+            return self._update_payload(release, ok=False, error="Hog could not replace the previous download.")
+        try:
+            try:
+                size = int(release.get("assetSize") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            limit = UPDATE_MAX_BYTES
+            if size >= 1024:
+                limit = min(UPDATE_MAX_BYTES, size + 4096)
+            self.update_http_get(release.get("assetUrl"), timeout=120, dest=dest, limit=limit)
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            return self._update_payload(release, ok=False, error=str(exc) or "Hog could not download the update.")
+        os.chmod(dest, 0o600)
+        problem = self._verify_deb(dest, version)
+        if problem:
+            dest.unlink(missing_ok=True)
+            return self._update_payload(release, ok=False, error=problem)
+        actual = file_sha256(dest)
+        if actual != digest:
+            dest.unlink(missing_ok=True)
+            return self._update_payload(release, ok=False, error="The download did not match the release checksum.")
+        can_install, reason = self.self_update_helper_status()
+        if not can_install:
+            return self._update_payload(
+                release,
+                ok=True,
+                notice=(
+                    f"{reason} The file is saved at {dest}. "
+                    f"Install it with: sudo apt install ./{dest.name}"
+                ),
+                log=f"Verified {dest.name} against the {source}.",
+            )
+        try:
+            result = self.run_argv(
+                ["pkexec", str(SELF_UPDATE_HELPER), str(dest)],
+                timeout=SELF_UPDATE_TIMEOUT,
+            )
+        except FileNotFoundError:
+            return self._update_payload(
+                release,
+                ok=False,
+                error="pkexec is not installed, so Hog cannot open a password prompt. Install it by hand with the command below.",
+                log="",
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = f"{getattr(exc, 'stdout', '') or ''}{getattr(exc, 'stderr', '') or ''}".strip()
+            return self._update_payload(
+                release,
+                ok=False,
+                error="The update took too long. Try again, or install the package by hand.",
+                log=output[-8000:],
+            )
+        log = f"{result.stdout or ''}{result.stderr or ''}".strip()
+        if result.returncode == 0:
+            return self._update_payload(
+                release,
+                notice=f"Hog {version} is installed. Restart Hog to finish.",
+                log=log[-8000:],
+                restart=True,
+            )
+        if result.returncode in {126, 127}:
+            return self._update_payload(
+                release,
+                ok=False,
+                error="The password prompt was dismissed or pkexec could not start the installer. Try again, or install the package by hand.",
+                log=log[-8000:],
+            )
+        detail = log.strip().splitlines()
+        message = detail[-1][:180] if detail else "The update did not finish."
+        return self._update_payload(
+            release,
+            ok=False,
+            error=f"{message} See the log, or install the package by hand.",
+            log=log[-8000:],
+        )
+
     def inspect_on(self, name, sock=None):
         try:
             result = self.run_on(["inspect", name], sock=sock)
@@ -2633,6 +3137,14 @@ class Guard:
         )
 
     def handle(self, action, name="", image=""):
+        if action == "update-status":
+            return self.update_status()
+        if action == "update-check":
+            return self.update_check(force=False)
+        if action == "update-check-now":
+            return self.update_check(force=True)
+        if action == "update-install":
+            return self.install_update()
         if action == "browser-default":
             return self.browser_default_status()
         if action == "browser-default-set":

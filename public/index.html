@@ -35,7 +35,7 @@
         <div id="settings-menu" class="popover settings-menu" role="menu" hidden>
           <ul>
             <li><button type="button" role="menuitem" data-settings="docker"><span>Docker</span><small>Containers, images, and logs</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="files"><span>File manager</span><small>Library, Jellyfin, and phone folders</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="files"><span>File manager</span><small>Library, Jellyfin, and phone folders</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
           </ul>
         </div>
       </div>
@@ -168,6 +168,26 @@
           </div>
           <div id="settings-files" hidden>
             <p class="eyebrow">File manager</p>
+            <section id="hog-update-card" class="connect-card" aria-label="Hog updates">
+              <p class="eyebrow">Hog</p>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <strong>Updates</strong>
+                  <p id="hog-update-status" class="note" role="status">Checking the installed Hog version…</p>
+                  <p id="hog-update-error" class="error" role="status"></p>
+                  <p id="hog-update-manual" class="note" hidden>
+                    <a id="hog-update-link" href="https://github.com/warthog-network/hog-browser/releases/latest">Open the latest GitHub release</a>
+                    <code id="hog-update-command" class="mono"></code>
+                  </p>
+                </div>
+                <div class="hog-update-actions">
+                  <button type="button" id="hog-update-check">Check for updates</button>
+                  <button type="button" id="hog-update-install" hidden>Update</button>
+                  <button type="button" id="hog-update-restart" hidden>Restart hog</button>
+                </div>
+              </div>
+              <pre id="hog-update-log" class="mono" hidden></pre>
+            </section>
             <section id="default-browser-card" class="connect-card" aria-label="Default browser">
               <p class="eyebrow">Browser</p>
               <div class="engine-row default-browser-row">

@@ -1,0 +1,117 @@
+#!/bin/sh
+# Apply a verified Hog Browser .deb. Invoked only as:
+#   pkexec /opt/hog-browser/libexec/hog-self-update /home/<user>/.local/share/hog-browser/updates/hog-browser_<version>_amd64.deb
+# Exactly one argument. Paths are matched as data, never interpolated into a shell command.
+set -eu
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+export DEBIAN_FRONTEND=noninteractive
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: hog-self-update /home/<user>/.local/share/hog-browser/updates/hog-browser_<version>_amd64.deb" >&2
+  exit 2
+fi
+
+SRC=$1
+if ! printf '%s' "$SRC" | grep -E -q '^/home/[A-Za-z0-9._][A-Za-z0-9._-]{0,31}/\.local/share/hog-browser/updates/hog-browser_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb$'; then
+  echo "The package is not in the expected updates folder." >&2
+  exit 2
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "This helper must run as root via pkexec." >&2
+  exit 1
+fi
+
+caller=${PKEXEC_UID:-}
+if [ -z "$caller" ]; then
+  echo "Missing PKEXEC_UID." >&2
+  exit 2
+fi
+
+dir=$(dirname -- "$SRC")
+base=$(basename -- "$SRC")
+if ! printf '%s' "$base" | grep -E -q '^hog-browser_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb$'; then
+  echo "Invalid package name." >&2
+  exit 2
+fi
+ver=$(printf '%s' "$base" | sed -n 's/^hog-browser_\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)_amd64\.deb$/\1/p')
+if [ -z "$ver" ]; then
+  echo "Invalid package version." >&2
+  exit 2
+fi
+
+if [ ! -d "$dir" ]; then
+  echo "The updates folder is not valid." >&2
+  exit 2
+fi
+
+realdir=$(realpath -- "$dir")
+if ! printf '%s' "$realdir" | grep -E -q '^/home/[A-Za-z0-9._][A-Za-z0-9._-]{0,31}/\.local/share/hog-browser/updates$'; then
+  echo "The updates folder is not valid." >&2
+  exit 2
+fi
+
+dir_uid=$(stat -c '%u' "$realdir")
+dir_mode=$(stat -c '%a' "$realdir")
+if [ "$dir_uid" != "$caller" ] || [ "$dir_mode" != "700" ]; then
+  echo "The updates folder is not a private user directory." >&2
+  exit 2
+fi
+
+if [ ! -f "$SRC" ] || [ -L "$SRC" ]; then
+  echo "The package is not a regular file." >&2
+  exit 2
+fi
+
+realfile=$(realpath -- "$SRC")
+if [ "$realfile" != "$realdir/$base" ]; then
+  echo "The package path is not valid." >&2
+  exit 2
+fi
+
+file_uid=$(stat -c '%u' "$realfile")
+file_mode=$(stat -c '%a' "$realfile")
+if [ "$file_uid" != "$caller" ]; then
+  echo "The package is not owned by the calling user." >&2
+  exit 2
+fi
+# Reject group/other-writable modes (write bit 2 on the last two octal digits).
+mode_tail=$(printf '%s' "$file_mode" | tail -c 2)
+case "$mode_tail" in
+  *[2367]*)
+    echo "The package is writable by others and will not be installed." >&2
+    exit 2
+    ;;
+esac
+
+install -d -m 700 -o root -g root /var/lib/hog-browser/update
+DEST="/var/lib/hog-browser/update/$base"
+trap 'rm -f -- "$DEST"' EXIT
+cp -f -- "$realfile" "$DEST"
+chown root:root "$DEST"
+chmod 644 "$DEST"
+
+pkg=$(dpkg-deb -f -- "$DEST" Package)
+got=$(dpkg-deb -f -- "$DEST" Version)
+arch=$(dpkg-deb -f -- "$DEST" Architecture)
+if [ "$pkg" != "hog-browser" ] || [ "$arch" != "amd64" ] || [ "$got" != "$ver" ]; then
+  echo "The package metadata is not a hog-browser $ver amd64 build." >&2
+  exit 1
+fi
+
+installed=$(dpkg-query -W -f='${Version}' hog-browser 2>/dev/null || true)
+if [ -z "$installed" ]; then
+  echo "hog-browser is not installed; this helper only applies updates." >&2
+  exit 1
+fi
+if ! dpkg --compare-versions "$got" gt "$installed"; then
+  echo "Version $got is not newer than the installed $installed." >&2
+  exit 1
+fi
+
+echo "Installing hog-browser $got over $installed…"
+apt-get install -y -- "$DEST"
+echo "Installed hog-browser $got. Restart Hog to finish."
+rm -f -- "$DEST"
+trap - EXIT

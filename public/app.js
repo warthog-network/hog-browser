@@ -442,6 +442,7 @@ function showSettingsPage(page) {
   if (next === "files") {
     desktopCommand("containers:share-status");
     desktopCommand("containers:browser-default");
+    desktopCommand("containers:update-status");
   }
 }
 
@@ -2648,10 +2649,87 @@ function paintDocker(payload) {
     : "Docker is not running. Start it here, then open Ubuntu or Fedora.";
 }
 
+function paintUpdate(payload) {
+  const status = $("hog-update-status");
+  const error = $("hog-update-error");
+  const check = $("hog-update-check");
+  const install = $("hog-update-install");
+  const restart = $("hog-update-restart");
+  const manual = $("hog-update-manual");
+  const link = $("hog-update-link");
+  const command = $("hog-update-command");
+  const log = $("hog-update-log");
+  const badge = $("hog-update-menu-badge");
+  const gear = $("settings-btn");
+  if (!status || !payload || !Object.prototype.hasOwnProperty.call(payload, "currentVersion")) return;
+  if (check) {
+    delete check.dataset.busy;
+    check.disabled = false;
+  }
+  if (install) delete install.dataset.busy;
+  const current = payload.currentVersion || "";
+  const latest = payload.latestVersion || "";
+  const available = Boolean(payload.updateAvailable);
+  const canInstall = Boolean(payload.updateCanInstall);
+  const helperReady = Boolean(payload.updateHelperReady);
+  const needRestart = Boolean(payload.updateRestart);
+  if (payload.notice) status.textContent = payload.notice;
+  else if (current && latest && available) status.textContent = `This is Hog ${current}. Hog ${latest} is available.`;
+  else if (current) status.textContent = `This is Hog ${current}.`;
+  else status.textContent = "Hog could not read its current version.";
+  if (error) error.textContent = payload.ok === false ? (payload.error || "") : "";
+  if (install) {
+    install.hidden = !(canInstall && !needRestart);
+    install.disabled = install.hidden;
+  }
+  if (restart) {
+    restart.hidden = !needRestart;
+    restart.disabled = false;
+  }
+  if (check) check.hidden = needRestart;
+  if (link) {
+    const url = typeof payload.releaseUrl === "string" && payload.releaseUrl
+      ? payload.releaseUrl
+      : "https://github.com/warthog-network/hog-browser/releases/latest";
+    link.setAttribute("href", url);
+  }
+  if (command) command.textContent = payload.manualCommand || "";
+  if (manual) manual.hidden = !(available && !helperReady && (payload.manualCommand || payload.releaseUrl));
+  if (log) {
+    const text = payload.updateLog || "";
+    log.hidden = !text;
+    log.textContent = text;
+  }
+  if (gear) gear.classList.toggle("has-update", available && !needRestart);
+  if (badge) badge.hidden = !(available && !needRestart);
+}
+
+function openHogRelease(url) {
+  let allowed = "";
+  try {
+    const parsed = new URL(String(url || ""));
+    if (parsed.protocol !== "https:") return;
+    if (parsed.hostname !== "github.com") return;
+    if (!parsed.pathname.startsWith("/warthog-network/hog-browser/releases")) return;
+    allowed = parsed.toString();
+  } catch {
+    return;
+  }
+  if (typeof createTab === "function") createTab();
+  if (typeof openUrl === "function") openUrl(allowed);
+}
+
 function renderContainers(payload) {
   const list = $("container-list");
   const error = $("container-error");
   if (!list || !error || !payload) return;
+  if (Object.prototype.hasOwnProperty.call(payload, "currentVersion")
+      && !Array.isArray(payload.items)
+      && !Array.isArray(payload.shares)
+      && !Array.isArray(payload.media)) {
+    paintUpdate(payload);
+    return;
+  }
   if (Object.prototype.hasOwnProperty.call(payload, "defaultBrowser")
       && !Array.isArray(payload.items)
       && !Array.isArray(payload.shares)
@@ -2786,6 +2864,7 @@ function renderContainers(payload) {
   if (payload.commit) noteCommit(payload.commit);
 }
 window.__hogContainers = renderContainers;
+window.__hogUpdate = paintUpdate;
 
 function syncNetworkActions() {
   const chain = selectedChain();
@@ -4721,6 +4800,44 @@ function bind() {
   });
   $("tailscale-login-link").addEventListener("click", () => {
     openTailscaleUrl($("tailscale-login-link").dataset.url || "");
+  });
+
+  $("hog-update-check").addEventListener("click", () => {
+    const button = $("hog-update-check");
+    if (!button || button.dataset.busy === "1") return;
+    button.dataset.busy = "1";
+    button.disabled = true;
+    const error = $("hog-update-error");
+    const status = $("hog-update-status");
+    if (error) error.textContent = "";
+    if (status) status.textContent = "Checking GitHub for a newer Hog release…";
+    desktopCommand("containers:update-check-now");
+  });
+  $("hog-update-install").addEventListener("click", () => {
+    const button = $("hog-update-install");
+    if (!button || button.hidden || button.dataset.busy === "1") return;
+    button.dataset.busy = "1";
+    button.disabled = true;
+    const check = $("hog-update-check");
+    if (check) check.disabled = true;
+    const error = $("hog-update-error");
+    const status = $("hog-update-status");
+    if (error) error.textContent = "";
+    if (status) status.textContent = "Downloading and verifying the update…";
+    desktopCommand("containers:update-install");
+  });
+  $("hog-update-restart").addEventListener("click", () => {
+    const button = $("hog-update-restart");
+    if (!button || button.hidden) return;
+    button.disabled = true;
+    const status = $("hog-update-status");
+    if (status) status.textContent = "Restarting Hog…";
+    desktopCommand("containers:update-restart");
+  });
+  $("hog-update-link").addEventListener("click", (event) => {
+    event.preventDefault();
+    const link = $("hog-update-link");
+    openHogRelease(link && link.getAttribute("href"));
   });
 
   $("default-browser-toggle").addEventListener("click", () => {

@@ -74,8 +74,12 @@ install -m 644 "${ROOT}/packaging/99-hog-tailscale.conf" \
   "${STAGE}/etc/sysctl.d/99-hog-tailscale.conf"
 install -m 755 "${ROOT}/packaging/hog-nvidia-toolkit-install" \
   "${APP}/libexec/hog-nvidia-toolkit-install"
+install -m 755 "${ROOT}/packaging/hog-self-update" \
+  "${APP}/libexec/hog-self-update"
 install -m 644 "${ROOT}/packaging/org.hog.Browser.nvidia-toolkit-install.policy" \
   "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.nvidia-toolkit-install.policy"
+install -m 644 "${ROOT}/packaging/org.hog.Browser.self-update.policy" \
+  "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.self-update.policy"
 
 # Runtime only. Bundles are already in public/ from the build step.
 # warthog-js is compiled into the wallet bundle (and kept in node_modules).
@@ -145,8 +149,8 @@ Description: Hog Browser
  /opt/hog-browser. User data lives in ~/.local/share/hog-browser.
  Installs /etc/sysctl.d/99-hog-tailscale.conf so a Tailscale exit
  node can forward IPv4 and IPv6; apply with sudo sysctl --system.
- Ships a root helper that pkexec can run to install the NVIDIA
- Container Toolkit for Docker Engine.
+ Ships root helpers that pkexec can run to install the NVIDIA
+ Container Toolkit and to apply a verified Hog Browser update.
 CONTROL
 
 mkdir -p "${OUT_DIR}"

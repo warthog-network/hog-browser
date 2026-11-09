@@ -335,5 +335,53 @@ class JellyfinGpuToggleTest(unittest.TestCase):
 
 
 
+
+
+class SelfUpdateUiTest(unittest.TestCase):
+    def test_ui_exposes_update_controls(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        hog = (root / "hog").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        files = html.split('id="settings-files"', 1)[1]
+        self.assertIn('id="hog-update-card"', files)
+        self.assertIn('id="hog-update-check"', files)
+        self.assertIn("Check for updates", files)
+        self.assertIn('id="hog-update-install"', files)
+        self.assertIn(">Update<", files)
+        self.assertIn('id="hog-update-restart"', files)
+        self.assertIn("Restart hog", files)
+        self.assertLess(files.find('id="hog-update-card"'), files.find('id="default-browser-card"'))
+        self.assertIn('id="hog-update-menu-badge"', html)
+        self.assertIn("function paintUpdate", app)
+        self.assertIn("window.__hogUpdate = paintUpdate", app)
+        self.assertIn("containers:update-check-now", app)
+        self.assertIn("containers:update-install", app)
+        self.assertIn("containers:update-restart", app)
+        self.assertIn("containers:update-status", app)
+        self.assertIn("manualCommand", app)
+        self.assertIn("hog-update-command", app)
+        self.assertIn("sudo apt install ./", readme)
+        self.assertIn("update-status", hog)
+        self.assertIn("update-check-now", hog)
+        self.assertIn("update-install", hog)
+        self.assertIn("update-restart", hog)
+        self.assertIn("start_update_check", hog)
+        self.assertIn("restart_hog", hog)
+        self.assertIn("/usr/bin/hog-browser", hog)
+        self.assertIn("window.__hogUpdate", hog)
+        self.assertIn("Update Hog from the app", readme)
+        self.assertIn("0.1.11", readme)
+        self.assertIn("sudo apt install ./hog-browser_0.1.11_amd64.deb", readme)
+        self.assertIn("/opt/hog-browser/libexec/hog-self-update", readme)
+        self.assertIn("SHA256SUMS", readme)
+        script = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        self.assertIn("${APP}/libexec/hog-self-update", script)
+        self.assertIn("org.hog.Browser.self-update.policy", script)
+        workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("SHA256SUMS", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

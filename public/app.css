@@ -148,6 +148,18 @@ button { cursor: pointer; }
 }
 .icon { width: 26px; padding: 0; }
 #settings-btn[aria-expanded="true"], #settings-btn.is-open { color: var(--gold); }
+#settings-btn.has-update { position: relative; }
+#settings-btn.has-update::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 0 2px #18181b;
+}
 .settings-anchor { position: relative; }
 .engine-row {
   display: flex;
@@ -171,6 +183,32 @@ button { cursor: pointer; }
 #tailscale-login-link { display: inline-block; margin: 8px 0 0 10px; vertical-align: middle; }
 #jellyfin-connect + .exit-node-guide { margin-top: 10px; }
 
+#hog-update-card { margin-bottom: 12px; }
+.hog-update-actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+#hog-update-check, #hog-update-install, #hog-update-restart {
+  border: 1px solid rgba(253, 185, 19, 0.55);
+  background: #18181b;
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+#hog-update-check:disabled, #hog-update-install:disabled, #hog-update-restart:disabled { opacity: 0.6; cursor: wait; }
+#hog-update-manual { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+#hog-update-manual[hidden] { display: none; }
+#hog-update-command { display: block; margin-top: 2px; overflow-wrap: anywhere; }
+#hog-update-log { margin-top: 10px; max-height: 160px; overflow: auto; }
+.hog-update-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(253, 185, 19, 0.16);
+  color: var(--gold);
+  font-size: 11px;
+  vertical-align: middle;
+}
+#hog-update-card + #default-browser-card { margin-top: 10px; }
 #default-browser-card { margin-bottom: 12px; }
 .default-browser-row { margin-top: 8px; align-items: flex-start; }
 .default-browser-copy { flex: 1; min-width: 0; }
