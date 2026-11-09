@@ -17,7 +17,7 @@ import {
   TransactionContext,
   Wart,
   encodeLimitPrice,
-} from "../../warthog-js/index.js";
+} from "warthog-js";
 import {
   accountFromPrivateKey,
   createAccount,

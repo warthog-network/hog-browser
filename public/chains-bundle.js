@@ -25499,7 +25499,7 @@ var wordlists = {
   en: LangEn.wordlist()
 };
 
-// ../warthog-js/src/types/Funds.js
+// node_modules/warthog-js/src/types/Funds.js
 var TokenPrecision = class _TokenPrecision {
   /** Pre-configured WART precision (8 decimals) */
   static WART = new _TokenPrecision(8);

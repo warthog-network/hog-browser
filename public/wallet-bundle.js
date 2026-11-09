@@ -23462,7 +23462,7 @@ var wordlists = {
   en: LangEn.wordlist()
 };
 
-// ../warthog-js/src/types/Funds.js
+// node_modules/warthog-js/src/types/Funds.js
 var MAX_U64 = 0xffffffffffffffffn;
 var TokenPrecision = class _TokenPrecision {
   /** Pre-configured WART precision (8 decimals) */
@@ -23750,7 +23750,7 @@ var CompactFee = class _CompactFee {
   }
 };
 
-// ../warthog-js/src/util/frexp.js
+// node_modules/warthog-js/src/util/frexp.js
 function frexp(arg) {
   arg = Number(arg);
   const result = [arg, 0];
@@ -23778,7 +23778,7 @@ function frexp(arg) {
   return result;
 }
 
-// ../warthog-js/src/types/Price.js
+// node_modules/warthog-js/src/types/Price.js
 var MIN_MANTISSA = 32768;
 var MAX_MANTISSA = 65535;
 var MAX_EXPONENT = 255;
@@ -23913,7 +23913,7 @@ var Price = class _Price {
   }
 };
 
-// ../warthog-js/src/util/price.js
+// node_modules/warthog-js/src/util/price.js
 function encodeLimitPrice(priceStr, decimals = 8, { ceil = false } = {}) {
   const normalized = String(priceStr).trim().replace(",", ".");
   const price = parseFloat(normalized);

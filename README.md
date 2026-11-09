@@ -27,14 +27,12 @@ User data (wallet, cache, shares) stays in `~/.local/share/hog-browser` and is n
 
 ## Run from source
 
-Needs Ubuntu packages for the GTK shell, plus Node 18+. The wallet bundle build also needs [warthog-js](https://github.com/warthog-network/warthog-js) checked out next to this repo:
+Needs Ubuntu packages for the GTK shell, plus Node 18+. `warthog-js` is pulled from GitHub by `npm ci` (pinned in `package.json`).
 
 ```bash
 sudo apt install python3-gi python3-gi-cairo python3-cairo \
   gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gir1.2-pango-1.0 nodejs npm
-cd some-parent/
-git clone https://github.com/warthog-network/warthog-js.git
-git clone <hog-browser-repo-url> hog-browser
+git clone https://github.com/warthog-network/hog-browser.git
 cd hog-browser
 npm ci
 npm run build
@@ -46,7 +44,6 @@ If `public/*-bundle.js` are already present you can skip `npm run build` and run
 ## Build a .deb locally
 
 ```bash
-# warthog-js must sit next to hog-browser (or set HOG_WARTHOG_JS)
 ./packaging/build-deb.sh
 # writes dist/hog-browser_<version>_<arch>.deb
 ```
@@ -56,7 +53,7 @@ No root is required for the build. Installing the package still needs `sudo apt 
 ## Development
 
 ```bash
-npm test          # Node tests (also needs ../warthog-js)
+npm test          # Node tests
 python3 -m unittest discover -s test -p '*_test.py'
 npm run build     # rebuild public/*-bundle.js via esbuild
 ```

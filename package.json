@@ -1,7 +1,7 @@
 {
   "name": "hog-browser",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A small local browser with a Warthog wallet in the sidebar.",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "ethers": "^6.16.0",
+    "warthog-js": "github:warthog-network/warthog-js#199dca19d6675014b19051e6dba2ad1f3a4d2cd8",
     "ws": "^8.21.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0"

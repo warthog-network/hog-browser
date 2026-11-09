@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Build a .deb that installs Hog Browser under /opt/hog-browser.
 # Does not need root. Leaves the source tree's node_modules alone by building
-# in a temporary copy. Needs the warthog-js sibling (../warthog-js) for the
-# wallet bundle build; override with HOG_WARTHOG_JS=/path/to/warthog-js.
+# in a temporary copy. warthog-js comes from npm (GitHub pin in package.json).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,14 +20,6 @@ if ! command -v rsync >/dev/null; then
   exit 1
 fi
 
-WARTHOG_JS="${HOG_WARTHOG_JS:-$ROOT/../warthog-js}"
-if [[ ! -d "$WARTHOG_JS/src" ]]; then
-  echo "warthog-js not found at ${WARTHOG_JS}" >&2
-  echo "Clone https://github.com/warthog-network/warthog-js next to hog-browser," >&2
-  echo "or set HOG_WARTHOG_JS to its path. The wallet bundle imports it." >&2
-  exit 1
-fi
-
 VERSION="$(node -p "require('./package.json').version")"
 ARCH="$(dpkg --print-architecture)"
 PKG_NAME="hog-browser_${VERSION}_${ARCH}"
@@ -39,12 +30,10 @@ WORK="$(mktemp -d)"
 STAGE="${WORK}/stage"
 trap 'rm -rf "${WORK}"' EXIT
 
-# Layout matches the real tree: …/hog-browser/src → ../../warthog-js
 HB="${WORK}/hog-browser"
-WJ="${WORK}/warthog-js"
 
-echo "==> Copying hog-browser + warthog-js into a clean build tree"
-mkdir -p "${HB}" "${WJ}"
+echo "==> Copying hog-browser into a clean build tree"
+mkdir -p "${HB}"
 rsync -a \
   --exclude '.git/' \
   --exclude 'node_modules/' \
@@ -54,12 +43,6 @@ rsync -a \
   --exclude '.github/' \
   --exclude 'packaging/' \
   "${ROOT}/" "${HB}/"
-rsync -a \
-  --exclude '.git/' \
-  --exclude 'node_modules/' \
-  --exclude '__pycache__/' \
-  --exclude '*.pyc' \
-  "${WARTHOG_JS}/" "${WJ}/"
 
 echo "==> npm ci + build (bundles) + prune production deps"
 (
@@ -71,7 +54,6 @@ echo "==> npm ci + build (bundles) + prune production deps"
   # npm prune can leave optional @esbuild/* platform stubs; drop them.
   rm -rf node_modules/esbuild node_modules/@esbuild
 )
-
 
 echo "==> Staging package tree"
 APP="${STAGE}/opt/hog-browser"
@@ -87,7 +69,7 @@ install -m 644 "${ROOT}/packaging/99-hog-tailscale.conf" \
   "${STAGE}/etc/sysctl.d/99-hog-tailscale.conf"
 
 # Runtime only. Bundles are already in public/ from the build step.
-# warthog-js is compiled into the wallet bundle; do not ship the sibling.
+# warthog-js is compiled into the wallet bundle (and kept in node_modules).
 cp -a \
   "${HB}/hog" \
   "${HB}/guard.py" \

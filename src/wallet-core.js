@@ -1,7 +1,5 @@
 import { ethers } from "ethers";
-import { Funds, Liquidity, TokenPrecision, Wart } from "../../warthog-js/src/types/Funds.js";
-import { Price } from "../../warthog-js/src/types/Price.js";
-import { encodeLimitPrice } from "../../warthog-js/src/util/price.js";
+import { Funds, Liquidity, TokenPrecision, Wart, Price, encodeLimitPrice } from "warthog-js";
 
 /** 1 WART = 1e8 E8 units. */
 export const WART_E8 = 100_000_000n;
