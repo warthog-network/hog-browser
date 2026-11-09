@@ -1,0 +1,2145 @@
+#!/usr/bin/env python3
+"""Hog as its own Ubuntu window. This is not a tab in Chrome or Firefox."""
+
+import os
+
+# This WebKitGTK build leaves SharedArrayBuffer hidden until the option is set.
+# The in-browser Warthog node needs it for its threads.
+os.environ.setdefault("JSC_useSharedArrayBuffer", "1")
+
+import json
+import math
+import cairo as pycairo
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+from pathlib import Path
+
+from guard import Guard
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("WebKit2", "4.1")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo, WebKit2
+
+ROOT = Path(__file__).resolve().parent
+DAPP_PROVIDER_SCRIPT = (ROOT / "public" / "dapp-provider.js").read_text(encoding="utf-8")
+PORT = int(os.environ.get("HOG_PORT", "4188"))
+URL = f"http://127.0.0.1:{PORT}/"
+DATA = Path(os.environ.get("HOG_DATA", Path.home() / ".local" / "share" / "hog-browser"))
+NODE_PORT = 43100
+APP_ID = os.environ.get("HOG_APP_ID", "org.hog.Browser")
+
+
+def sandbox_available():
+    context = WebKit2.WebContext()
+    try:
+        context.set_sandbox_enabled(True)
+        return bool(context.get_sandbox_enabled())
+    except Exception:
+        return False
+
+
+def harden_page_context(context, manager=None):
+    """Page processes only. The wallet UI stays in the Hog shell."""
+    try:
+        context.set_sandbox_enabled(True)
+    except Exception:
+        pass
+    try:
+        context.set_process_model(WebKit2.ProcessModel.MULTIPLE_SECONDARY_PROCESSES)
+    except Exception:
+        pass
+    if manager is None:
+        return
+    try:
+        manager.set_itp_enabled(True)
+    except Exception:
+        pass
+
+
+def port_open(port):
+    with socket.socket() as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def node_binary():
+    found = shutil.which("node")
+    if found:
+        return found
+    for candidate in ("/usr/local/bin/node", "/usr/bin/node"):
+        if Path(candidate).is_file():
+            return candidate
+    sys.exit("Hog needs Node.js. Install it, then run this again.")
+
+
+def page_origin(uri):
+    """http(s) origin of a page view. Hog's own ports are not a site."""
+    parts = split_uri(uri)
+    if parts is None:
+        return ""
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return ""
+    host = (parts.hostname or "").strip("[]").lower()
+    if not host:
+        return ""
+    port = parts.port
+    if host in ("127.0.0.1", "localhost") and port in (PORT, NODE_PORT):
+        return ""
+    default = 443 if scheme == "https" else 80
+    if port and port != default:
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def split_uri(uri):
+    try:
+        return urllib.parse.urlsplit(uri or "")
+    except Exception:
+        return None
+
+
+def in_page_navigation(uri):
+    """Schemes a page uses for its own frames and scripts, not a new site."""
+    parts = split_uri(uri)
+    if parts is None:
+        return False
+    scheme = parts.scheme.lower()
+    if scheme in ("blob", "data", "javascript"):
+        return True
+    if scheme != "about":
+        return False
+    return parts.path.lower() in ("blank", "srcdoc")
+
+
+def quiet_load_error(view, uri, error):
+    """True when a failure should leave the page on screen."""
+    try:
+        if error.matches(WebKit2.NetworkError.quark(), WebKit2.NetworkError.CANCELLED):
+            return True
+        if error.matches(WebKit2.NetworkError.quark(), WebKit2.NetworkError.UNKNOWN_PROTOCOL):
+            return True
+        policy = WebKit2.PolicyError.quark()
+        for code in (
+            WebKit2.PolicyError.FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE,
+            WebKit2.PolicyError.CANNOT_SHOW_URI,
+            WebKit2.PolicyError.CANNOT_USE_RESTRICTED_PORT,
+        ):
+            if error.matches(policy, code):
+                return True
+    except Exception:
+        pass
+    parts = split_uri(uri)
+    scheme = parts.scheme.lower() if parts is not None else ""
+    if scheme in ("http", "https"):
+        return False
+    try:
+        current = view.get_uri() or ""
+    except Exception:
+        current = ""
+    return current.startswith("http://") or current.startswith("https://")
+
+
+# WebKitGTK paints a solid black rectangle when an SVG uses CSS drop-shadow
+# and the view is short. Page scripts drop only that function.
+SVG_DROP_SHADOW_FIX = r"""
+(function () {
+  var pattern = /drop-shadow\((?:[^()]|\([^()]*\))*\)/g;
+  function scrub(root) {
+    if (!root || root.nodeType !== 1) return;
+    var list = root.localName === "svg" ? [root] : (root.querySelectorAll ? root.querySelectorAll("svg") : []);
+    for (var i = 0; i < list.length; i++) {
+      var svg = list[i];
+      var filter;
+      try { filter = getComputedStyle(svg).filter; } catch (e) { continue; }
+      if (!filter || filter === "none" || filter.indexOf("drop-shadow") === -1) continue;
+      var next = filter.replace(pattern, " ").replace(/\s+/g, " ").trim();
+      svg.style.setProperty("filter", next || "none", "important");
+    }
+  }
+  var armed = false;
+  function arm() {
+    var root = document.documentElement;
+    if (!root) return;
+    scrub(root);
+    if (armed) return;
+    armed = true;
+    var observer = new MutationObserver(function (records) {
+      for (var i = 0; i < records.length; i++) {
+        var nodes = records[i].addedNodes;
+        for (var j = 0; j < nodes.length; j++) scrub(nodes[j]);
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    var frames = 0;
+    function tick() {
+      scrub(document.documentElement);
+      frames += 1;
+      if (frames < 45) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+  arm();
+  document.addEventListener("DOMContentLoaded", arm);
+  window.addEventListener("load", function () { scrub(document.documentElement); });
+})();
+"""
+
+# Wayland does not support window shapes. A GTK grip is a square window, and
+# the pixels outside its rounded end paint black over the page. The grip is
+# drawn in the page instead, which already composites a real rounded corner.
+# The host fills the page viewport. A 0×0 host becomes the containing block
+# once the page animates (transform, filter, will-change), and both grips
+# then paint in the top-left corner where clicks miss them. Grips stay
+# absolute inside that host. Inline !important keeps page CSS from collapsing it.
+# The rules go in an adopted stylesheet. A <style> element is blocked here:
+# the site's style-src hashes make the browser ignore 'unsafe-inline'.
+EDGE_GRIP_SCRIPT = r"""
+(function () {
+  if (window.top !== window) return;
+  var HOST = "hog-edge-host";
+  function post(msg) {
+    try { window.webkit.messageHandlers.hogedge.postMessage(msg); } catch (e) {}
+  }
+  function pinHost(host) {
+    var props = {
+      position: "fixed",
+      top: "0px",
+      left: "0px",
+      right: "0px",
+      bottom: "0px",
+      width: "auto",
+      height: "auto",
+      margin: "0",
+      padding: "0",
+      border: "0",
+      transform: "none",
+      filter: "none",
+      "backdrop-filter": "none",
+      "-webkit-backdrop-filter": "none",
+      contain: "none",
+      "will-change": "auto",
+      overflow: "visible",
+      "z-index": "2147483646",
+      "pointer-events": "none",
+      background: "transparent",
+      display: "block",
+      opacity: "1",
+      visibility: "visible",
+      "max-width": "none",
+      "max-height": "none",
+      "min-width": "0",
+      "min-height": "0",
+      "box-sizing": "border-box"
+    };
+    Object.keys(props).forEach(function (key) {
+      host.style.setProperty(key, props[key], "important");
+    });
+  }
+  function ensure() {
+    var root = document.documentElement;
+    if (!root) return null;
+    var host = document.getElementById(HOST);
+    if (host && host.shadowRoot) {
+      if (host.parentNode !== root) root.appendChild(host);
+      pinHost(host);
+      return host.shadowRoot;
+    }
+    if (host) host.remove();
+    host = document.createElement("div");
+    host.id = HOST;
+    pinHost(host);
+    host.attachShadow({ mode: "open" });
+    var css = [
+      ":host { all: initial; position: fixed !important; top: 0 !important; left: 0 !important;",
+      "right: 0 !important; bottom: 0 !important; width: auto !important; height: auto !important;",
+      "margin: 0 !important; transform: none !important; filter: none !important;",
+      "backdrop-filter: none !important; -webkit-backdrop-filter: none !important;",
+      "contain: none !important; will-change: auto !important; overflow: visible !important;",
+      "z-index: 2147483646 !important; pointer-events: none !important; display: block !important;",
+      "opacity: 1 !important; visibility: visible !important; max-width: none !important; max-height: none !important; }",
+      "[hidden] { display: none !important; }",
+      "button.grip { all: initial; position: absolute; top: 72px; box-sizing: border-box;",
+      "width: 16px; height: 36px; display: flex; align-items: center; justify-content: center;",
+      "background: #fdb913; color: #f4f4f5; border: 0; margin: 0; padding: 0;",
+      "cursor: grab; pointer-events: auto; z-index: 2147483647; touch-action: none;",
+      "font: 600 13px/1 'Segoe UI', 'Helvetica Neue', sans-serif; user-select: none;",
+      "transition: width .18s ease, background .18s ease; }",
+      "button.grip.tabs { left: 0; right: auto; border-radius: 0 8px 8px 0; }",
+      "button.grip.wallet { left: auto; right: 0; border-radius: 8px 0 0 8px; }",
+      "button.grip.hot { width: 112px; background: #242624; border: 1px solid rgba(255,255,255,.16);",
+      "box-shadow: 0 8px 18px #00000055; }",
+      "button.grip.tabs.hot { left: 2px; right: auto; border-radius: 0 999px 999px 0; border-left: 0; justify-content: flex-start; padding: 0 12px; }",
+      "button.grip.wallet.hot { left: auto; right: 2px; border-radius: 999px 0 0 999px; border-right: 0; justify-content: flex-end; padding: 0 12px; }",
+      "button.grip.drag, button.grip.drag.hot { width: 16px; padding: 0; background: #fdb913; border: 0; box-shadow: none; cursor: grabbing; }",
+      "button.grip.tabs.drag { left: 0; right: auto; border-radius: 0 8px 8px 0; }",
+      "button.grip.wallet.drag { left: auto; right: 0; border-radius: 8px 0 0 8px; }",
+      ".dots { width: 9px; height: 9px; display: grid; grid-template-columns: 3px 3px; gap: 3px; }",
+      "button.grip.hot:not(.drag) .dots { display: none; }",
+      ".dots i { width: 3px; height: 3px; border-radius: 50%; background: #2a1d05; display: block; }",
+      ".label { display: none; white-space: nowrap; }",
+      "button.grip.hot:not(.drag) .label { display: block; }",
+      "#menu { position: absolute; inset: 0; z-index: 2147483647; pointer-events: none; }",
+      ".panel { position: absolute; box-sizing: border-box; background: #18181b; color: #f4f4f5;",
+      "border: 1px solid rgba(253,185,19,.35); border-radius: 14px; box-shadow: 0 16px 32px -18px #000;",
+      "overflow: hidden; pointer-events: auto; font: 13px/1.3 'Segoe UI','Helvetica Neue',sans-serif; }",
+      ".panel.suggestions { padding: 6px; }",
+      ".panel.history { padding: 14px; }",
+      ".panel .list { max-height: 280px; overflow: auto; }",
+      ".panel.history .list { margin-top: 8px; }",
+      ".panel button.item, .panel button.clear { all: initial; box-sizing: border-box; cursor: pointer;",
+      "font: 13px/1.3 'Segoe UI','Helvetica Neue',sans-serif; color: #f4f4f5; }",
+      ".panel button.item { display: block; width: 100%; text-align: left; background: transparent;",
+      "border-radius: 10px; padding: 8px 10px; }",
+      ".panel button.item span, .panel button.item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+      ".panel button.item small { color: #a1a1aa; font-size: 11px; margin-top: 2px; }",
+      ".panel button.item:hover { background: rgba(253,185,19,.12); }",
+      ".panel .head { display: flex; justify-content: space-between; align-items: center; }",
+      ".panel .head strong { font: 600 13px/1 'Segoe UI',sans-serif; }",
+      ".panel button.clear { color: #a1a1aa; font-size: 12px; border-radius: 8px; padding: 4px 8px; }",
+      ".panel button.clear:hover { color: #f4f4f5; background: #ffffff12; }",
+      ".panel p { margin: 8px 4px; color: #a1a1aa; }",
+      ".panel.settings { padding: 8px; }",
+      ".panel.settings .list { display: flex; flex-direction: column; gap: 8px; margin: 0; max-height: none; }",
+      ".panel.settings button.item span, .panel.settings button.item small { overflow: visible; text-overflow: clip; white-space: normal; }",
+      ".panel.settings button.item.amber { box-shadow: inset 3px 0 0 #e79300; }",
+      ".panel.settings button.item.flare { box-shadow: inset 3px 0 0 #f25c05; }",
+      ".panel.settings button.item.current { background: rgba(253,185,19,.12); }"
+    ].join("");
+    try {
+      var sheet = new CSSStyleSheet();
+      sheet.replaceSync(css);
+      host.shadowRoot.adoptedStyleSheets = [sheet];
+    } catch (e) {}
+    host.shadowRoot.innerHTML = [
+      "<button type='button' id='tabs' class='grip tabs' hidden>",
+      "<span class='dots'><i></i><i></i><i></i><i></i></span><span class='label'>Tabs ›</span></button>",
+      "<button type='button' id='wallet' class='grip wallet' hidden>",
+      "<span class='dots'><i></i><i></i><i></i><i></i></span><span class='label'>‹ Wallet</span></button>",
+      "<div id='menu' hidden></div>"
+    ].join("");
+    root.appendChild(host);
+    ["tabs", "wallet"].forEach(function (side) { bind(host.shadowRoot.getElementById(side), side); });
+    return host.shadowRoot;
+  }
+  function clamp(btn, top) {
+    var height = btn.offsetHeight || 36;
+    var limit = Math.max(8, window.innerHeight - height - 8);
+    if (top < 8) return 8;
+    if (top > limit) return limit;
+    return Math.round(top);
+  }
+  function bind(btn, side) {
+    var originY = 0;
+    var originTop = 0;
+    var active = false;
+    var moved = false;
+    btn.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0) return;
+      active = true;
+      moved = false;
+      originY = event.clientY;
+      originTop = parseFloat(btn.style.top) || 0;
+      btn.dataset.drag = "1";
+      try { btn.setPointerCapture(event.pointerId); } catch (e) {}
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    btn.addEventListener("pointermove", function (event) {
+      if (!active) return;
+      var dy = event.clientY - originY;
+      if (!moved && Math.abs(dy) < 4) return;
+      moved = true;
+      btn.classList.add("drag");
+      btn.classList.remove("hot");
+      var next = clamp(btn, originTop + dy);
+      btn.style.top = next + "px";
+      post("move:" + side + ":" + next);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    function stop(event) {
+      if (!active) return;
+      active = false;
+      btn.classList.remove("drag");
+      delete btn.dataset.drag;
+      if (moved) post("end:" + side);
+      else post("click:" + side);
+      if (event) { event.preventDefault(); event.stopPropagation(); }
+    }
+    btn.addEventListener("pointerup", stop);
+    btn.addEventListener("pointercancel", stop);
+    btn.addEventListener("pointerenter", function () {
+      if (btn.classList.contains("drag")) return;
+      btn.classList.add("hot");
+    });
+    btn.addEventListener("pointerleave", function () {
+      if (btn.classList.contains("drag")) return;
+      btn.classList.remove("hot");
+    });
+    btn.addEventListener("contextmenu", function (event) { event.preventDefault(); });
+  }
+  function drawMenu(state) {
+    var root = ensure();
+    if (!root) return;
+    var box = root.getElementById("menu");
+    if (!box) return;
+    var menus = state && state.menus ? state.menus : [];
+    window.__hogMenuOpen = menus.length > 0;
+    if (!menus.length) {
+      box.hidden = true;
+      box.replaceChildren();
+      return;
+    }
+    box.hidden = false;
+    box.replaceChildren();
+    menus.forEach(function (menu) {
+      if (!menu || !menu.w || menu.w < 2) return;
+      var panel = document.createElement("div");
+      var kind = menu.kind === "history" || menu.kind === "settings" ? menu.kind : "suggestions";
+      panel.className = "panel " + kind;
+      panel.style.left = Math.round(Number(menu.x) || 0) + "px";
+      panel.style.top = Math.round(Number(menu.y) || 0) + "px";
+      panel.style.width = Math.round(Number(menu.w)) + "px";
+      if (menu.kind === "history") {
+        var head = document.createElement("div");
+        head.className = "head";
+        var strong = document.createElement("strong");
+        strong.textContent = "History";
+        var clear = document.createElement("button");
+        clear.type = "button";
+        clear.className = "clear";
+        clear.textContent = "Clear";
+        clear.addEventListener("pointerdown", function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          post("menu:clear");
+        });
+        head.append(strong, clear);
+        panel.append(head);
+      }
+      var list = document.createElement("div");
+      list.className = "list";
+      (menu.items || []).forEach(function (item, index) {
+        if (!item || item.inert) {
+          var note = document.createElement("p");
+          note.textContent = (item && item.title) || "";
+          list.append(note);
+          return;
+        }
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "item";
+        if (kind === "settings") {
+          button.classList.add(item.accent === "flare" ? "flare" : "amber");
+          if (item.current) button.classList.add("current");
+        }
+        var title = document.createElement("span");
+        title.textContent = item.title || "";
+        var sub = document.createElement("small");
+        sub.textContent = item.sub || "";
+        button.append(title, sub);
+        button.addEventListener("pointerdown", function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          post("menu:" + kind + ":" + index);
+        });
+        list.append(button);
+      });
+      panel.append(list);
+      box.append(panel);
+    });
+  }
+  window.__hogMenu = function (state) {
+    window.__hogMenuState = state;
+    drawMenu(state);
+  };
+  if (!window.__hogMenuDismissWatch) {
+    window.__hogMenuDismissWatch = true;
+    document.addEventListener("pointerdown", function (event) {
+      if (!window.__hogMenuOpen) return;
+      var host = document.getElementById(HOST);
+      var path = event.composedPath ? event.composedPath() : [];
+      if (host && path.indexOf(host) !== -1) return;
+      post("menu:dismiss");
+    }, true);
+  }
+  window.__hogEdgeGrips = function (state) {
+    window.__hogEdgeState = state;
+    var root = ensure();
+    if (!root || !state) return;
+    ["tabs", "wallet"].forEach(function (side) {
+      var btn = root.getElementById(side);
+      if (!btn) return;
+      var show = !!state[side];
+      var top = Math.round(Number(state[side + "Top"]));
+      if (btn.dataset.drag !== "1" && isFinite(top)) btn.style.top = top + "px";
+      btn.hidden = !show;
+      if (!show) btn.classList.remove("hot");
+    });
+  };
+  function arm() {
+    var root = document.documentElement;
+    if (!root) return;
+    ensure();
+    if (!window.__hogEdgeWatch) {
+      window.__hogEdgeWatch = true;
+      new MutationObserver(function () {
+        if (document.getElementById(HOST)) return;
+        ensure();
+        if (window.__hogMenuState) drawMenu(window.__hogMenuState);
+      }).observe(root, { childList: true });
+      window.addEventListener("resize", function () {
+        var host = document.getElementById(HOST);
+        if (host) pinHost(host);
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", function () {
+          var host = document.getElementById(HOST);
+          if (host) pinHost(host);
+        });
+      }
+    }
+    if (window.__hogEdgeState) window.__hogEdgeGrips(window.__hogEdgeState);
+  }
+  arm();
+  document.addEventListener("DOMContentLoaded", arm);
+})();
+"""
+
+
+class PageHost:
+    """Real WebKit pages over the content area. The wallet stays on the chrome view."""
+
+    def __init__(self, chrome):
+        self.chrome = chrome
+        self.box = Gtk.Stack()
+        self.box.set_transition_type(Gtk.StackTransitionType.NONE)
+        self.box.set_no_show_all(True)
+        self.box.set_halign(Gtk.Align.FILL)
+        self.box.set_valign(Gtk.Align.FILL)
+        self.views = {}
+        self.isolated = {}
+        self.shared_context = None
+        self.shown = None
+        self.on_view = None
+        self.grip_paint = None
+        self.menu_paint = None
+        self.on_grip_move = None
+
+    def widget(self):
+        return self.box
+
+    def tell(self, payload):
+        raw = json.dumps(payload)
+        self.chrome.run_javascript(f"window.__hogPage && window.__hogPage({raw});", None, None, None)
+
+    def tell_chrome(self, script):
+        try:
+            self.chrome.run_javascript(script, None, None, None)
+        except Exception:
+            pass
+
+    def paint_grips(self, tabs_on, tabs_top, wallet_on, wallet_top):
+        self.grip_paint = (
+            bool(tabs_on),
+            int(tabs_top),
+            bool(wallet_on),
+            int(wallet_top),
+        )
+        self.repaint_grips()
+
+    def repaint_grips(self):
+        if self.grip_paint is None or not self.shown:
+            return
+        view = self.views.get(self.shown)
+        if view is None:
+            return
+        tabs_on, tabs_top, wallet_on, wallet_top = self.grip_paint
+        payload = json.dumps({
+            "tabs": tabs_on,
+            "tabsTop": tabs_top,
+            "wallet": wallet_on,
+            "walletTop": wallet_top,
+        })
+        try:
+            view.run_javascript(
+                f"window.__hogEdgeGrips && window.__hogEdgeGrips({payload})",
+                None,
+                None,
+                None,
+            )
+        except Exception:
+            pass
+
+    def paint_menu(self, raw):
+        if raw is None:
+            self.menu_paint = None
+        else:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return
+            if not isinstance(data, dict):
+                return
+            self.menu_paint = data
+        self.repaint_menu()
+
+    def repaint_menu(self):
+        if not self.shown:
+            return
+        view = self.views.get(self.shown)
+        if view is None:
+            return
+        arg = "null" if self.menu_paint is None else json.dumps(self.menu_paint)
+        try:
+            view.run_javascript(f"window.__hogMenu && window.__hogMenu({arg})", None, None, None)
+        except Exception:
+            pass
+
+    def on_grip_message(self, manager, result):
+        try:
+            value = result.get_js_value()
+            if value is None or not value.is_string():
+                return
+            command = value.to_string()
+        except Exception:
+            return
+        shown = self.views.get(self.shown) if self.shown else None
+        if shown is None or shown.get_user_content_manager() != manager:
+            return
+        if command.startswith("dapp:"):
+            self.on_dapp_request(shown, command[5:])
+            return
+        parts = command.split(":")
+        if len(parts) >= 2 and parts[0] == "menu":
+            self.on_menu_message(parts)
+            return
+        if len(parts) < 2 or parts[1] not in ("tabs", "wallet"):
+            return
+        kind, side = parts[0], parts[1]
+        if kind == "click" and len(parts) == 2:
+            self.tell_chrome(f"window.__hogEdgeClick && window.__hogEdgeClick('{side}')")
+            return
+        if kind == "end" and len(parts) == 2:
+            self.tell_chrome(f"window.__hogEdgeEnd && window.__hogEdgeEnd('{side}')")
+            return
+        if kind != "move" or len(parts) != 3:
+            return
+        try:
+            top = int(parts[2])
+        except ValueError:
+            return
+        if top < -200 or top > 10000:
+            return
+        self.tell_chrome(f"window.__hogEdgeMove && window.__hogEdgeMove('{side}', {top})")
+        if self.on_grip_move is not None:
+            self.on_grip_move(side, top)
+
+    def on_menu_message(self, parts):
+        kind = parts[1]
+        if kind == "dismiss" and len(parts) == 2:
+            self.tell_chrome("window.__hogMenuDismiss && window.__hogMenuDismiss()")
+            return
+        if kind == "clear" and len(parts) == 2:
+            self.tell_chrome("window.__hogMenuClear && window.__hogMenuClear()")
+            return
+        if kind not in ("suggestions", "history", "settings") or len(parts) != 3:
+            return
+        try:
+            index = int(parts[2])
+        except ValueError:
+            return
+        if index < 0 or index > 40:
+            return
+        self.tell_chrome(
+            f"window.__hogMenuActivate && window.__hogMenuActivate('{kind}', {index})"
+        )
+
+    def on_dapp_request(self, view, raw):
+        if len(raw) > 200_000:
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(data, dict):
+            return
+        req_id = data.get("id")
+        method = data.get("method")
+        params = data.get("params", [])
+        if isinstance(req_id, bool) or not isinstance(req_id, int) or req_id < 1 or req_id > 10**15:
+            return
+        if not isinstance(method, str) or not method or len(method) > 80:
+            return
+        if not isinstance(params, list):
+            return
+        origin = page_origin(view.get_uri() or "")
+        tab = self.shown or ""
+        if not origin:
+            self.run_on_view(view, self.dapp_resolve_script(req_id, False, {
+                "code": 4001,
+                "message": "This page cannot connect.",
+            }))
+            return
+        payload = {"id": req_id, "tab": tab, "origin": origin, "method": method, "params": params}
+        self.tell_chrome(f"window.__hogDappAsk && window.__hogDappAsk({json.dumps(payload)})")
+
+    def deliver_dapp_reply(self, raw):
+        data = self.dapp_object(raw)
+        if data is None:
+            return
+        req_id = data.get("id")
+        tab = data.get("tab")
+        if isinstance(req_id, bool) or not isinstance(req_id, int):
+            return
+        if not isinstance(tab, str) or not tab:
+            return
+        view = self.views.get(tab)
+        if view is None:
+            return
+        ok = bool(data.get("ok"))
+        payload = data.get("payload")
+        self.run_on_view(view, self.dapp_resolve_script(req_id, ok, payload))
+
+    def deliver_dapp_emit(self, raw):
+        data = self.dapp_object(raw)
+        if data is None:
+            return
+        origin = data.get("origin")
+        event = data.get("event")
+        if not isinstance(origin, str) or not origin.startswith(("https://", "http://")):
+            return
+        if event not in ("accountsChanged", "chainChanged"):
+            return
+        payload = data.get("payload")
+        if event == "accountsChanged":
+            if not isinstance(payload, list) or len(payload) > 4:
+                return
+            if any(not isinstance(item, str) or not item.startswith("0x") or len(item) != 42 for item in payload):
+                return
+        elif not isinstance(payload, str) or not payload.startswith("0x") or len(payload) > 12:
+            return
+        script = f"window.__hogDappEmit && window.__hogDappEmit({json.dumps(event)}, {json.dumps(payload)})"
+        for view in self.views.values():
+            if page_origin(view.get_uri() or "") == origin:
+                self.run_on_view(view, script)
+
+    def dapp_object(self, raw):
+        if not isinstance(raw, str) or len(raw) > 200_000:
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def dapp_resolve_script(self, req_id, ok, payload):
+        flag = "true" if ok else "false"
+        return f"window.__hogDappResolve && window.__hogDappResolve({int(req_id)}, {flag}, {json.dumps(payload)})"
+
+    def run_on_view(self, view, script):
+        try:
+            view.run_javascript(script, None, None, None)
+        except Exception:
+            pass
+
+    def shared(self):
+        if self.shared_context is not None:
+            return self.shared_context
+        data = DATA / "pages"
+        cache = DATA / "pages-cache"
+        data.mkdir(parents=True, exist_ok=True)
+        cache.mkdir(parents=True, exist_ok=True)
+        manager = WebKit2.WebsiteDataManager(
+            base_data_directory=str(data),
+            base_cache_directory=str(cache),
+        )
+        context = WebKit2.WebContext.new_with_website_data_manager(manager)
+        harden_page_context(context, manager)
+        self.shared_context = context
+        return context
+
+    def tune(self, view):
+        settings = view.get_settings()
+        settings.set_enable_javascript(True)
+        settings.set_enable_smooth_scrolling(True)
+        settings.set_enable_webgl(True)
+        settings.set_enable_media(True)
+        settings.set_javascript_can_access_clipboard(False)
+        try:
+            settings.set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.ALWAYS)
+        except Exception:
+            pass
+        background = Gdk.RGBA()
+        background.parse("#ffffff")
+        view.set_background_color(background)
+        manager = view.get_user_content_manager()
+        try:
+            manager.register_script_message_handler("hogedge")
+            manager.connect("script-message-received::hogedge", self.on_grip_message)
+        except Exception:
+            pass
+        manager.add_script(WebKit2.UserScript.new(
+            SVG_DROP_SHADOW_FIX,
+            WebKit2.UserContentInjectedFrames.ALL_FRAMES,
+            WebKit2.UserScriptInjectionTime.START,
+            None,
+            None,
+        ))
+        manager.add_script(WebKit2.UserScript.new(
+            EDGE_GRIP_SCRIPT,
+            WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserScriptInjectionTime.START,
+            None,
+            None,
+        ))
+        manager.add_script(WebKit2.UserScript.new(
+            DAPP_PROVIDER_SCRIPT,
+            WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserScriptInjectionTime.START,
+            None,
+            None,
+        ))
+
+    def allowed(self, uri):
+        parts = split_uri(uri)
+        if parts is None or parts.scheme not in ("http", "https"):
+            return False
+        if parts.username or parts.password:
+            return False
+        host = (parts.hostname or "").strip("[]").lower()
+        if host in ("metadata.google.internal", "169.254.169.254"):
+            return False
+        if host in ("127.0.0.1", "localhost") and parts.port in (PORT, NODE_PORT):
+            return False
+        return True
+
+    def emit_state(self, tab_id, event, **extra):
+        view = self.views.get(str(tab_id))
+        payload = {
+            "id": str(tab_id),
+            "event": event,
+            "url": view.get_uri() if view is not None else "",
+            "title": (view.get_title() or "") if view is not None else "",
+            "back": bool(view and view.can_go_back()),
+            "forward": bool(view and view.can_go_forward()),
+            "loading": bool(view.is_loading()) if view is not None else False,
+        }
+        payload.update(extra)
+        self.tell(payload)
+
+    def ensure(self, tab_id, isolated):
+        tab_id = str(tab_id)
+        existing = self.views.get(tab_id)
+        if existing is not None:
+            return existing
+        if isolated:
+            manager = WebKit2.WebsiteDataManager.new_ephemeral()
+            context = WebKit2.WebContext.new_with_website_data_manager(manager)
+            harden_page_context(context, manager)
+        else:
+            context = self.shared()
+        view = WebKit2.WebView.new_with_context(context)
+        self.tune(view)
+        view.connect("decide-policy", self.on_decide, tab_id)
+        view.connect("load-changed", self.on_load, tab_id)
+        view.connect("load-failed", self.on_fail, tab_id)
+        try:
+            view.connect("load-failed-with-tls-errors", self.on_tls, tab_id)
+        except Exception:
+            pass
+        view.connect("notify::title", self.on_title, tab_id)
+        self.box.add_named(view, tab_id)
+        view.show()
+        if self.on_view is not None:
+            self.on_view(view)
+        self.views[tab_id] = view
+        self.isolated[tab_id] = bool(isolated)
+        return view
+
+    def on_decide(self, view, decision, decision_type, tab_id):
+        if decision_type == WebKit2.PolicyDecisionType.RESPONSE:
+            decision.use()
+            return True
+        try:
+            action = decision.get_navigation_action()
+            uri = action.get_request().get_uri() or ""
+        except Exception:
+            decision.use()
+            return True
+        if decision_type == WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION:
+            # A click may open a new tab. A page may not open one by itself.
+            if uri and self.allowed(uri) and action.is_user_gesture():
+                self.tell({
+                    "event": "popup",
+                    "url": uri,
+                    "isolated": bool(self.isolated.get(str(tab_id), False)),
+                })
+            decision.ignore()
+            return True
+        if self.allowed(uri) or in_page_navigation(uri):
+            decision.use()
+            return True
+        # Sites probe mailto:, intent:, and other schemes on their own.
+        # Drop those quietly. A page-sized error hides the site the person is reading.
+        decision.ignore()
+        return True
+
+    def on_load(self, view, event, tab_id):
+        if event == WebKit2.LoadEvent.STARTED:
+            self.emit_state(tab_id, "start", loading=True)
+        elif event == WebKit2.LoadEvent.COMMITTED:
+            self.emit_state(tab_id, "commit", loading=True)
+            if str(tab_id) == self.shown:
+                self.repaint_grips()
+                self.repaint_menu()
+        elif event == WebKit2.LoadEvent.FINISHED:
+            self.emit_state(tab_id, "finish", loading=False)
+            if str(tab_id) == self.shown:
+                self.repaint_grips()
+                self.repaint_menu()
+
+    def on_fail(self, view, _event, uri, error, tab_id):
+        if quiet_load_error(view, uri, error):
+            self.emit_state(tab_id, "stop", loading=False)
+            return False
+        message = getattr(error, "message", "") or "Could not open that page"
+        self.emit_state(tab_id, "fail", url=uri or "", error=message, loading=False)
+        return False
+
+    def on_tls(self, _view, uri, _certificate, _errors, tab_id):
+        self.emit_state(
+            tab_id,
+            "fail",
+            url=uri or "",
+            error="The site certificate was not accepted",
+            loading=False,
+        )
+        return False
+
+    def on_title(self, view, _pspec, tab_id):
+        if view.get_title():
+            self.emit_state(tab_id, "title")
+
+    def load(self, tab_id, isolated, url):
+        if not self.allowed(url):
+            self.tell({
+                "id": str(tab_id),
+                "event": "fail",
+                "url": url,
+                "error": "Only http and https pages can be opened",
+                "loading": False,
+            })
+            return
+        view = self.ensure(tab_id, isolated)
+        view.load_uri(url)
+
+    def place(self, left, top, right, bottom, show, tab_id):
+        left, top, right, bottom = (max(0, int(left)), max(0, int(top)), max(0, int(right)), max(0, int(bottom)))
+        box = self.box
+        if (
+            box.get_margin_start() != left
+            or box.get_margin_top() != top
+            or box.get_margin_end() != right
+            or box.get_margin_bottom() != bottom
+        ):
+            box.set_margin_start(left)
+            box.set_margin_top(top)
+            box.set_margin_end(right)
+            box.set_margin_bottom(bottom)
+        tab_id = str(tab_id or "")
+        if not show or tab_id not in self.views:
+            self.box.hide()
+            self.shown = None
+            return
+        self.box.set_visible_child_name(tab_id)
+        self.box.show()
+        if self.shown != tab_id:
+            self.views[tab_id].grab_focus()
+            self.shown = tab_id
+        self.repaint_grips()
+        self.repaint_menu()
+
+    def drop(self, tab_id):
+        tab_id = str(tab_id)
+        view = self.views.pop(tab_id, None)
+        self.isolated.pop(tab_id, None)
+        if view is None:
+            return
+        self.box.remove(view)
+        if self.shown == tab_id:
+            self.shown = None
+            self.box.hide()
+        view.destroy()
+
+    def command(self, command):
+        if command.startswith("view:"):
+            parts = command.split(":")
+            if len(parts) < 6:
+                return True
+            try:
+                left, top, right, bottom, show = (
+                    int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]),
+                )
+            except ValueError:
+                return True
+            tab_id = parts[6] if len(parts) > 6 else ""
+            self.place(left, top, right, bottom, show == 1, tab_id)
+            return True
+        if command.startswith("page:"):
+            try:
+                _, tab_id, iso, url = command.split(":", 3)
+            except ValueError:
+                return True
+            self.load(tab_id, iso == "1", url)
+            return True
+        if command.startswith("drop:"):
+            self.drop(command.split(":", 1)[1])
+            return True
+        if command.startswith("back:"):
+            view = self.views.get(command.split(":", 1)[1])
+            if view is not None and view.can_go_back():
+                view.go_back()
+            return True
+        if command.startswith("fwd:"):
+            view = self.views.get(command.split(":", 1)[1])
+            if view is not None and view.can_go_forward():
+                view.go_forward()
+            return True
+        if command.startswith("reload:"):
+            view = self.views.get(command.split(":", 1)[1])
+            if view is not None:
+                view.reload()
+            return True
+        if command.startswith("stop:"):
+            view = self.views.get(command.split(":", 1)[1])
+            if view is not None:
+                view.stop_loading()
+            return True
+        if command.startswith("zoom:"):
+            bits = command.split(":")
+            if len(bits) != 3:
+                return True
+            view = self.views.get(bits[1])
+            try:
+                level = float(bits[2])
+            except ValueError:
+                return True
+            if view is not None:
+                view.set_zoom_level(level)
+            return True
+        return False
+
+
+class EdgePill:
+    """Floating Wallet or Tabs label drawn above a native page.
+
+    The page view covers the chrome, so a hover label that hangs over the
+    page has to be a real GTK widget. It is only the pill, never a column.
+    """
+
+    def __init__(self, chrome):
+        self.chrome = chrome
+        self.side = "tabs"
+        self.flat = "left"
+        self.label = ""
+        self.area = Gtk.DrawingArea()
+        self.area.set_halign(Gtk.Align.START)
+        self.area.set_valign(Gtk.Align.START)
+        self.area.set_hexpand(False)
+        self.area.set_vexpand(False)
+        self.area.set_no_show_all(True)
+        self.area.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.ENTER_NOTIFY_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_press)
+        self.area.connect("enter-notify-event", self.on_enter)
+        self.area.connect("leave-notify-event", self.on_leave)
+        self.area.connect("realize", self.on_realize)
+
+    def widget(self):
+        return self.area
+
+    def on_realize(self, widget):
+        window = widget.get_window()
+        if window is not None:
+            window.set_cursor(Gdk.Cursor.new_for_display(widget.get_display(), Gdk.CursorType.HAND2))
+
+    def show_at(self, x, y, w, h, side, label):
+        if w < 48 or w > 180 or h < 24 or h > 48:
+            return
+        if side not in ("tabs", "wallet") or not label or len(label) > 32:
+            return
+        self.side = side
+        self.flat = "left" if side == "tabs" else "right"
+        self.label = label
+        x = max(0, int(x))
+        y = max(0, int(y))
+        self.area.set_size_request(w, h)
+        self.area.set_margin_start(x)
+        self.area.set_margin_top(y)
+        parent = self.area.get_parent()
+        if parent is not None:
+            parent_w = parent.get_allocated_width()
+            parent_h = parent.get_allocated_height()
+            if parent_w > 0:
+                self.area.set_margin_end(max(0, parent_w - x - w))
+            if parent_h > 0:
+                self.area.set_margin_bottom(max(0, parent_h - y - h))
+        self.area.queue_draw()
+        self.area.show()
+
+    def hide(self, tell=False):
+        visible = self.area.get_visible()
+        self.area.hide()
+        if tell and visible:
+            self._js("window.__hogPillHide && window.__hogPillHide()")
+
+    def _js(self, script):
+        try:
+            self.chrome.run_javascript(script, None, None, None)
+        except Exception:
+            pass
+
+    def on_enter(self, _widget, _event):
+        self._js("window.__hogPillHold && window.__hogPillHold()")
+        return False
+
+    def on_leave(self, _widget, _event):
+        self.hide(tell=True)
+        return False
+
+    def on_press(self, _widget, event):
+        if getattr(event, "button", 1) != 1:
+            return False
+        side = self.side
+        self.hide(tell=False)
+        element = "tabs-edge" if side == "tabs" else "wallet-edge"
+        self._js(f"document.getElementById('{element}').click()")
+        return True
+
+    def _path(self, cr, x, y, w, h):
+        radius = h / 2.0
+        cr.new_path()
+        if self.flat == "left":
+            cr.move_to(x, y)
+            cr.line_to(x + w - radius, y)
+            cr.arc(x + w - radius, y + radius, radius, -math.pi / 2, math.pi / 2)
+            cr.line_to(x, y + h)
+        else:
+            cr.move_to(x + w, y)
+            cr.line_to(x + radius, y)
+            cr.arc_negative(x + radius, y + radius, radius, -math.pi / 2, math.pi / 2)
+            cr.line_to(x + w, y + h)
+        cr.close_path()
+
+    def on_draw(self, widget, cr):
+        width = widget.get_allocated_width()
+        height = widget.get_allocated_height()
+        if width < 2 or height < 2:
+            return False
+        self._path(cr, 0, 0, width, height)
+        cr.set_source_rgb(0x24 / 255, 0x26 / 255, 0x24 / 255)
+        cr.fill()
+        layout = widget.create_pango_layout(self.label)
+        desc = Pango.FontDescription()
+        desc.set_size(13 * Pango.SCALE)
+        desc.set_weight(Pango.Weight.SEMIBOLD)
+        layout.set_font_description(desc)
+        text_w, text_h = layout.get_pixel_size()
+        cr.set_source_rgb(0.957, 0.957, 0.965)
+        cr.move_to(max(8, (width - text_w) / 2), max(0, (height - text_h) / 2))
+        PangoCairo.show_layout(cr, layout)
+        return False
+
+
+GOLD = (0xfd / 255, 0xb9 / 255, 0x13 / 255)
+DOT = (0x2a / 255, 0x1d / 255, 0x05 / 255)
+
+
+def place_overlay(area, x, y, w, h):
+    x = max(0, int(x))
+    y = max(0, int(y))
+    w = max(1, int(w))
+    h = max(1, int(h))
+    area.set_size_request(w, h)
+    area.set_margin_start(x)
+    area.set_margin_top(y)
+    parent = area.get_parent()
+    if parent is not None:
+        parent_w = parent.get_allocated_width()
+        parent_h = parent.get_allocated_height()
+        if parent_w > 0:
+            area.set_margin_end(max(0, parent_w - x - w))
+        if parent_h > 0:
+            area.set_margin_bottom(max(0, parent_h - y - h))
+    area.queue_draw()
+    area.show()
+
+
+class ShareDrop:
+    """Invisible drop target over the Jellyfin card. Files land in ~/hog-shares."""
+
+    def __init__(self, on_uris):
+        self.on_uris = on_uris
+        self.hot = False
+        self.area = Gtk.DrawingArea()
+        self.area.set_halign(Gtk.Align.START)
+        self.area.set_valign(Gtk.Align.START)
+        self.area.set_hexpand(False)
+        self.area.set_vexpand(False)
+        self.area.set_app_paintable(True)
+        self.area.set_no_show_all(True)
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("realize", self.on_realize)
+        self.area.drag_dest_set(Gtk.DestDefaults.DROP, [], Gdk.DragAction.COPY)
+        self.area.drag_dest_add_uri_targets()
+        self.area.connect("drag-motion", self.on_motion)
+        self.area.connect("drag-leave", self.on_leave)
+        self.area.connect("drag-data-received", self.on_received)
+
+    def widget(self):
+        return self.area
+
+    def on_realize(self, widget):
+        screen = widget.get_screen()
+        visual = screen.get_rgba_visual() if screen is not None else None
+        if visual is not None:
+            widget.set_visual(visual)
+
+    def show_box(self, x, y, w, h):
+        if w < 40 or h < 36:
+            self.area.hide()
+            return
+        place_overlay(self.area, x, y, w, h)
+
+    def hide(self):
+        self.hot = False
+        self.area.hide()
+
+    def on_draw(self, _widget, cr):
+        if self.hot:
+            cr.set_source_rgba(GOLD[0], GOLD[1], GOLD[2], 0.28)
+            cr.paint()
+        return False
+
+    def on_motion(self, widget, context, _x, _y, when):
+        self.hot = True
+        widget.queue_draw()
+        Gdk.drag_status(context, Gdk.DragAction.COPY, when)
+        return True
+
+    def on_leave(self, widget, _context, _when):
+        self.hot = False
+        widget.queue_draw()
+
+    def on_received(self, widget, context, _x, _y, data, _info, when):
+        uris = [uri for uri in (data.get_uris() or []) if uri.startswith("file://")]
+        self.hot = False
+        widget.queue_draw()
+        Gtk.drag_finish(context, bool(uris), False, when)
+        if uris:
+            self.on_uris(uris)
+
+
+class EdgeLine:
+    """Thin gold line drawn over a native page when that rail is closed."""
+
+    def __init__(self):
+        self.area = Gtk.DrawingArea()
+        self.area.set_halign(Gtk.Align.START)
+        self.area.set_valign(Gtk.Align.START)
+        self.area.set_hexpand(False)
+        self.area.set_vexpand(False)
+        self.area.set_no_show_all(True)
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("realize", self.on_realize)
+
+    def widget(self):
+        return self.area
+
+    def on_realize(self, widget):
+        try:
+            widget.input_shape_combine_region(pycairo.Region())
+        except Exception:
+            pass
+
+    def show_box(self, x, y, w, h):
+        if w < 1 or h < 8 or w > 8:
+            self.area.hide()
+            return
+        place_overlay(self.area, x, y, w, h)
+        self.on_realize(self.area)
+
+    def hide(self):
+        self.area.hide()
+
+    def on_draw(self, _widget, cr):
+        cr.set_source_rgb(*GOLD)
+        cr.paint()
+        return False
+
+
+class EdgeSpot:
+    """Collapsed grip drawn over a native page. The page runs underneath it."""
+
+    def __init__(self, chrome, side):
+        self.chrome = chrome
+        self.side = side
+        self.dragging = False
+        self.moved = False
+        self.down_root = 0
+        self.origin_y = 0
+        self.track_y = 0
+        self.track_h = 0
+        self.area = Gtk.DrawingArea()
+        self.area.set_halign(Gtk.Align.START)
+        self.area.set_valign(Gtk.Align.START)
+        self.area.set_hexpand(False)
+        self.area.set_vexpand(False)
+        self.area.set_app_paintable(True)
+        self.area.set_no_show_all(True)
+        self.area.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.ENTER_NOTIFY_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_press)
+        self.area.connect("button-release-event", self.on_release)
+        self.area.connect("motion-notify-event", self.on_motion)
+        self.area.connect("enter-notify-event", self.on_enter)
+        self.area.connect("leave-notify-event", self.on_leave)
+        self.area.connect("realize", self.on_realize)
+        self.area.connect("size-allocate", self.on_size)
+
+    def widget(self):
+        return self.area
+
+    def prepare(self):
+        screen = self.area.get_screen() or Gdk.Screen.get_default()
+        if screen is None:
+            return
+        visual = screen.get_rgba_visual()
+        if visual is not None:
+            self.area.set_visual(visual)
+
+    def on_realize(self, widget):
+        display = widget.get_display()
+        cursor = Gdk.Cursor.new_from_name(display, "grab")
+        window = widget.get_window()
+        if window is None:
+            return
+        if cursor is not None:
+            window.set_cursor(cursor)
+        alloc = widget.get_allocation()
+        self.apply_shape(alloc.width, alloc.height)
+
+    def on_size(self, _widget, allocation):
+        self.apply_shape(allocation.width, allocation.height)
+
+    def add_path(self, cr, width, height):
+        radius = min(8, height / 2.0, width)
+        cr.new_path()
+        if self.side == "tabs":
+            cr.move_to(0, 0)
+            cr.line_to(max(0, width - radius), 0)
+            cr.arc(width - radius, radius, radius, -math.pi / 2, 0)
+            cr.line_to(width, height - radius)
+            cr.arc(width - radius, height - radius, radius, 0, math.pi / 2)
+            cr.line_to(0, height)
+        else:
+            cr.move_to(width, 0)
+            cr.line_to(radius, 0)
+            cr.arc_negative(radius, radius, radius, -math.pi / 2, math.pi)
+            cr.line_to(0, height - radius)
+            cr.arc_negative(radius, height - radius, radius, math.pi, math.pi / 2)
+            cr.line_to(width, height)
+        cr.close_path()
+
+    def apply_shape(self, width, height):
+        window = self.area.get_window()
+        if window is None or width < 2 or height < 2:
+            return
+        surface = pycairo.ImageSurface(pycairo.FORMAT_A8, int(width), int(height))
+        ctx = pycairo.Context(surface)
+        ctx.set_antialias(pycairo.ANTIALIAS_NONE)
+        self.add_path(ctx, width, height)
+        ctx.set_source_rgba(0, 0, 0, 1)
+        ctx.fill()
+        region = Gdk.cairo_region_create_from_surface(surface)
+        self.area.shape_combine_region(region)
+        self.area.input_shape_combine_region(region)
+        try:
+            window.set_opaque_region(region)
+        except Exception:
+            pass
+
+    def _js(self, script):
+        try:
+            self.chrome.run_javascript(script, None, None, None)
+        except Exception:
+            pass
+
+    def show_box(self, x, y, w, h, track):
+        if self.dragging:
+            return
+        if w < 8 or w > 40 or h < 20 or h > 80:
+            self.area.hide()
+            return
+        self.track_y = int(track[1]) if track else 0
+        self.track_h = int(track[3]) if track else 0
+        place_overlay(self.area, x, y, w, h)
+
+    def hide(self):
+        self.area.hide()
+
+    def clamp_y(self, y):
+        height = self.area.get_allocated_height() or 36
+        if self.track_h <= height + 16:
+            return max(0, int(y))
+        low = self.track_y + 8
+        high = self.track_y + self.track_h - height - 8
+        return min(high, max(low, int(y)))
+
+    def on_press(self, widget, event):
+        if getattr(event, "button", 1) != 1 or event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        self.dragging = True
+        self.moved = False
+        self.down_root = event.y_root
+        self.origin_y = widget.get_margin_top()
+        window = widget.get_window()
+        try:
+            seat = widget.get_display().get_default_seat()
+            if seat is not None and window is not None:
+                seat.grab(window, Gdk.SeatCapabilities.ALL_POINTING, False, None, event, None)
+        except Exception:
+            pass
+        cursor = Gdk.Cursor.new_from_name(widget.get_display(), "grabbing")
+        if window is not None and cursor is not None:
+            window.set_cursor(cursor)
+        self._js(f"window.__hogSpotDown && window.__hogSpotDown('{self.side}')")
+        return True
+
+    def on_motion(self, widget, event):
+        if not self.dragging:
+            return False
+        dy = event.y_root - self.down_root
+        if abs(dy) < 4:
+            return True
+        self.moved = True
+        y = self.clamp_y(self.origin_y + dy)
+        place_overlay(widget, widget.get_margin_start(), y, widget.get_allocated_width(), widget.get_allocated_height())
+        self._js(f"window.__hogSpotSlide && window.__hogSpotSlide('{self.side}', {y})")
+        return True
+
+    def on_release(self, widget, event):
+        if not self.dragging:
+            return False
+        self.dragging = False
+        try:
+            seat = widget.get_display().get_default_seat()
+            if seat is not None:
+                seat.ungrab()
+        except Exception:
+            pass
+        window = widget.get_window()
+        cursor = Gdk.Cursor.new_from_name(widget.get_display(), "grab")
+        if window is not None and cursor is not None:
+            window.set_cursor(cursor)
+        moved = "1" if self.moved else "0"
+        self._js(f"window.__hogSpotUp && window.__hogSpotUp('{self.side}', {moved})")
+        return True
+
+    def on_enter(self, _widget, _event):
+        if self.dragging:
+            return False
+        self._js(f"window.__hogSpotIn && window.__hogSpotIn('{self.side}')")
+        return False
+
+    def on_leave(self, _widget, _event):
+        if self.dragging:
+            return False
+        self._js(f"window.__hogSpotOut && window.__hogSpotOut('{self.side}')")
+        return False
+
+    def on_draw(self, widget, cr):
+        width = widget.get_allocated_width()
+        height = widget.get_allocated_height()
+        if width < 2 or height < 2:
+            return False
+        cr.save()
+        cr.set_operator(pycairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.restore()
+        cr.set_antialias(pycairo.ANTIALIAS_NONE)
+        self.add_path(cr, width, height)
+        cr.set_source_rgb(*GOLD)
+        cr.fill()
+        cr.set_antialias(pycairo.ANTIALIAS_DEFAULT)
+        size = 3
+        gap = 3
+        grid = size * 2 + gap
+        x0 = (width - grid) / 2
+        y0 = (height - grid) / 2
+        cr.set_source_rgb(*DOT)
+        for row in range(2):
+            for col in range(2):
+                cx = x0 + col * (size + gap) + size / 2
+                cy = y0 + row * (size + gap) + size / 2
+                cr.new_path()
+                cr.arc(cx, cy, size / 2, 0, math.tau)
+                cr.fill()
+        return False
+
+
+def drop_copy_note(lines):
+    names = []
+    for line in lines:
+        path = urllib.parse.unquote(urllib.parse.urlparse(line).path).rstrip("/")
+        name = path.split("/")[-1] if path else ""
+        if name and name not in {".", ".."}:
+            names.append(name)
+    if len(names) == 1:
+        return f"Adding {names[0]}…"
+    if len(names) > 1:
+        return f"Adding {len(names)} files…"
+    return "Adding…"
+
+
+class Hog(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+        self.server = None
+        self.grip = None
+        self.using_edge_cursor = False
+        self.pages = None
+        self.chrome = None
+        self.pill = None
+        self.window = None
+        self.tabs_line = None
+        self.wallet_line = None
+        self.tabs_spot = None
+        self.wallet_spot = None
+        self.grip_boxes = [None, None]
+
+    def on_window_message(self, _manager, result, window):
+        try:
+            value = result.get_js_value()
+            if value is None or not value.is_string():
+                return
+            command = value.to_string()
+        except Exception:
+            return
+        if self.pages is not None and self.pages.command(command):
+            return
+        if command == "pill:hide":
+            if self.pill is not None:
+                self.pill.hide()
+            return
+        if command.startswith("pill:"):
+            parts = command.split(":")
+            if self.pill is None or len(parts) < 7:
+                return
+            try:
+                x, y, w, h = (int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]))
+            except ValueError:
+                return
+            self.pill.show_at(x, y, w, h, parts[5], ":".join(parts[6:]))
+            return
+        if command.startswith("edges:"):
+            self.place_edges(command)
+            return
+        if command.startswith("open:"):
+            self.open_tailscale_login(command[5:])
+            return
+        if command.startswith("drop-box:"):
+            self.place_share_drop(command[len("drop-box:"):])
+            return
+        if command.startswith("containers:"):
+            self.on_containers(command)
+            return
+        if command.startswith("dapp-reply:"):
+            if self.pages is not None:
+                self.pages.deliver_dapp_reply(command[len("dapp-reply:"):])
+            return
+        if command.startswith("dapp-emit:"):
+            if self.pages is not None:
+                self.pages.deliver_dapp_emit(command[len("dapp-emit:"):])
+            return
+        if command == "menu:hide":
+            if self.pages is not None:
+                self.pages.paint_menu(None)
+            return
+        if command.startswith("menu:"):
+            if self.pages is not None:
+                self.pages.paint_menu(command[5:])
+            return
+        if command == "close":
+            window.close()
+        elif command == "min":
+            window.iconify()
+        elif command == "max":
+            if window.is_maximized():
+                window.unmaximize()
+            else:
+                window.maximize()
+        elif command.startswith("grip:"):
+            parts = command.split(":")
+            if len(parts) != 5:
+                return
+            try:
+                self.grip = tuple(int(part) for part in parts[1:])
+            except ValueError:
+                self.grip = None
+
+    def open_tailscale_login(self, url):
+        text = str(url or "").strip()
+        if not text or len(text) >= 300 or any(ch.isspace() for ch in text):
+            return
+        parsed = urllib.parse.urlparse(text)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or host != "login.tailscale.com":
+            return
+        if parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443):
+            return
+        if self.window is None:
+            return
+        try:
+            Gtk.show_uri_on_window(self.window, text, Gdk.CURRENT_TIME)
+        except Exception:
+            pass
+
+    def place_share_drop(self, text):
+        target = getattr(self, "share_drop", None)
+        if target is None:
+            return
+        parts = str(text or "").split(",")
+        if len(parts) != 4:
+            target.hide()
+            return
+        try:
+            x, y, w, h = (int(part) for part in parts)
+        except ValueError:
+            target.hide()
+            return
+        target.show_box(x, y, w, h)
+
+    def receive_share_drop(self, uris):
+        lines = []
+        for uri in uris:
+            text = str(uri or "").strip()
+            if text.startswith("file://") and len(text) < 500 and "\n" not in text and "\r" not in text:
+                lines.append(text)
+            if len(lines) >= 200:
+                break
+        if not lines:
+            self.note_library("Nothing was added. Choose files on this computer.")
+            return
+        self.note_library(drop_copy_note(lines))
+        self.on_containers("containers:share-drop:" + "\n".join(lines))
+
+    def note_library(self, text):
+        if self.chrome is None:
+            return
+        raw = json.dumps(str(text or "")[:240])
+
+        def deliver():
+            try:
+                self.chrome.run_javascript(
+                    f"window.__hogMediaNote && window.__hogMediaNote({raw})",
+                    None, None, None,
+                )
+            except Exception:
+                pass
+            return False
+
+        GLib.idle_add(deliver)
+
+    def pick_share_folder(self):
+        if self.window is None or getattr(self, "_share_dialog", None) is not None:
+            return
+        dialog = Gtk.FileChooserDialog(
+            title="Choose a folder to share with the phone",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Share", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        try:
+            dialog.set_current_folder(str(Path.home()))
+        except Exception:
+            pass
+        self._share_dialog = dialog
+
+        def on_response(_dialog, response):
+            path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+            dialog.destroy()
+            self._share_dialog = None
+            if not path or any(ch in path for ch in ("\n", "\r", "\x00")):
+                return
+            self.on_containers(f"containers:share-network:{path}")
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def pick_library(self, kind):
+        if self.window is None or getattr(self, "_share_dialog", None) is not None:
+            return
+        folders = kind == "folder"
+        dialog = Gtk.FileChooserDialog(
+            title="Add a folder to the library" if folders else "Add files to the library",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SELECT_FOLDER if folders else Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Add", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        if not folders:
+            dialog.set_select_multiple(True)
+        try:
+            dialog.set_current_folder(str(Path.home()))
+        except Exception:
+            pass
+        self._share_dialog = dialog
+
+        def on_response(_dialog, response):
+            uris = []
+            if response == Gtk.ResponseType.OK:
+                try:
+                    uris = list(dialog.get_uris() or [])
+                except Exception:
+                    uris = []
+            dialog.destroy()
+            self._share_dialog = None
+            if uris:
+                self.receive_share_drop(uris)
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def on_containers(self, command):
+        parts = command.split(":", 2)
+        action = parts[1] if len(parts) > 1 else ""
+        rest = parts[2] if len(parts) > 2 else ""
+        if action not in {"list", "add", "remove", "start", "stop", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder"}:
+            return
+        if action == "share-pick":
+            self.pick_share_folder()
+            return
+        if action == "media-pick":
+            self.pick_library("files")
+            return
+        if action == "media-pick-folder":
+            self.pick_library("folder")
+            return
+        guard = getattr(self, "guard", None)
+        if guard is None:
+            return
+        if action == "media-open":
+            guard.use_library(rest)
+        if action == "create":
+            name, _, image = rest.partition(":")
+        elif action in {"run", "recreate"}:
+            name, image = rest, ""
+        else:
+            name, image = rest, ""
+
+        def work():
+            try:
+                payload = guard.handle(action, name, image)
+            except RuntimeError as exc:
+                payload = {"ok": False, "error": str(exc), "items": []}
+            raw = json.dumps(payload)
+
+            def deliver():
+                try:
+                    self.chrome.run_javascript(
+                        f"window.__hogContainers && window.__hogContainers({raw})",
+                        None, None, None,
+                    )
+                except Exception:
+                    pass
+                return False
+
+            GLib.idle_add(deliver)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def edge_at(self, widget, x, y):
+        width = widget.get_allocated_width()
+        height = widget.get_allocated_height()
+        edge = 6
+        corner = 16
+        left = x <= edge or (x <= corner and (y <= corner or y >= height - corner))
+        right = x >= width - edge or (x >= width - corner and (y <= corner or y >= height - corner))
+        top = y <= edge or (y <= corner and (x <= corner or x >= width - corner))
+        bottom = y >= height - edge or (y >= height - corner and (x <= corner or x >= width - corner))
+        if top and left:
+            return Gdk.WindowEdge.NORTH_WEST
+        if top and right:
+            return Gdk.WindowEdge.NORTH_EAST
+        if bottom and left:
+            return Gdk.WindowEdge.SOUTH_WEST
+        if bottom and right:
+            return Gdk.WindowEdge.SOUTH_EAST
+        if top:
+            return Gdk.WindowEdge.NORTH
+        if bottom:
+            return Gdk.WindowEdge.SOUTH
+        if left:
+            return Gdk.WindowEdge.WEST
+        if right:
+            return Gdk.WindowEdge.EAST
+        return None
+
+    def edge_at_window(self, event):
+        if self.window is None:
+            return None
+        gdk_win = self.window.get_window()
+        if gdk_win is None:
+            return None
+        origin_x, origin_y = gdk_win.get_root_coords(0, 0)
+        return self.edge_at_point(
+            event.x_root - origin_x,
+            event.y_root - origin_y,
+            self.window.get_allocated_width(),
+            self.window.get_allocated_height(),
+        )
+
+    def edge_at_point(self, x, y, width, height):
+        edge = 6
+        corner = 16
+        left = x <= edge or (x <= corner and (y <= corner or y >= height - corner))
+        right = x >= width - edge or (x >= width - corner and (y <= corner or y >= height - corner))
+        top = y <= edge or (y <= corner and (x <= corner or x >= width - corner))
+        bottom = y >= height - edge or (y >= height - corner and (x <= corner or x >= width - corner))
+        if top and left:
+            return Gdk.WindowEdge.NORTH_WEST
+        if top and right:
+            return Gdk.WindowEdge.NORTH_EAST
+        if bottom and left:
+            return Gdk.WindowEdge.SOUTH_WEST
+        if bottom and right:
+            return Gdk.WindowEdge.SOUTH_EAST
+        if top:
+            return Gdk.WindowEdge.NORTH
+        if bottom:
+            return Gdk.WindowEdge.SOUTH
+        if left:
+            return Gdk.WindowEdge.WEST
+        if right:
+            return Gdk.WindowEdge.EAST
+        return None
+
+    def place_edges(self, command):
+        parts = command.split(":")
+        if len(parts) != 17 or self.tabs_spot is None:
+            return
+        try:
+            nums = [int(part) for part in parts[1:]]
+        except ValueError:
+            return
+        lines = (self.tabs_line, self.wallet_line)
+        spots = (self.tabs_spot, self.wallet_spot)
+        for index, line in enumerate(lines):
+            box = nums[index * 4:(index + 1) * 4]
+            line.show_box(*box)
+        # The square GTK grip paints black corners on Wayland (shapes are
+        # unsupported). Remember where it sits so edge-resize yields to it,
+        # and let the page draw the rounded grip.
+        for index, spot in enumerate(spots):
+            box = tuple(nums[(index + 2) * 4:(index + 3) * 4])
+            spot.hide()
+            self.grip_boxes[index] = box if box[2] > 0 and box[3] > 0 else None
+        if self.pages is not None:
+            page_top = self.pages.box.get_margin_top()
+            self.pages.paint_grips(
+                nums[10] > 0,
+                nums[9] - page_top,
+                nums[14] > 0,
+                nums[13] - page_top,
+            )
+
+    def watch_page(self, view):
+        view.add_events(
+            Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        view.connect("motion-notify-event", self.on_page_motion)
+        view.connect("leave-notify-event", self.on_page_leave)
+        view.connect("button-press-event", self.on_page_button)
+
+    def window_point(self, event):
+        if self.window is None:
+            return None
+        gdk_win = self.window.get_window()
+        if gdk_win is None:
+            return None
+        origin_x, origin_y = gdk_win.get_root_coords(0, 0)
+        return event.x_root - origin_x, event.y_root - origin_y
+
+    def over_grip(self, event):
+        point = self.window_point(event)
+        if point is None:
+            return False
+        x, y = point
+        for box in self.grip_boxes:
+            if not box or box[2] <= 0 or box[3] <= 0:
+                continue
+            if box[0] <= x <= box[0] + box[2] and box[1] <= y <= box[1] + box[3]:
+                return True
+        return False
+
+    def shift_grip(self, side, css_top):
+        index = 0 if side == "tabs" else 1
+        box = self.grip_boxes[index]
+        if not box or self.pages is None:
+            return
+        y = self.pages.box.get_margin_top() + int(css_top)
+        self.grip_boxes[index] = (box[0], y, box[2], box[3])
+
+    def on_page_motion(self, view, event):
+        if self.over_grip(event):
+            self.paint_cursor(view, None)
+            return False
+        edge = self.edge_at_window(event)
+        self.paint_cursor(view, self.cursor_name(edge) if edge is not None else None)
+        return False
+
+    def on_page_leave(self, view, _event):
+        self.paint_cursor(view, None)
+        return False
+
+    def on_page_button(self, view, event):
+        if event.button != 1 or event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        if self.over_grip(event):
+            return False
+        edge = self.edge_at_window(event)
+        if edge is None or self.window is None:
+            return False
+        self.window.begin_resize_drag(edge, int(event.button), int(event.x_root), int(event.y_root), event.time)
+        return True
+
+    def cursor_name(self, edge):
+        return {
+            Gdk.WindowEdge.NORTH: "n-resize",
+            Gdk.WindowEdge.SOUTH: "s-resize",
+            Gdk.WindowEdge.WEST: "w-resize",
+            Gdk.WindowEdge.EAST: "e-resize",
+            Gdk.WindowEdge.NORTH_WEST: "nw-resize",
+            Gdk.WindowEdge.NORTH_EAST: "ne-resize",
+            Gdk.WindowEdge.SOUTH_WEST: "sw-resize",
+            Gdk.WindowEdge.SOUTH_EAST: "se-resize",
+        }[edge]
+
+    def paint_cursor(self, widget, name):
+        gdk_window = widget.get_window()
+        if gdk_window is None:
+            return
+        if not name:
+            gdk_window.set_cursor(None)
+            self.using_edge_cursor = False
+            return
+        gdk_window.set_cursor(Gdk.Cursor.new_from_name(gdk_window.get_display(), name))
+        self.using_edge_cursor = True
+
+    def on_motion(self, view, event):
+        edge = self.edge_at(view, event.x, event.y)
+        self.paint_cursor(view, self.cursor_name(edge) if edge is not None else None)
+        return False
+
+    def on_leave(self, view, _event):
+        self.paint_cursor(view, None)
+        return False
+
+    def on_button(self, view, event, window):
+        if event.button != 1:
+            return False
+        if event.type not in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType._2BUTTON_PRESS):
+            return False
+        edge = self.edge_at(view, event.x, event.y)
+        if edge is not None and event.type == Gdk.EventType.BUTTON_PRESS:
+            window.begin_resize_drag(edge, int(event.button), int(event.x_root), int(event.y_root), event.time)
+            return True
+        if not self.grip:
+            return False
+        x, y, width, height = self.grip
+        if not (x <= event.x <= x + width and y <= event.y <= y + height):
+            return False
+        if event.type == Gdk.EventType._2BUTTON_PRESS:
+            if window.is_maximized():
+                window.unmaximize()
+            else:
+                window.maximize()
+            return True
+        window.begin_move_drag(int(event.button), int(event.x_root), int(event.y_root), event.time)
+        return True
+
+    def ensure_server(self):
+        if port_open(PORT):
+            return
+        bundle = ROOT / "public" / "wallet-bundle.js"
+        if not bundle.is_file():
+            subprocess.run([node_binary(), "scripts/build.mjs"], cwd=ROOT, check=True)
+        self.server = subprocess.Popen(
+            [node_binary(), "server.mjs"],
+            cwd=ROOT,
+            env={**os.environ, "HOG_PORT": str(PORT)},
+            start_new_session=True,
+        )
+        for _ in range(50):
+            if port_open(PORT):
+                return
+            if self.server.poll() is not None:
+                sys.exit("Hog's local server stopped before the window opened.")
+            time.sleep(0.1)
+        sys.exit("Hog's local server did not start.")
+
+    def do_shutdown(self):
+        if self.server and self.server.poll() is None:
+            os.killpg(self.server.pid, signal.SIGTERM)
+        Gtk.Application.do_shutdown(self)
+
+    def do_activate(self):
+        self.ensure_server()
+        Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
+        window = Gtk.ApplicationWindow(application=self, title="Hog")
+        screen = window.get_screen() or Gdk.Screen.get_default()
+        if screen is not None:
+            visual = screen.get_rgba_visual()
+            if visual is not None:
+                window.set_visual(visual)
+        window.set_decorated(False)
+        window.set_default_size(1180, 760)
+        icon = ROOT / "public" / "hog-icon.png"
+        if not icon.is_file():
+            icon = ROOT / "public" / "favicon.svg"
+        if icon.is_file():
+            try:
+                Gtk.Window.set_default_icon_from_file(str(icon))
+                window.set_icon_from_file(str(icon))
+            except Exception:
+                pass
+
+        DATA.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(DATA, 0o700)
+        except OSError:
+            pass
+        (DATA / "cache").mkdir(parents=True, exist_ok=True)
+        self.guard = Guard(DATA, origin=f"http://127.0.0.1:{PORT}")
+        page_sandbox = "true" if sandbox_available() else "false"
+        manager = WebKit2.WebsiteDataManager(
+            base_data_directory=str(DATA),
+            base_cache_directory=str(DATA / "cache"),
+        )
+        context = WebKit2.WebContext.new_with_website_data_manager(manager)
+        view = WebKit2.WebView.new_with_context(context)
+        background = Gdk.RGBA()
+        background.parse("#141416")
+        view.set_background_color(background)
+        settings = view.get_settings()
+        settings.set_enable_javascript(True)
+        settings.set_javascript_can_access_clipboard(True)
+        settings.set_enable_media(True)
+        settings.set_media_playback_requires_user_gesture(False)
+        settings.set_media_playback_allows_inline(True)
+        # The node page refuses to start until the file system API exists.
+        # This GTK build still has no working sync file handle; the page stores
+        # the chain through Hog's disk endpoint instead.
+        node_features = {"FileSystem", "FileSystemWritableStream", "StorageAPI", "AccessHandle"}
+        features = settings.get_all_features()
+        for index in range(features.get_length()):
+            feature = features.get(index)
+            if feature.get_identifier() in node_features:
+                settings.set_feature_enabled(feature, True)
+        content = view.get_user_content_manager()
+        content.register_script_message_handler("hogwin")
+        content.connect("script-message-received::hogwin", self.on_window_message, window)
+        content.add_script(WebKit2.UserScript(
+            f"window.__hogDesktop=true;window.__hogPageSandbox={page_sandbox};",
+            WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserScriptInjectionTime.START,
+            None,
+            None,
+        ))
+        view.add_events(
+            Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        view.connect("motion-notify-event", self.on_motion)
+        view.connect("leave-notify-event", self.on_leave)
+        view.connect("button-press-event", self.on_button, window)
+        window.set_resizable(True)
+        self.chrome = view
+        self.window = window
+        self.pages = PageHost(view)
+        self.pages.on_view = self.watch_page
+        self.pages.on_grip_move = self.shift_grip
+        self.pill = EdgePill(view)
+        self.share_drop = ShareDrop(self.receive_share_drop)
+        self.tabs_line = EdgeLine()
+        self.wallet_line = EdgeLine()
+        self.tabs_spot = EdgeSpot(view, "tabs")
+        self.wallet_spot = EdgeSpot(view, "wallet")
+        overlay = Gtk.Overlay()
+        overlay.add(view)
+        overlay.add_overlay(self.pages.widget())
+        overlay.add_overlay(self.tabs_line.widget())
+        overlay.add_overlay(self.wallet_line.widget())
+        overlay.add_overlay(self.tabs_spot.widget())
+        overlay.add_overlay(self.wallet_spot.widget())
+        overlay.add_overlay(self.pill.widget())
+        overlay.add_overlay(self.share_drop.widget())
+        view.load_uri(URL)
+
+        def on_load(web_view, event):
+            if event == WebKit2.LoadEvent.FINISHED:
+                print(f"Hog is open at {URL}", flush=True)
+
+        view.connect("load-changed", on_load)
+        window.add(overlay)
+        self.tabs_spot.prepare()
+        self.wallet_spot.prepare()
+        window.show_all()
+        self.pages.widget().hide()
+        self.pill.hide()
+        self.share_drop.hide()
+        self.tabs_line.hide()
+        self.wallet_line.hide()
+        self.tabs_spot.hide()
+        self.wallet_spot.hide()
+        window.present()
+
+
+def main():
+    GLib.set_prgname("hog")
+    app = Hog()
+    raise SystemExit(app.run(sys.argv))
+
+
+if __name__ == "__main__":
+    main()

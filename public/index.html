@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hog</title>
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="xterm.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="boot-flash" class="boot-flash" role="button" tabindex="0" aria-label="Skip the intro">
+    <video id="boot-video" src="wartlogorun.mp4" autoplay muted playsinline preload="auto" disablepictureinpicture disableremoteplayback></video>
+    <p>Click to continue</p>
+  </div>
+  <div class="app">
+    <header class="chrome" id="chrome">
+      <button type="button" id="win-drag" class="drag" aria-label="Move window" hidden>⋮⋮</button>
+      <button type="button" id="back" class="icon" aria-label="Back" disabled>←</button>
+      <button type="button" id="forward" class="icon" aria-label="Forward" disabled>→</button>
+      <button type="button" id="reload" class="icon" aria-label="Reload">↻</button>
+      <button type="button" id="stop" class="icon" aria-label="Stop" hidden>✕</button>
+      <button type="button" id="home-btn" class="icon" aria-label="Home">⌂</button>
+      <form id="omnibox" class="omnibox">
+        <input id="address" type="text" autocomplete="off" spellcheck="false" placeholder="Search or URL" aria-label="Address" role="combobox" aria-expanded="false" aria-controls="suggestions">
+        <div id="suggestions" class="suggestions" hidden></div>
+      </form>
+      <button type="button" id="star" class="icon" aria-label="Bookmark this page" aria-pressed="false">☆</button>
+      <div id="bookmarks" class="bookmarks" aria-label="Bookmarks"></div>
+      <button type="button" id="zoom-btn" class="zoom" aria-label="Reset zoom">100%</button>
+      <button type="button" id="shields" class="icon" aria-label="How this tab is opened" title="How this tab is opened" aria-expanded="false">◈</button>
+      <button type="button" id="history-btn" class="icon" aria-label="History" aria-expanded="false">◷</button>
+      <div class="settings-anchor">
+        <button type="button" id="settings-btn" class="icon" aria-label="Settings" title="Settings" aria-haspopup="menu" aria-controls="settings-menu" aria-expanded="false">⚙</button>
+        <div id="settings-menu" class="popover settings-menu" role="menu" hidden>
+          <ul>
+            <li><button type="button" role="menuitem" data-settings="docker"><span>Docker</span><small>Containers, images, and logs</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="files"><span>File manager</span><small>Library, Jellyfin, and phone folders</small></button></li>
+          </ul>
+        </div>
+      </div>
+      <button type="button" id="node-btn" class="zoom node-btn" aria-label="Warthog node">Node</button>
+      <div id="winctl" class="winctl" hidden>
+        <button type="button" id="win-min" aria-label="Minimize">–</button>
+        <button type="button" id="win-max" aria-label="Maximize">▢</button>
+        <button type="button" id="win-close" aria-label="Close">✕</button>
+      </div>
+      <div id="history-panel" class="popover popover-wide" hidden>
+        <div class="popover-head">
+          <strong>History</strong>
+          <button type="button" id="clear-history" class="tiny">Clear</button>
+        </div>
+        <ul id="history-list"></ul>
+      </div>
+    </header>
+    <div id="shields-panel" class="shield-row" hidden>
+      <strong id="shield-title">Direct</strong>
+      <span id="shield-copy">Pages load directly in Hog. An isolated tab keeps its own cookies. A site cannot read the wallet.</span>
+    </div>
+
+    <div class="stage" id="stage">
+      <div class="pane">
+      <div class="tabbar" id="tabbar">
+        <div class="tab-body">
+        <div class="tab-actions">
+          <button type="button" id="new-tab" class="icon" aria-label="New tab">+</button>
+          <button type="button" id="isolate-tab" class="icon" aria-label="New isolated tab" title="New tab with its own cookies and storage">Iso</button>
+        </div>
+        <div id="tabstrip" class="tabstrip" role="tablist" aria-label="Tabs"></div>
+        </div>
+      </div>
+      <main class="view" id="view">
+        <section class="home" id="home">
+          <p class="eyebrow">New tab</p>
+          <h1>Search, or open a bookmark.</h1>
+          <p class="lede">Pages open at their real address. Iso starts a tab with its own cookies. The wallet stays in this window.</p>
+          <div class="shortcuts">
+            <button type="button" data-url="https://example.com">example.com</button>
+            <button type="button" data-url="https://duckduckgo.com/">DuckDuckGo</button>
+            <button type="button" data-url="https://github.com/warthog-network">warthog-network</button>
+            <button type="button" data-url="https://browser-node.netlify.app/">Warthog node</button>
+          </div>
+        </section>
+        <section class="home" id="browser-settings" hidden>
+          <div id="settings-docker">
+          <p class="eyebrow">Docker</p>
+          <h1>Containers</h1>
+          <p class="lede">Containers run from Hog, not from a web page. Each new one drops extra privileges, stays off the host network, and cannot see the wallet.</p>
+          <div class="engine-row">
+            <p id="docker-state" class="note">Checking whether Docker is running…</p>
+            <button type="button" id="start-docker">Start Docker</button>
+          </div>
+          <div class="picker">
+            <div class="popover-head"><strong>Images</strong></div>
+            <ul class="menu-list">
+              <li><button type="button" data-launch="ubuntu" data-image="ubuntu:24.04"><span>Flat Ubuntu</span><small>ubuntu:24.04 · name ubuntu</small></button></li>
+              <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Flat Fedora</span><small>fedora:latest · name fedora</small></button></li>
+              <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
+              <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>In Docker, click Tailscale, then Run.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media.</small></button></li>
+              <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
+              <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
+            </ul>
+          </div>
+          <p class="note">An image fills the command. Run starts it. Recreate replaces a container and deletes its files unless you used Save image.</p>
+          <div class="command-box stack">
+            <label>Command
+              <textarea id="container-command" class="mono" rows="5" spellcheck="false" autocomplete="off" aria-label="Docker run command"></textarea>
+            </label>
+            <p class="note">Run uses the command above. The port boxes are added only when you press Add port.</p>
+            <div class="port-fields">
+              <label>Host port
+                <input id="port-host" inputmode="numeric" autocomplete="off" spellcheck="false" value="8080">
+              </label>
+              <label>Container port
+                <input id="port-dest" inputmode="numeric" autocomplete="off" spellcheck="false" value="80">
+              </label>
+              <label>Protocol
+                <select id="port-proto">
+                  <option value="tcp">tcp</option>
+                  <option value="udp">udp</option>
+                </select>
+              </label>
+              <button type="button" id="add-port">Add port</button>
+              <button type="button" id="vpn-toggle" aria-pressed="false">VPN interface</button>
+            </div>
+            <div class="row" id="command-actions">
+              <button type="button" id="run-command" class="primary">Run</button>
+              <button type="button" id="recreate-command">Recreate</button>
+            </div>
+          </div>
+          <div id="wireguard-setup" class="engine-row" hidden>
+            <p class="note">This computer needs the WireGuard kernel module before the tunnel can start. The button runs sudo modprobe wireguard. Ubuntu asks for your password.</p>
+            <button type="button" id="load-wireguard">Load kernel module</button>
+          </div>
+          <p id="container-status" class="note" role="status"></p>
+          <p id="container-error" class="error" role="status"></p>
+          <div class="picker">
+            <div class="popover-head"><strong>Containers</strong></div>
+            <ul id="container-list" class="menu-list"></ul>
+          </div>
+          <div id="tailscale-setup" class="endpoint-row" hidden>
+            <p class="note">Press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. The link shows here and in Logs.</p>
+            <button type="button" id="tailscale-up">Sign in</button>
+          </div>
+          <div id="wireguard-endpoint" class="endpoint-row" hidden>
+            <p class="note">The phone keeps the address from the square it already scanned. Remove that tunnel, then scan the new square. This Wi-Fi is for this network. Public address is for mobile data.</p>
+            <div class="row">
+              <button type="button" id="endpoint-lan">This Wi-Fi</button>
+              <button type="button" id="endpoint-public">Public address</button>
+            </div>
+          </div>
+          <div id="container-qr" class="qr-row" hidden></div>
+          <pre id="container-logs" class="mono" hidden></pre>
+          </div>
+          <div id="settings-files" hidden>
+            <p class="eyebrow">File manager</p>
+            <section id="jellyfin-connect" class="connect-card" aria-label="Tailscale IP">
+              <p class="eyebrow">Tailscale IP</p>
+              <div class="connect-addr">
+                <strong id="jellyfin-host">100.—</strong>
+                <button type="button" id="jellyfin-copy" hidden>Copy</button>
+              </div>
+              <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
+              <p class="note">On this computer, Jellyfin is 127.0.0.1:8096.</p>
+            </section>
+            <div id="media-library" class="endpoint-row">
+              <p class="eyebrow">Files</p>
+              <p class="note">In Jellyfin, add a library at /media. Drop films onto the dashed box, or use Add files, Add folder, or New folder. Those land in ~/hog-shares, which Jellyfin already reads.</p>
+              <div id="share-drop" class="share-drop">
+                <span class="share-drop-kicker">Drop target</span>
+                <strong id="share-drop-target">~/hog-shares</strong>
+                <span id="share-drop-new" hidden></span>
+                <span class="share-drop-note">Films and photos land in that folder. Same disk shows up right away. The original file stays where it was.</span>
+              </div>
+              <div class="row">
+                <button type="button" id="media-add">Add files</button>
+                <button type="button" id="media-add-folder">Add folder</button>
+                <button type="button" id="media-new-folder">New folder</button>
+              </div>
+              <form id="media-folder-form" class="media-folder-form" hidden>
+                <label>Folder name
+                  <input id="media-folder-name" autocomplete="off" spellcheck="false" placeholder="films" maxlength="180">
+                </label>
+                <button type="submit">Create</button>
+              </form>
+              <p id="media-crumb" class="media-crumb"><button type="button" data-media-path="">Library</button></p>
+              <p id="media-status" class="note" role="status"></p>
+              <p id="media-empty" class="note">Nothing in the library yet. Drop films and photos above, or use Add files.</p>
+              <ul id="media-list" class="media-list"></ul>
+            </div>
+            <div id="tailscale-shares" class="endpoint-row share-walk">
+              <p class="eyebrow">Phone folders</p>
+              <p id="share-offline" class="note">Start the tailscale container in Docker and sign in. A folder you add here then gets an https address for the phone's browser.</p>
+              <ol id="share-steps" class="share-steps" hidden>
+                <li><strong>Tailscale is running.</strong> <span id="share-dns">The phone uses the Tailscale app on this same account. Funnel stays off.</span></li>
+                <li>
+                  <strong>Add a folder.</strong>
+                  <div class="share-icons">
+                    <button type="button" id="share-computer" class="share-card">
+                      <svg viewBox="0 0 48 48" aria-hidden="true">
+                        <rect x="7" y="8" width="34" height="22" rx="3"></rect>
+                        <path d="M20 30v5h8v-5M16 35h16"></path>
+                        <path d="M16 15h10l2 3h8v7H16z"></path>
+                      </svg>
+                      <span>This computer</span>
+                      <small>New folder in ~/hog-shares</small>
+                    </button>
+                    <button type="button" id="share-network" class="share-card">
+                      <svg viewBox="0 0 48 48" aria-hidden="true">
+                        <circle cx="24" cy="9" r="3.5"></circle>
+                        <circle cx="10" cy="36" r="3.5"></circle>
+                        <circle cx="38" cy="36" r="3.5"></circle>
+                        <path d="M24 13v5M21 22L12 32M27 22l9 10"></path>
+                        <path d="M16 18h10l2 3h8v7H16z"></path>
+                      </svg>
+                      <span>Network folder</span>
+                      <small>A folder already on this computer</small>
+                    </button>
+                  </div>
+                  <form id="share-name-form" class="share-name" hidden>
+                    <label>Folder name
+                      <input id="share-name" autocomplete="off" spellcheck="false" placeholder="photos" maxlength="25">
+                    </label>
+                    <button type="submit">Create</button>
+                  </form>
+                </li>
+                <li>
+                  <strong>Open it on the phone.</strong>
+                  <div class="row">
+                    <button type="button" id="share-publish">Publish to the phone</button>
+                    <button type="button" id="share-enable" hidden>Allow folder sharing</button>
+                  </div>
+                  <p class="note">The phone page uses large type. Tap a photo to open it. The phone can open and download files. It cannot upload. Stop sharing leaves the files in the library.</p>
+                </li>
+              </ol>
+              <p id="share-empty" class="note">No folders yet.</p>
+              <ul id="share-list" class="share-list"></ul>
+            </div>
+          </div>
+        </section>
+        <section id="shell-view" class="shell-view" hidden></section>
+        <iframe id="frame" class="frame" title="Page" hidden referrerpolicy="no-referrer" allow="cross-origin-isolated" sandbox="allow-scripts allow-forms allow-popups allow-same-origin"></iframe>
+        <iframe id="node-frame" class="frame" title="Warthog node" referrerpolicy="no-referrer" allow="cross-origin-isolated" sandbox="allow-scripts allow-forms allow-popups allow-same-origin"></iframe>
+        <section class="status" id="status" hidden>
+          <p id="status-text"></p>
+        </section>
+      </main>
+      </div>
+
+      <aside class="wallet" id="wallet">
+        <header class="w-head">
+          <canvas id="identicon" width="28" height="28" aria-hidden="true"></canvas>
+          <div class="w-id">
+            <strong id="w-title">Warthog</strong>
+            <button type="button" id="copy-address" class="w-addr" title="Copy address">
+              <span id="w-addr-short">Not unlocked</span>
+            </button>
+          </div>
+          <div class="net" id="net-menu">
+            <select id="network" hidden aria-hidden="true" tabindex="-1">
+              <option value="mainnet" selected>WART</option>
+              <option value="defi">WART testnet</option>
+              <option value="ethereum">Ethereum</option>
+              <option value="bitcoin">Bitcoin</option>
+              <option value="hemi">Hemi</option>
+              <option value="solana">Solana</option>
+            </select>
+            <button type="button" id="net-btn" class="net-btn" aria-label="Network" aria-haspopup="listbox" aria-expanded="false" aria-controls="net-list">
+              <span id="net-face" class="net-mark" data-mark="wart"></span>
+              <span id="net-ticker">WART</span>
+              <span class="net-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div id="net-panel" class="net-panel" hidden>
+              <div id="net-list" role="listbox" aria-label="Network">
+                <button type="button" role="option" data-chain="wart" data-mark="wart" data-ticker="WART">
+                  <span class="net-mark" data-mark="wart"></span>
+                  <span class="net-copy"><span>WART</span><small>Mainnet</small></span>
+                </button>
+                <button type="button" role="option" data-chain="ethereum" data-mark="eth" data-ticker="ETH">
+                  <span class="net-mark" data-mark="eth"></span>
+                  <span class="net-copy"><span>ETH</span><small>Ethereum</small></span>
+                </button>
+                <button type="button" role="option" data-chain="bitcoin" data-mark="btc" data-ticker="BTC">
+                  <span class="net-mark" data-mark="btc"></span>
+                  <span class="net-copy"><span>BTC</span><small>Bitcoin</small></span>
+                </button>
+                <button type="button" role="option" data-chain="hemi" data-mark="hemi" data-ticker="HEMI">
+                  <span class="net-mark" data-mark="hemi"></span>
+                  <span class="net-copy"><span>HEMI</span><small>Hemi</small></span>
+                </button>
+                <button type="button" role="option" data-chain="solana" data-mark="sol" data-ticker="SOL">
+                  <span class="net-mark" data-mark="sol"></span>
+                  <span class="net-copy"><span>SOL</span><small>Solana</small></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </header>
+        <div id="dapp-sheet" class="dapp-sheet" hidden>
+          <h3 id="dapp-title">Connect</h3>
+          <p id="dapp-origin" class="note"></p>
+          <div id="dapp-lines" class="dapp-lines"></div>
+          <label id="dapp-sure-row" class="dapp-check" hidden>
+            <input id="dapp-sure" type="checkbox">
+            <span>I approve this.</span>
+          </label>
+          <div class="row">
+            <button type="button" id="dapp-reject">Reject</button>
+            <button type="button" id="dapp-ok" class="primary">Connect</button>
+          </div>
+        </div>
+
+        <div class="w-body">
+          <section id="panel-setup">
+            <div id="hub">
+              <img class="hub-logo" src="fullLogo.png" alt="Warthog Network">
+              <p class="hub-kicker">No wallet open</p>
+              <h2 id="hub-title">Get started</h2>
+              <p class="note" id="hub-hint">Create a wallet locked by a password in this window. A passkey stays in the extension.</p>
+              <div class="hub-cards">
+                <button type="button" id="hub-unlock" class="hub-card is-primary" hidden>
+                  <strong>Unlock saved wallet</strong>
+                  <small id="hub-unlock-meta">1 in this window</small>
+                </button>
+                <button type="button" id="create" class="hub-card is-primary">
+                  <strong>Create new wallet</strong>
+                  <small>Name, then a new private key</small>
+                </button>
+                <button type="button" id="show-import" class="hub-card">
+                  <strong id="hub-restore-label">I already have a wallet</strong>
+                  <small>Seed, key, or file</small>
+                </button>
+                <div class="hub-window">
+                  <strong>Wallet window</strong>
+                  <p id="hub-window-copy">The toolbar icon opens a panel docked on the side of the browser. The Nano connects there.</p>
+                  <div class="hub-modes">
+                    <button type="button" id="mode-dropdown" aria-pressed="false">Dropdown</button>
+                    <button type="button" id="mode-side" class="is-on" aria-pressed="true">Side panel</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="setup-steps" hidden>
+              <button type="button" id="setup-back" class="w-back">← Back</button>
+              <h2 id="step-title">Create wallet</h2>
+              <p class="note" id="step-hint"></p>
+              <form id="create-name-form" class="stack" hidden>
+                <label>Wallet name
+                  <input id="create-name" maxlength="32" autocomplete="off" placeholder="e.g. main">
+                </label>
+                <button type="submit" class="primary">Create with a new key</button>
+              </form>
+              <form id="create-form" class="stack" hidden>
+                <input type="text" name="username" autocomplete="username" value="hog" hidden>
+                <label>New private key
+                  <textarea id="new-key" readonly rows="3"></textarea>
+                </label>
+                <p class="warn">Write this key down. Hog cannot show it again after you set a password.</p>
+                <p class="note">Personal hot wallet. Not the bridge pool. The key is encrypted in this window and is not sent to the node.</p>
+                <label class="check"><input id="saved-key" type="checkbox"> I saved this private key</label>
+                <label>Password
+                  <input id="create-pass" type="password" autocomplete="new-password" minlength="8">
+                </label>
+                <label>Confirm password
+                  <input id="create-pass2" type="password" autocomplete="new-password" minlength="8">
+                </label>
+                <button type="submit" class="primary">Save wallet</button>
+              </form>
+              <div id="restore-menu" class="hub-cards" hidden>
+                <button type="button" id="restore-key" class="hub-card">
+                  <strong>Private key</strong>
+                  <small>64-character hex</small>
+                </button>
+                <button type="button" id="restore-seed" class="hub-card">
+                  <strong>Seed phrase</strong>
+                  <small>12 or 24 words</small>
+                </button>
+                <button type="button" id="restore-file" class="hub-card">
+                  <strong>Encrypted file</strong>
+                  <small>warthog_wallet.txt</small>
+                </button>
+                <button type="button" id="restore-ledger" class="hub-card">
+                  <strong>Ledger</strong>
+                  <small>Nano S+ with the Warthog app open</small>
+                </button>
+              </div>
+              <p id="restore-limit" class="note" hidden></p>
+              <form id="phrase-form" class="stack" hidden>
+                <label>Recovery phrase
+                  <textarea id="import-phrase" rows="3" autocomplete="off" spellcheck="false" placeholder="12 or 24 words"></textarea>
+                </label>
+                <label>Password
+                  <input id="phrase-pass" type="password" autocomplete="new-password" minlength="8">
+                </label>
+                <button type="submit" class="primary">Save phrase wallet</button>
+              </form>
+              <form id="import-form" class="stack" hidden>
+                <input type="text" name="username" autocomplete="username" value="hog" hidden>
+                <label>Private key
+                  <input id="import-key" type="password" autocomplete="off" spellcheck="false" placeholder="64 hex characters">
+                </label>
+                <label>Password
+                  <input id="import-pass" type="password" autocomplete="new-password" minlength="8">
+                </label>
+                <button type="submit" class="primary">Save imported wallet</button>
+              </form>
+              <form id="unlock-form" class="stack" hidden>
+                <input type="text" name="username" autocomplete="username" value="hog" hidden>
+                <p id="saved-address" class="mono"></p>
+                <label>Password
+                  <input id="unlock-pass" type="password" autocomplete="current-password">
+                </label>
+                <button type="submit" class="primary">Unlock</button>
+                <button type="button" id="forget" class="danger">Forget this wallet</button>
+              </form>
+            </div>
+            <p id="setup-error" class="error" role="status"></p>
+          </section>
+
+          <section id="panel-open" hidden>
+            <div id="wpage-home">
+              <div class="home-wallet-card">
+                <div class="card-head">
+                  <div class="card-label">
+                    <span>Available balance</span>
+                    <button type="button" id="wart-net" class="net-badge" hidden>Mainnet</button>
+                  </div>
+                  <button type="button" id="bal-refresh" class="bal-refresh"><span id="bal-refresh-mark" aria-hidden="true">⟳</span><span id="bal-refresh-label">Refresh</span></button>
+                </div>
+                <div id="bal-body"></div>
+                <p class="hold-note" id="evm-line"></p>
+              </div>
+              <div class="w-actions" id="home-actions">
+                <button type="button" id="go-send"><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="m476.59 227.05-.16-.07L49.35 49.84A23.56 23.56 0 0 0 27.14 52 24.65 24.65 0 0 0 16 72.59v113.29a24 24 0 0 0 19.52 23.57l232.93 43.07a4 4 0 0 1 0 7.86L35.53 303.45A24 24 0 0 0 16 327v113.31A23.57 23.57 0 0 0 26.59 460a23.94 23.94 0 0 0 13.22 4 24.55 24.55 0 0 0 9.52-1.93L476.4 285.94l.19-.09a32 32 0 0 0 0-58.8z"/></svg>Send</button>
+                <button type="button" id="go-receive" data-mainnet-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="M336 176h40a40 40 0 0 1 40 40v208a40 40 0 0 1-40 40H136a40 40 0 0 1-40-40V216a40 40 0 0 1 40-40h40"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="m176 272 80 80 80-80M256 48v288"/></svg>Receive</button>
+                <button type="button" id="go-swap" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="M352 144h112v112"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="m48 368 121.37-121.37a32 32 0 0 1 45.26 0l50.74 50.74a32 32 0 0 0 45.26 0L448 160"/></svg>Swap</button>
+                <button type="button" id="go-liquidity" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="M265.12 60.12a12 12 0 0 0-18.23 0C215.23 97.15 112 225.17 112 320c0 88.37 55.64 144 144 144s144-55.63 144-144c0-94.83-103.23-222.85-134.88-259.88zM272 412a12 12 0 0 1-11.34-16 11.89 11.89 0 0 1 11.41-8A60.06 60.06 0 0 0 332 328.07a11.89 11.89 0 0 1 8-11.41A12 12 0 0 1 356 328a84.09 84.09 0 0 1-84 84z"/></svg>Liquidity</button>
+                <button type="button" id="go-mint" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="M121.72 32a4 4 0 0 0-3.72 5.56l2.3 5.43 40.7 94.9a4 4 0 0 0 6.88.82L243 38.4a4 4 0 0 0-3.2-6.4zm298.21 26.06-41.28 96.37a4 4 0 0 0 3.68 5.57h101a4 4 0 0 0 3.4-6.11L427 57.53a4 4 0 0 0-7.07.53zM85 57.57l-59.71 96.32a4 4 0 0 0 3.4 6.11h101a4 4 0 0 0 3.67-5.58L92 58.1a4 4 0 0 0-7-.53zM393.27 32H267.82a1.94 1.94 0 0 0-1.56 3.11l79.92 106.46a1.94 1.94 0 0 0 3.34-.4L391.6 43l3.4-8.34a1.92 1.92 0 0 0-1.7-2.66zM239 448l-89.43-253.49A3.78 3.78 0 0 0 146 192H25.7a3.72 3.72 0 0 0-2.95 6l216 279.81a5.06 5.06 0 0 0 6.39 1.37 5 5 0 0 0 2.39-6.08zm247.3-256H366a3.75 3.75 0 0 0-3.54 2.51l-98.2 278.16a5.21 5.21 0 0 0 2.42 6.31 5.22 5.22 0 0 0 6.61-1.39L489.25 198a3.72 3.72 0 0 0-2.95-6zM259.2 78.93l56 74.67a4 4 0 0 1-3.2 6.4H200a4 4 0 0 1-3.2-6.4l56-74.67a4 4 0 0 1 6.4 0zm-7 310.31-67.7-191.91a4 4 0 0 1 3.77-5.33h135.46a4 4 0 0 1 3.77 5.33l-67.73 191.91a4 4 0 0 1-7.54 0z"/></svg>Mint</button>
+              </div>
+              <button type="button" id="go-receive-defi" class="w-back" data-defi-only>Receive</button>
+            </div>
+
+            <div id="wpage-trade" hidden>
+              <p class="w-k">Trade</p>
+              <div class="w-menu">
+                <button type="button" id="trade-swap" data-defi-only><span><strong>Swap</strong><small>Market and limit orders</small></span></button>
+                <button type="button" id="trade-safe"><span><strong>SafeTrade</strong><small>Centralized exchange. Requires a SafeTrade account and API key</small></span></button>
+                <button type="button" id="trade-aave"><span><strong>Aave</strong><small>Supply, borrow, repay and withdraw on Ethereum</small></span></button>
+              </div>
+              <p class="note" data-mainnet-only>Native swap, liquidity, and mint are on the DeFi testnet. Switch with the network pill.</p>
+            </div>
+
+            <div id="wpage-send" hidden>
+              <button type="button" class="w-back" data-back="home">Wallet</button>
+              <h3>Send</h3>
+              <form id="send-form" class="stack">
+                <p id="send-chain-note" class="note" hidden></p>
+                <label id="send-to-label">To
+                  <input id="send-to" autocomplete="off" spellcheck="false" placeholder="48 hex characters">
+                </label>
+                <label id="send-amount-label">Amount
+                  <span class="amount-line">
+                    <input id="send-amount" inputmode="decimal" placeholder="0.00">
+                    <button type="button" id="send-max" class="tiny">Max</button>
+                  </span>
+                </label>
+                <label id="send-fee-label">Fee
+                  <input id="send-fee" inputmode="decimal" value="0.001">
+                </label>
+                <p id="send-error" class="error" role="status"></p>
+                <p id="send-review" class="note" hidden></p>
+                <button type="submit" class="primary" id="send-button">Review send</button>
+              </form>
+            </div>
+
+            <div id="wpage-receive" hidden>
+              <button type="button" class="w-back" data-back="home">Wallet</button>
+              <h3>Receive</h3>
+              <p class="note" id="receive-note">Send WART to this address on the network selected above.</p>
+              <p id="receive-address" class="mono"></p>
+              <button type="button" id="copy-receive" class="primary">Copy address</button>
+            </div>
+
+            <div id="wpage-swap" hidden>
+              <button type="button" class="w-back" data-back="trade">Trade</button>
+              <h3>Swap</h3>
+              <form id="swap-form" class="stack">
+                <label>Asset
+                  <span class="amount-line">
+                    <input id="swap-query" autocomplete="off" spellcheck="false" placeholder="Name or 64-hex hash" maxlength="64">
+                    <button type="button" id="swap-find" class="tiny">Find</button>
+                  </span>
+                </label>
+                <div id="swap-hits" class="w-hits"></div>
+                <label>Side
+                  <select id="swap-side">
+                    <option value="buy">Buy with WART</option>
+                    <option value="sell">Sell for WART</option>
+                  </select>
+                </label>
+                <label>Amount
+                  <span class="amount-line">
+                    <input id="swap-amount" inputmode="decimal" placeholder="0.00">
+                    <button type="button" id="swap-max" class="tiny">Max</button>
+                  </span>
+                </label>
+                <label>Limit price
+                  <input id="swap-price" inputmode="decimal" placeholder="WART per token">
+                </label>
+                <label>Decimals
+                  <input id="swap-decimals" inputmode="numeric" value="8">
+                </label>
+                <label>Fee
+                  <input id="swap-fee" inputmode="decimal" value="0.001">
+                </label>
+                <p id="swap-error" class="error" role="status"></p>
+                <p id="swap-review" class="note" hidden></p>
+                <button type="submit" class="primary" id="swap-button">Review swap</button>
+              </form>
+            </div>
+
+            <div id="wpage-liquidity" hidden>
+              <button type="button" class="w-back" data-back="home">Wallet</button>
+              <h3>Liquidity</h3>
+              <form id="liq-form" class="stack">
+                <label>Asset hash
+                  <input id="liq-asset" autocomplete="off" spellcheck="false" placeholder="64 hex characters">
+                </label>
+                <label>Asset amount
+                  <input id="liq-asset-amount" inputmode="decimal" placeholder="0.00">
+                </label>
+                <label>WART amount
+                  <input id="liq-wart" inputmode="decimal" placeholder="0.00">
+                </label>
+                <label>Decimals
+                  <input id="liq-decimals" inputmode="numeric" value="8">
+                </label>
+                <label>Fee
+                  <input id="liq-fee" inputmode="decimal" value="0.001">
+                </label>
+                <p id="liq-error" class="error" role="status"></p>
+                <p id="liq-review" class="note" hidden></p>
+                <button type="submit" class="primary" id="liq-button">Review deposit</button>
+              </form>
+              <form id="liq-out-form" class="stack">
+                <h3>Withdraw</h3>
+                <label>LP shares
+                  <input id="liq-shares" inputmode="decimal" placeholder="0.00">
+                </label>
+                <p id="liq-out-error" class="error" role="status"></p>
+                <p id="liq-out-review" class="note" hidden></p>
+                <button type="submit" class="primary" id="liq-out-button">Review withdrawal</button>
+              </form>
+            </div>
+
+            <div id="wpage-mint" hidden>
+              <button type="button" class="w-back" data-back="home">Wallet</button>
+              <h3>Mint</h3>
+              <p class="note">Issue a new asset on the DeFi testnet. The name is one to five characters.</p>
+              <form id="mint-form" class="stack">
+                <label>Name
+                  <input id="mint-name" maxlength="5" autocomplete="off" spellcheck="false" placeholder="HOG">
+                </label>
+                <label>Total supply
+                  <input id="mint-supply" inputmode="decimal" placeholder="1000">
+                </label>
+                <label>Decimals
+                  <input id="mint-decimals" inputmode="numeric" value="8">
+                </label>
+                <label>Fee
+                  <input id="mint-fee" inputmode="decimal" value="0.001">
+                </label>
+                <p id="mint-error" class="error" role="status"></p>
+                <p id="mint-review" class="note" hidden></p>
+                <button type="submit" class="primary" id="mint-button">Review mint</button>
+              </form>
+            </div>
+
+            <div id="wpage-safetrade" hidden>
+              <button type="button" class="w-back" data-back="trade">Trade</button>
+              <h3>SafeTrade</h3>
+              <p class="note">SafeTrade is the centralized exchange from the extension. It needs a SafeTrade account and API key, and it does not spend this Warthog key.</p>
+              <p class="note">Open SafeTrade in a tab, then come back here to send or receive WART.</p>
+              <button type="button" id="open-safetrade" class="primary">Open safetrade.com</button>
+            </div>
+
+            <div id="wpage-aave" hidden>
+              <button type="button" class="w-back" data-back="trade">Trade</button>
+              <h3>Aave</h3>
+              <p class="note">Open the Aave site in a tab and choose Hog. This screen does not supply or borrow by itself.</p>
+            </div>
+
+            <div id="wpage-activity" hidden>
+              <p class="w-k">Activity</p>
+              <ul id="activity" class="activity"></ul>
+              <p id="activity-empty" class="note">No WART transfers on this page of history.</p>
+              <p class="w-k">Pending</p>
+              <ul id="pending" class="activity"></ul>
+              <p id="pending-empty" class="note">No pending transactions.</p>
+              <p class="w-k">Open orders</p>
+              <ul id="orders" class="activity"></ul>
+              <p id="orders-empty" class="note">No open limit orders.</p>
+              <p id="orders-error" class="error" role="status"></p>
+            </div>
+
+            <div id="wpage-settings" hidden>
+              <div class="w-menu">
+                <button type="button" data-wpage="account"><span><strong id="account-label">Account</strong><small>Name. The password encrypts this key</small></span></button>
+                <button type="button" data-wpage="accounts"><span><strong>Manage accounts</strong><small>Warthog, Ethereum, Bitcoin, Hemi, Solana</small></span></button>
+                <button type="button" data-wpage="key"><span><strong>Warthog private key</strong><small>Reveal the key saved in this window</small></span></button>
+                <button type="button" data-wpage="phrase"><span><strong>Recovery phrase</strong><small>Back up every account. Keep it secret.</small></span></button>
+                <button type="button" data-wpage="autolock"><span><strong>Auto-lock</strong><small>Lock after inactivity</small></span></button>
+                <button type="button" data-wpage="display"><span><strong>Number format</strong><small>How balances are shown</small></span></button>
+                <button type="button" data-wpage="nodes"><span><strong>Warthog nodes</strong><small>DeFi testnet and mainnet</small></span></button>
+                <button type="button" data-wpage="ledger"><span><strong>Hardware wallet</strong><small>Ledger window</small></span></button>
+                <button type="button" data-wpage="sites"><span><strong>Connected sites</strong><small>Pages that can ask for this account</small></span></button>
+              </div>
+              <p id="chain-line" class="sub"></p>
+              <div class="row">
+                <button type="button" id="refresh">Refresh</button>
+                <button type="button" id="lock">Lock</button>
+                <button type="button" id="forget-open" class="danger">Forget</button>
+              </div>
+            </div>
+
+            <div id="wpage-account" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Account</h3>
+              <form id="name-form" class="stack">
+                <label>Name
+                  <input id="account-name" maxlength="32" autocomplete="off">
+                </label>
+                <button type="submit" class="primary">Save name</button>
+              </form>
+              <p id="address-line" class="mono address"></p>
+              <p class="note">Passkeys and authenticator 2FA stay in the extension. This window unlocks with the password.</p>
+            </div>
+
+            <div id="wpage-accounts" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Manage accounts</h3>
+              <p class="note">The network menu switches Warthog, Ethereum, Bitcoin, Hemi, and Solana. A private key has Ethereum, Hemi, and Bitcoin. Solana is there when this wallet was restored from a recovery phrase.</p>
+            </div>
+
+            <div id="wpage-key" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Warthog private key</h3>
+              <form id="key-form" class="stack">
+                <input type="text" name="username" autocomplete="username" value="hog" hidden>
+                <label>Password
+                  <input id="key-pass" type="password" autocomplete="current-password">
+                </label>
+                <button type="submit" class="primary">Show key</button>
+              </form>
+              <textarea id="revealed-key" readonly rows="3" hidden></textarea>
+              <p id="key-error" class="error" role="status"></p>
+            </div>
+
+            <div id="wpage-phrase" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Recovery phrase</h3>
+              <p class="note" id="phrase-note">This wallet was imported or created as a private key, so there is no recovery phrase. The key above is the backup.</p>
+            </div>
+
+            <div id="wpage-autolock" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Auto-lock</h3>
+              <label>After inactivity
+                <select id="autolock">
+                  <option value="0">Stay unlocked</option>
+                  <option value="1">1 minute</option>
+                  <option value="5">5 minutes</option>
+                  <option value="15">15 minutes</option>
+                  <option value="30">30 minutes</option>
+                  <option value="60">60 minutes</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="wpage-display" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Number format</h3>
+              <div class="w-picks" id="display-picks">
+                <button type="button" data-display="full">Full</button>
+                <button type="button" data-display="0">0</button>
+                <button type="button" data-display="2">2</button>
+                <button type="button" data-display="4">4</button>
+                <button type="button" data-display="6">6</button>
+                <button type="button" data-display="8">8</button>
+              </div>
+            </div>
+
+            <div id="wpage-nodes" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Warthog nodes</h3>
+              <p class="note">The network pill switches these two nodes.</p>
+              <p class="mono">DeFi testnet<br>https://warthog-defitestnet.duckdns.org</p>
+              <p class="mono">Mainnet<br>https://warthognode.duckdns.org</p>
+            </div>
+
+            <div id="wpage-ledger" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Hardware wallet</h3>
+              <p class="note">Ledger signs in the extension. Hog uses the Warthog key stored in this window.</p>
+            </div>
+
+            <div id="wpage-sites" hidden>
+              <button type="button" class="w-back" data-back="settings">Settings</button>
+              <h3>Connected sites</h3>
+              <p class="note">A site can ask to connect when you choose Hog. It sees the Ethereum address below. A signature or a transaction still waits for approval.</p>
+              <p id="site-address" class="mono"></p>
+              <ul id="site-list" class="activity"></ul>
+              <p id="site-empty" class="note">No connected sites.</p>
+            </div>
+          </section>
+        </div>
+
+        <video id="wallet-run" class="brand-run" hidden muted playsinline preload="none" disablepictureinpicture disableremoteplayback aria-hidden="true"></video>
+        <nav id="w-nav" class="w-nav" aria-label="Wallet" hidden>
+          <button type="button" data-wpage="home" class="is-active">Wallet</button>
+          <button type="button" data-wpage="trade">Trade</button>
+          <button type="button" data-wpage="activity">Activity</button>
+          <button type="button" data-wpage="settings">Settings</button>
+        </nav>
+      </aside>
+
+      <button type="button" id="tabs-edge" class="edge-tab is-open" aria-expanded="true" aria-controls="tabstrip" aria-label="Hide tabs">
+        <span class="edge-grip" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span id="tabs-edge-label">Tabs</span>
+        <span class="edge-chevron" aria-hidden="true">‹</span>
+      </button>
+      <button type="button" id="wallet-edge" class="edge-tab is-open" aria-controls="wallet" aria-expanded="true" aria-label="Hide wallet">
+        <span class="edge-grip" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="edge-chevron" aria-hidden="true">›</span>
+        <span id="wallet-edge-label">Wallet</span>
+      </button>
+    </div>
+  </div>
+  <div id="resize-frame" class="resize-frame" hidden>
+    <div data-edge="nw"></div>
+    <div data-edge="ne"></div>
+    <div data-edge="sw"></div>
+    <div data-edge="se"></div>
+    <div data-edge="north"></div>
+    <div data-edge="south"></div>
+    <div data-edge="west"></div>
+    <div data-edge="east"></div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

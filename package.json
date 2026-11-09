@@ -1,0 +1,23 @@
+{
+  "name": "hog-browser",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A small local browser with a Warthog wallet in the sidebar.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs && node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
+    "ethers": "^6.16.0",
+    "ws": "^8.21.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
