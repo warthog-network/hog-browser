@@ -314,13 +314,23 @@ class JellyfinGpuToggleTest(unittest.TestCase):
         self.assertIn("function paintJellyfinGpu", app)
         self.assertIn("containers:jellyfin-gpu-set", app)
         self.assertIn("containers:jellyfin-gpu-clear", app)
+        self.assertIn("containers:jellyfin-gpu-install", app)
         self.assertIn("Copy commands", app)
+        self.assertIn("Install NVIDIA toolkit", docker)
+        self.assertIn("Install NVIDIA toolkit", app)
+        self.assertIn('id="jellyfin-gpu-install"', docker)
         self.assertIn("jellyfin-gpu-set", hog)
         self.assertIn("jellyfin-gpu-clear", hog)
+        self.assertIn("jellyfin-gpu-install", hog)
         self.assertIn("GPU acceleration (NVIDIA)", readme)
         self.assertIn("NVIDIA NVENC", readme)
         self.assertIn("do not carry over", readme.lower())
         self.assertIn("host.docker.internal", readme)
+        self.assertIn("Install NVIDIA toolkit", readme)
+        self.assertIn("pkexec", readme)
+        script = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        self.assertIn("${APP}/libexec/hog-nvidia-toolkit-install", script)
+        self.assertIn("org.hog.Browser.nvidia-toolkit-install.policy", script)
 
 
 

@@ -76,6 +76,8 @@ JELLYFIN_CACHE_VOLUME = "hog-jellyfin-cache"
 NVIDIA_VISIBLE_ENV = "NVIDIA_VISIBLE_DEVICES=all"
 NVIDIA_CAPS_ENV = "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"
 NVIDIA_DEV_RE = re.compile(r"^/dev/nvidia[A-Za-z0-9_/-]*$")
+NVIDIA_TOOLKIT_HELPER = Path("/opt/hog-browser/libexec/hog-nvidia-toolkit-install")
+NVIDIA_TOOLKIT_INSTALL_TIMEOUT = 600
 
 
 def docker_host_env(sock):
@@ -195,6 +197,32 @@ def nvidia_toolkit_install_commands(configure_only=False):
 
 def docker_group_commands():
     return ['sudo usermod -aG docker "$USER"']
+
+
+def nvidia_toolkit_helper_status(path=None, pkexec_path=None):
+    helper = Path(path) if path is not None else NVIDIA_TOOLKIT_HELPER
+    if not helper.is_file():
+        return False, (
+            "Install the hog-browser .deb to install the toolkit from this button. "
+            "Until then, copy the commands below."
+        )
+    pkexec = pkexec_path if pkexec_path is not None else shutil.which("pkexec")
+    if not pkexec:
+        return False, (
+            "pkexec is not installed, so Hog cannot open a password prompt. "
+            "Copy the commands below, or install pkexec (policykit-1)."
+        )
+    try:
+        st = helper.stat()
+    except OSError:
+        return False, "The toolkit installer could not be read. Copy the commands below."
+    if st.st_uid != 0:
+        return False, "The toolkit installer is not the packaged root helper. Copy the commands below."
+    if st.st_mode & 0o022:
+        return False, "The toolkit installer is writable and will not be run. Copy the commands below."
+    if not os.access(helper, os.X_OK):
+        return False, "The toolkit installer is not executable. Copy the commands below."
+    return True, ""
 
 
 VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$")
@@ -1333,11 +1361,84 @@ class Guard:
 
     def jellyfin_gpu_fields(self):
         checks = self.gpu_readiness()
+        can_install, _reason = self.toolkit_helper_status()
         return {
             "jellyfinGpu": self.gpu_enabled(),
             "jellyfinGpuReady": all(item.get("ok") for item in checks),
             "jellyfinGpuChecks": checks,
+            "jellyfinGpuCanInstall": bool(can_install),
         }
+
+    def toolkit_helper_status(self):
+        return nvidia_toolkit_helper_status()
+
+    def install_nvidia_toolkit(self):
+        can_install, reason = self.toolkit_helper_status()
+        if not can_install:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = reason
+            payload["jellyfinGpuInstallLog"] = ""
+            payload["jellyfinGpuCanInstall"] = False
+            return payload
+        checks = {item.get("id"): item for item in self.gpu_readiness()}
+        toolkit = checks.get("toolkit") or {}
+        if toolkit.get("ok"):
+            payload = self.engine_status()
+            payload["notice"] = "The NVIDIA Container Toolkit is already installed and configured."
+            payload["jellyfinGpuInstallLog"] = ""
+            return payload
+        try:
+            result = self.run_argv(
+                ["pkexec", str(NVIDIA_TOOLKIT_HELPER)],
+                timeout=NVIDIA_TOOLKIT_INSTALL_TIMEOUT,
+            )
+        except FileNotFoundError:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = (
+                "pkexec is not installed, so Hog cannot open a password prompt. "
+                "Copy the commands below, or install pkexec (policykit-1)."
+            )
+            payload["jellyfinGpuInstallLog"] = ""
+            payload["jellyfinGpuCanInstall"] = False
+            return payload
+        except subprocess.TimeoutExpired as exc:
+            output = f"{getattr(exc, 'stdout', '') or ''}{getattr(exc, 'stderr', '') or ''}".strip()
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "The toolkit install took too long. Copy the commands below, or try again."
+            payload["jellyfinGpuInstallLog"] = output[-8000:]
+            return payload
+        log = f"{result.stdout or ''}{result.stderr or ''}".strip()
+        payload = self.engine_status()
+        payload["jellyfinGpuInstallLog"] = log[-8000:]
+        ready = any(item.get("id") == "toolkit" and item.get("ok") for item in payload.get("jellyfinGpuChecks") or [])
+        if result.returncode == 0 and ready:
+            payload["notice"] = (
+                "NVIDIA Container Toolkit is installed and configured for Docker Engine. "
+                "You can turn on GPU acceleration."
+            )
+            payload["error"] = ""
+            return payload
+        if result.returncode in {126, 127}:
+            payload["ok"] = False
+            payload["error"] = (
+                "The password prompt was dismissed or pkexec could not start the installer. "
+                "Try again, or copy the commands below."
+            )
+            return payload
+        payload["ok"] = False
+        if result.returncode == 0 and not ready:
+            payload["error"] = (
+                "The installer finished, but the toolkit check is still not ready. "
+                "See the log, or copy the commands below."
+            )
+        else:
+            detail = log.strip().splitlines()
+            message = detail[-1][:180] if detail else "The toolkit install did not finish."
+            payload["error"] = f"{message} See the log, or copy the commands below."
+        return payload
 
     def _attach_gpu(self, payload):
         if not isinstance(payload, dict):
@@ -2544,6 +2645,8 @@ class Guard:
             return self._mark_docker(self.set_jellyfin_gpu(True))
         if action == "jellyfin-gpu-clear":
             return self._mark_docker(self.set_jellyfin_gpu(False))
+        if action == "jellyfin-gpu-install":
+            return self._mark_docker(self.install_nvidia_toolkit())
         if action == "engine":
             return self.engine_status()
         if action == "share-list":

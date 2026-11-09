@@ -2539,8 +2539,10 @@ function paintJellyfinGpu(payload) {
     status.textContent = "Jellyfin runs on Docker Engine with the NVIDIA GPU. Turn this off to go back to Docker Desktop (CPU). Login and libraries do not carry over between engines; ~/hog-shares stays the same.";
   } else if (ready) {
     status.textContent = "This computer is ready. Turn this on to recreate Jellyfin on Docker Engine with --gpus all. Docker Desktop settings will not carry over. Tailscale stays on Docker Desktop.";
+  } else if (payload.jellyfinGpuCanInstall) {
+    status.textContent = "GPU transcoding needs the three checks below. If the NVIDIA toolkit is missing, press Install NVIDIA toolkit. Ubuntu will ask for your password. Hog never stores that password.";
   } else {
-    status.textContent = "GPU transcoding needs the three checks below. Hog only shows the commands; it does not run sudo.";
+    status.textContent = "GPU transcoding needs the three checks below. Copy the install commands when a check is missing. Installing the hog-browser .deb enables the Install NVIDIA toolkit button.";
   }
   if (Object.prototype.hasOwnProperty.call(payload, "error") && (payload.jellyfinGpu === true || payload.jellyfinGpu === false || payload.jellyfinGpuChecks)) {
     error.textContent = payload.error || "";
@@ -2601,6 +2603,37 @@ function paintJellyfinGpu(payload) {
     list.append(item);
   }
   if (hint) hint.hidden = !on;
+  const toolkit = checks.find((item) => item && item.id === "toolkit");
+  const installRow = $("jellyfin-gpu-install-row");
+  const installBtn = $("jellyfin-gpu-install");
+  if (installRow && installBtn) {
+    const showInstall = Boolean(payload.jellyfinGpuCanInstall) && Boolean(toolkit) && !toolkit.ok;
+    installRow.hidden = !showInstall;
+    if (installBtn.dataset.busy !== "1") {
+      installBtn.disabled = !showInstall;
+      installBtn.textContent = "Install NVIDIA toolkit";
+    }
+  }
+  const log = $("jellyfin-gpu-install-log");
+  if (log) {
+    const textLog = typeof payload.jellyfinGpuInstallLog === "string" ? payload.jellyfinGpuInstallLog : "";
+    log.hidden = !textLog;
+    log.textContent = textLog;
+    if (textLog) log.scrollTop = log.scrollHeight;
+  }
+  if (installBtn) {
+    // Clear busy after a result that included install fields or a fresh check list.
+    if (Object.prototype.hasOwnProperty.call(payload, "jellyfinGpuInstallLog")
+        || Object.prototype.hasOwnProperty.call(payload, "jellyfinGpuChecks")) {
+      if (installBtn.dataset.busy === "1" && (payload.ok === true || payload.ok === false)) {
+        delete installBtn.dataset.busy;
+        if (installRow && !installRow.hidden) {
+          installBtn.disabled = false;
+          installBtn.textContent = "Install NVIDIA toolkit";
+        }
+      }
+    }
+  }
 }
 
 function paintDocker(payload) {
@@ -4726,6 +4759,26 @@ function bind() {
         : "Starting Jellyfin with the NVIDIA GPU…";
     }
     desktopCommand(on ? "containers:jellyfin-gpu-clear" : "containers:jellyfin-gpu-set");
+  });
+
+  $("jellyfin-gpu-install").addEventListener("click", () => {
+    const button = $("jellyfin-gpu-install");
+    if (!button || button.dataset.busy === "1") return;
+    button.dataset.busy = "1";
+    button.disabled = true;
+    button.textContent = "Waiting for approval…";
+    const status = $("jellyfin-gpu-status");
+    const error = $("jellyfin-gpu-error");
+    const log = $("jellyfin-gpu-install-log");
+    if (error) error.textContent = "";
+    if (log) {
+      log.hidden = true;
+      log.textContent = "";
+    }
+    if (status) {
+      status.textContent = "Ubuntu will ask for your password. Hog is installing the NVIDIA Container Toolkit and configuring Docker Engine. Docker Desktop is not changed.";
+    }
+    desktopCommand("containers:jellyfin-gpu-install");
   });
 
   $("share-computer").addEventListener("click", () => {

@@ -229,6 +229,18 @@ button { cursor: pointer; }
   padding: 6px 12px;
   font-size: 12px;
 }
+#jellyfin-gpu-install { margin-right: 8px; }
+#jellyfin-gpu-install:disabled { opacity: 0.6; cursor: wait; }
+.gpu-install-log {
+  margin: 8px 0 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 200px;
+  overflow: auto;
+}
 
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }

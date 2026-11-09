@@ -21,6 +21,7 @@ from guard import (
     assign_share_port,
     canonical_command,
     compose_run,
+    NVIDIA_TOOLKIT_HELPER,
     docker_engine_install_commands,
     docker_offline,
     docker_volume_data,
@@ -28,6 +29,7 @@ from guard import (
     launch_args,
     mount_problem,
     nvidia_device_path,
+    nvidia_toolkit_helper_status,
     nvidia_toolkit_install_commands,
     parse_nvidia_gpu_name,
     parse_run,
@@ -1489,6 +1491,135 @@ class JellyfinGpuTest(unittest.TestCase):
             self.assertTrue(volumes[0].endswith(":/media:ro"))
             self.assertIn(f"{JELLYFIN_CONFIG_VOLUME}:/config", volumes)
             self.assertIn(f"{JELLYFIN_CACHE_VOLUME}:/cache", volumes)
+
+
+class ToolkitInstallTest(unittest.TestCase):
+    def test_helper_script_is_fixed_and_refuses_args(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "packaging" / "hog-nvidia-toolkit-install").read_text(encoding="utf-8")
+        self.assertIn("#!/bin/sh", script)
+        self.assertIn("This helper takes no arguments", script)
+        self.assertIn("must run as root via pkexec", script)
+        self.assertIn("nvidia-container-toolkit", script)
+        self.assertIn("nvidia-ctk runtime configure --runtime=docker", script)
+        self.assertIn("systemctl restart docker.service", script)
+        self.assertNotIn("docker-desktop", script)
+        self.assertNotIn("sudo", script)
+        policy = (root / "packaging" / "org.hog.Browser.nvidia-toolkit-install.policy").read_text(encoding="utf-8")
+        self.assertIn("/opt/hog-browser/libexec/hog-nvidia-toolkit-install", policy)
+        self.assertIn("org.freedesktop.policykit.exec.path", policy)
+        deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        self.assertIn('install -m 755 "${ROOT}/packaging/hog-nvidia-toolkit-install"', deb)
+        self.assertIn("${APP}/libexec/hog-nvidia-toolkit-install", deb)
+        self.assertIn("org.hog.Browser.nvidia-toolkit-install.policy", deb)
+        self.assertEqual(str(NVIDIA_TOOLKIT_HELPER), "/opt/hog-browser/libexec/hog-nvidia-toolkit-install")
+        result = subprocess.run(
+            [str(root / "packaging" / "hog-nvidia-toolkit-install"), "extra"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no arguments", result.stderr)
+        result = subprocess.run(
+            [str(root / "packaging" / "hog-nvidia-toolkit-install")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pkexec", result.stderr)
+
+    def test_helper_status_rejects_missing_untrusted_and_no_pkexec(self):
+        ok, reason = nvidia_toolkit_helper_status(path="/tmp/hog-missing-nvidia-helper")
+        self.assertFalse(ok)
+        self.assertIn(".deb", reason)
+        with tempfile.TemporaryDirectory() as folder:
+            helper = Path(folder) / "hog-nvidia-toolkit-install"
+            helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            helper.chmod(0o755)
+            ok, reason = nvidia_toolkit_helper_status(path=helper, pkexec_path="")
+            self.assertFalse(ok)
+            self.assertIn("pkexec", reason)
+            ok, reason = nvidia_toolkit_helper_status(path=helper, pkexec_path="/usr/bin/pkexec")
+            self.assertFalse(ok)
+            self.assertIn("root helper", reason)
+            helper.chmod(0o777)
+            ok, reason = nvidia_toolkit_helper_status(path=helper, pkexec_path="/usr/bin/pkexec")
+            self.assertFalse(ok)
+
+    def test_install_falls_back_without_calling_pkexec(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard.media_view = lambda: ("", [])
+            guard.gpu_readiness = lambda: [
+                {"id": "nvidia", "label": "NVIDIA GPU and driver", "ok": True, "detail": "ok", "commands": []},
+                {"id": "engine", "label": "Native Docker Engine", "ok": True, "detail": "ok", "commands": []},
+                {"id": "toolkit", "label": "NVIDIA Container Toolkit", "ok": False, "detail": "missing", "commands": ["sudo true"]},
+            ]
+            guard.toolkit_helper_status = lambda: (False, "Install the hog-browser .deb to install the toolkit from this button. Until then, copy the commands below.")
+            guard.run_argv = lambda args, timeout=8: calls.append((list(args), timeout)) or subprocess.CompletedProcess(args, 0, "", "")
+            payload = guard.handle("jellyfin-gpu-install")
+            self.assertFalse(payload["ok"])
+            self.assertIn(".deb", payload["error"])
+            self.assertFalse(payload.get("jellyfinGpuCanInstall"))
+            self.assertFalse(any(item[0] and item[0][0] == "pkexec" for item in calls))
+
+    def test_install_runs_fixed_pkexec_path_and_rechecks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+            state = {"ready": False}
+
+            def readiness():
+                return [
+                    {"id": "nvidia", "label": "NVIDIA GPU and driver", "ok": True, "detail": "ok", "commands": []},
+                    {"id": "engine", "label": "Native Docker Engine", "ok": True, "detail": "ok", "commands": []},
+                    {
+                        "id": "toolkit",
+                        "label": "NVIDIA Container Toolkit",
+                        "ok": state["ready"],
+                        "detail": "ok" if state["ready"] else "missing",
+                        "commands": [] if state["ready"] else ["sudo true"],
+                    },
+                ]
+
+            def run_argv(args, timeout=8):
+                calls.append((list(args), timeout))
+                state["ready"] = True
+                return subprocess.CompletedProcess(args, 0, "NVIDIA Container Toolkit is installed and configured.\n", "")
+
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard.media_view = lambda: ("", [])
+            guard.gpu_readiness = readiness
+            guard.toolkit_helper_status = lambda: (True, "")
+            guard.run_argv = run_argv
+            payload = guard.handle("jellyfin-gpu-install")
+            self.assertTrue(payload["ok"], payload)
+            self.assertIn((["pkexec", "/opt/hog-browser/libexec/hog-nvidia-toolkit-install"], 600), calls)
+            self.assertEqual(sum(1 for item in calls if item[0][:1] == ["pkexec"]), 1)
+            self.assertIn("installed and configured", payload["notice"])
+            self.assertIn("NVIDIA Container Toolkit is installed", payload["jellyfinGpuInstallLog"])
+            self.assertTrue(any(item["id"] == "toolkit" and item["ok"] for item in payload["jellyfinGpuChecks"]))
+
+    def test_install_reports_dismissed_pkexec_prompt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard.media_view = lambda: ("", [])
+            guard.gpu_readiness = lambda: [
+                {"id": "toolkit", "label": "NVIDIA Container Toolkit", "ok": False, "detail": "missing", "commands": []},
+            ]
+            guard.toolkit_helper_status = lambda: (True, "")
+            guard.run_argv = lambda args, timeout=8: subprocess.CompletedProcess(
+                args, 126, "", "Error executing command as another user: Request dismissed\n"
+            )
+            payload = guard.handle("jellyfin-gpu-install")
+            self.assertFalse(payload["ok"])
+            self.assertIn("dismissed", payload["error"].lower())
+            self.assertIn("Request dismissed", payload["jellyfinGpuInstallLog"])
+
 
 
 if __name__ == "__main__":

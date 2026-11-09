@@ -42,11 +42,13 @@ Or use **Settings → Default Apps** (sometimes labeled Default Applications) an
 
 Docker Desktop on Linux runs containers inside a small virtual machine, so it cannot pass through an NVIDIA GPU. Hog can instead run Jellyfin on native Docker Engine (`/var/run/docker.sock`, docker-ce) with `--gpus all`, while the Tailscale container stays on Docker Desktop and still publishes port 8096 to `host.docker.internal:8096`. That hostname already reaches this computer's loopback, which is how folder shares work today, so Jellyfin bound to `127.0.0.1:8096` on the host stays reachable from the phone.
 
-On the Docker page, the **GPU acceleration (NVIDIA)** card checks three things and shows copyable install commands when something is missing. Hog never runs `sudo` for you:
+On the Docker page, the **GPU acceleration (NVIDIA)** card checks three things and shows copyable install commands when something is missing:
 
 1. An NVIDIA GPU and driver (`nvidia-smi` works).
 2. Native Docker Engine, separate from Docker Desktop, with this user in the `docker` group.
-3. The NVIDIA Container Toolkit, configured for that engine (`sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`).
+3. The NVIDIA Container Toolkit, configured for that engine (`nvidia-ctk runtime configure --runtime=docker` and a restart of `docker.service`).
+
+If check 3 is missing and you installed the hog-browser `.deb`, press **Install NVIDIA toolkit**. That runs a packaged root helper at `/opt/hog-browser/libexec/hog-nvidia-toolkit-install` through `pkexec`, so Ubuntu can ask for your password in a system prompt. Hog never stores or types that password, and the helper takes no arguments. It installs the toolkit, configures Docker Engine, and restarts `docker.service` only — Docker Desktop is not changed. The same helper is safe to run more than once. If you are running Hog from source, or `pkexec` is missing, the button is hidden and you can copy the commands instead. Installing Docker Engine itself still uses those copyable commands.
 
 When all three are ready, turn the toggle on to recreate Jellyfin on Docker Engine. Named volumes `hog-jellyfin-config` and `hog-jellyfin-cache` hold that engine's login and libraries. Docker Desktop volumes do not carry over. `~/hog-shares` is still mounted at `/media`. After it starts, in Jellyfin go to **Dashboard → Playback → Transcoding** and pick **NVIDIA NVENC**. Turn the toggle off to return Jellyfin to Docker Desktop (CPU) and reuse the Desktop volumes if they were kept.
 

@@ -59,8 +59,10 @@ echo "==> Staging package tree"
 APP="${STAGE}/opt/hog-browser"
 mkdir -p \
   "${APP}" \
+  "${APP}/libexec" \
   "${STAGE}/usr/bin" \
   "${STAGE}/usr/share/applications" \
+  "${STAGE}/usr/share/polkit-1/actions" \
   "${STAGE}/usr/share/icons/hicolor/48x48/apps" \
   "${STAGE}/usr/share/icons/hicolor/128x128/apps" \
   "${STAGE}/usr/share/icons/hicolor/256x256/apps" \
@@ -70,6 +72,10 @@ mkdir -p \
 
 install -m 644 "${ROOT}/packaging/99-hog-tailscale.conf" \
   "${STAGE}/etc/sysctl.d/99-hog-tailscale.conf"
+install -m 755 "${ROOT}/packaging/hog-nvidia-toolkit-install" \
+  "${APP}/libexec/hog-nvidia-toolkit-install"
+install -m 644 "${ROOT}/packaging/org.hog.Browser.nvidia-toolkit-install.policy" \
+  "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.nvidia-toolkit-install.policy"
 
 # Runtime only. Bundles are already in public/ from the build step.
 # warthog-js is compiled into the wallet bundle (and kept in node_modules).
@@ -131,6 +137,7 @@ Priority: optional
 Architecture: ${ARCH}
 Installed-Size: ${INSTALLED_SIZE}
 Depends: python3, python3-gi, python3-gi-cairo, python3-cairo, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-pango-1.0, nodejs (>= 18)
+Recommends: pkexec
 Maintainer: jax <jaxwhitefang@proton.me>
 Description: Hog Browser
  A small local Ubuntu browser with a Warthog wallet in the sidebar.
@@ -138,6 +145,8 @@ Description: Hog Browser
  /opt/hog-browser. User data lives in ~/.local/share/hog-browser.
  Installs /etc/sysctl.d/99-hog-tailscale.conf so a Tailscale exit
  node can forward IPv4 and IPv6; apply with sudo sysctl --system.
+ Ships a root helper that pkexec can run to install the NVIDIA
+ Container Toolkit for Docker Engine.
 CONTROL
 
 mkdir -p "${OUT_DIR}"

@@ -144,6 +144,11 @@
               <button type="button" id="jellyfin-gpu-toggle" aria-pressed="false">Use NVIDIA GPU</button>
             </div>
             <ul id="jellyfin-gpu-checks" class="gpu-checks"></ul>
+            <div id="jellyfin-gpu-install-row" class="gpu-install-row" hidden>
+              <button type="button" id="jellyfin-gpu-install">Install NVIDIA toolkit</button>
+              <p id="jellyfin-gpu-install-hint" class="note">Ubuntu will ask for your password. This installs the toolkit and configures Docker Engine. Docker Desktop is not changed.</p>
+            </div>
+            <pre id="jellyfin-gpu-install-log" class="mono gpu-install-log" hidden></pre>
           </section>
           <p id="container-status" class="note" role="status"></p>
           <p id="container-error" class="error" role="status"></p>
