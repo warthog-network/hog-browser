@@ -272,6 +272,39 @@ button { cursor: pointer; }
 }
 .connect-card .note { margin: 0; max-width: none; }
 .connect-card .note + .note { margin-top: 2px; }
+
+.exit-node-guide {
+  max-width: 720px;
+  margin-top: 14px;
+}
+.exit-node-guide summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--gold);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+.exit-node-guide summary::-webkit-details-marker { display: none; }
+.exit-node-guide summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 1.1em;
+  color: var(--amber);
+}
+.exit-node-guide[open] summary::before { content: "▾"; }
+.exit-node-guide .share-steps { margin-top: 10px; }
+.exit-node-guide .share-steps > li { color: var(--text); font-size: 14px; line-height: 1.45; }
+.inline-link {
+  border: 0;
+  background: transparent;
+  color: var(--gold);
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.inline-link:hover { color: var(--amber); }
 #jellyfin-copy { margin: 0; padding: 4px 12px; }
 #media-library {
   background: #141416;

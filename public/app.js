@@ -4579,6 +4579,11 @@ function bind() {
     if (!url) return;
     desktopCommand(`open:${url}`);
   });
+  $("exit-node-admin").addEventListener("click", () => {
+    const url = tailscaleEnableUrl("https://login.tailscale.com/admin/machines");
+    if (!url) return;
+    desktopCommand(`open:${url}`);
+  });
   window.addEventListener("resize", () => {
     const tab = activeTab();
     const session = tab && shells.get(tab.id);

@@ -1,5 +1,6 @@
 import subprocess
 import unittest
+from pathlib import Path
 
 from guard import PRESETS, Guard, launch_args
 
@@ -73,6 +74,17 @@ class ImageSaveTest(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertIn("not available", missing["error"])
         self.assertFalse(any(args and args[0] == "commit" for args, _timeout in calls))
+
+
+
+class ExitNodeGuideTest(unittest.TestCase):
+    def test_exit_node_guide_card_exists(self):
+        html = (Path(__file__).resolve().parents[1] / "public" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="exit-node-guide"', html)
+        self.assertIn("Setting up your exit node", html)
+        self.assertIn('id="exit-node-admin"', html)
+        self.assertIn("hog-tailscale-state", html)
+
 
 
 if __name__ == "__main__":

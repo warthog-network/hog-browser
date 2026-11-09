@@ -143,6 +143,16 @@
             <p class="note">Press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. The link shows here and in Logs.</p>
             <button type="button" id="tailscale-up">Sign in</button>
           </div>
+          <details id="exit-node-guide" class="connect-card exit-node-guide">
+            <summary>Setting up your exit node</summary>
+            <ol class="share-steps">
+              <li>In Docker, click Tailscale, then Run. Then press Sign in, open the link, and log in. Hog appears in your tailnet as &quot;hog&quot;.</li>
+              <li>In the <button type="button" id="exit-node-admin" class="inline-link">Tailscale admin console</button>, open hog's menu, choose Edit route settings, and turn on Use as exit node.</li>
+              <li>On your phone, install the Tailscale app, sign in to the same account, tap Exit node, and pick hog.</li>
+              <li>Check: browse a site such as youtube.com. Hog's container has IPv4 and IPv6 forwarding, so Private DNS such as one.one.one.one works too. If pages hang, set Private DNS to Automatic and try again, and make sure the container is running.</li>
+              <li>Note: the login is kept in the hog-tailscale-state volume, so Recreate keeps hog's identity. If you delete that volume, remove the old hog from the admin console before logging in again.</li>
+            </ol>
+          </details>
           <div id="wireguard-endpoint" class="endpoint-row" hidden>
             <p class="note">The phone keeps the address from the square it already scanned. Remove that tunnel, then scan the new square. This Wi-Fi is for this network. Public address is for mobile data.</p>
             <div class="row">
