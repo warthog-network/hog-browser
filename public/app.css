@@ -166,6 +166,10 @@ button { cursor: pointer; }
   white-space: nowrap;
 }
 #start-docker:disabled, #load-wireguard:disabled, #endpoint-lan:disabled, #endpoint-public:disabled, #tailscale-up:disabled, #share-publish:disabled, #share-enable:disabled, .share-card:disabled { opacity: 0.6; cursor: wait; }
+#tailscale-setup { margin: 4px 0 10px; }
+#tailscale-setup #tailscale-up { margin-top: 6px; }
+#tailscale-login-link { display: inline-block; margin: 8px 0 0 10px; vertical-align: middle; }
+#jellyfin-connect + .exit-node-guide { margin-top: 10px; }
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }
 #endpoint-lan, #endpoint-public, #tailscale-up, #share-publish, #share-enable, #jellyfin-copy, .share-name button {

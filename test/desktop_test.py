@@ -84,6 +84,16 @@ class ExitNodeGuideTest(unittest.TestCase):
         self.assertIn("Setting up your exit node", html)
         self.assertIn('id="exit-node-admin"', html)
         self.assertIn("hog-tailscale-state", html)
+        docker = html.split('id="settings-docker"', 1)[1].split('id="settings-files"', 1)[0]
+        files = html.split('id="settings-files"', 1)[1]
+        self.assertNotIn('id="tailscale-up"', docker)
+        self.assertNotIn('id="exit-node-guide"', docker)
+        self.assertIn('id="tailscale-up"', files)
+        self.assertIn('id="exit-node-guide"', files)
+        self.assertLess(files.find('id="jellyfin-host"'), files.find('id="tailscale-up"'))
+        self.assertLess(files.find('id="jellyfin-host"'), files.find('id="exit-node-guide"'))
+        self.assertLess(files.find('id="exit-node-guide"'), files.find('id="media-library"'))
+        self.assertIn("Open the running tailscale container, press Sign in", files)
 
 
 

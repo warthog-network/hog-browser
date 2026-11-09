@@ -2047,21 +2047,69 @@ function paintEndpointChoice(items) {
   }
 }
 
-function paintTailscaleSetup(items) {
-  const row = $("tailscale-setup");
-  if (!row) return;
+function tailscaleIpText(value) {
+  if (typeof value !== "string" || !value) return "";
+  const parts = value.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return "";
+  if (parts[0] !== 100 || parts[1] < 64 || parts[1] > 127) return "";
+  return value;
+}
+
+function paintTailscaleSetup(payload) {
+  const items = payload && payload.items;
   const item = Array.isArray(items) && items.find((entry) => {
     return entry && entry.name === "tailscale" && !entry.reason;
   });
-  row.hidden = !item;
-  const button = $("tailscale-up");
-  if (!button) return;
   const live = Boolean(item && item.state === "running");
-  button.hidden = !live;
-  if (live && button.dataset.busy !== "1") {
-    button.disabled = false;
-    button.textContent = "Sign in";
+  const state = payload && typeof payload.tailscaleState === "string" ? payload.tailscaleState : "";
+  const signedIn = live && (state === "Running" || state === "NeedsMachineAuth");
+  const button = $("tailscale-up");
+  const auth = $("tailscale-auth");
+  const error = $("tailscale-error");
+  const link = $("tailscale-login-link");
+  const url = tailscaleEnableUrl((payload && payload.tailscaleLoginUrl) || "");
+  if (button) {
+    button.hidden = !live || signedIn;
+    if (live && !signedIn && button.dataset.busy !== "1") {
+      button.disabled = false;
+      button.textContent = "Sign in";
+    }
   }
+  if (error && payload && (Object.prototype.hasOwnProperty.call(payload, "tailscaleState") || payload.openLogin)) {
+    error.textContent = payload.error || "";
+  }
+  if (auth) {
+    if (signedIn) {
+      auth.textContent = state === "NeedsMachineAuth"
+        ? "Tailscale is signed in. Waiting for admin approval."
+        : "Tailscale is signed in. On the phone, choose hog as the exit node.";
+    } else if (!item) {
+      auth.textContent = "Start the tailscale container in Docker, then sign in here.";
+    } else if (!live) {
+      auth.textContent = "Start the tailscale container in Docker, then sign in here.";
+    } else if (url) {
+      auth.textContent = "Open the sign-in link, then finish login. Approve hog as an exit node in the Tailscale admin page.";
+    } else {
+      auth.textContent = "Press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page.";
+    }
+    if (payload && payload.ok && typeof payload.notice === "string" && payload.notice && (signedIn || url || payload.openLogin)) {
+      auth.textContent = payload.notice;
+    }
+  }
+  if (link) {
+    link.hidden = !url;
+    link.dataset.url = url;
+  }
+  if (payload && payload.openLogin && url) maybeOpenTailscaleLogin(url);
+}
+
+let lastOpenedLogin = "";
+
+function maybeOpenTailscaleLogin(url) {
+  const allowed = tailscaleEnableUrl(url);
+  if (!allowed || allowed === lastOpenedLogin) return;
+  lastOpenedLogin = allowed;
+  desktopCommand(`open:${allowed}`);
 }
 
 let sharesOpen = false;
@@ -2253,9 +2301,15 @@ window.__hogMediaNote = (text) => {
 function paintJellyfinPhone(payload) {
   const host = $("jellyfin-host");
   if (!host) return;
-  if (!payload || !Object.prototype.hasOwnProperty.call(payload, "jellyfinUrl")) return;
-  const url = tailnetHttp(payload.jellyfinUrl, "8096") ? payload.jellyfinUrl : "";
-  host.textContent = url ? url.replace(/^https?:\/\//, "") : "100.—";
+  if (!payload) return;
+  const hasUrl = Object.prototype.hasOwnProperty.call(payload, "jellyfinUrl");
+  const hasIp = Object.prototype.hasOwnProperty.call(payload, "tailscaleIp");
+  if (!hasUrl && !hasIp) return;
+  const url = hasUrl && tailnetHttp(payload.jellyfinUrl, "8096") ? payload.jellyfinUrl : "";
+  const ip = hasIp ? tailscaleIpText(payload.tailscaleIp) : "";
+  if (url) host.textContent = url.replace(/^https?:\/\//, "");
+  else if (ip) host.textContent = ip;
+  else host.textContent = "100.—";
   const copy = $("jellyfin-copy");
   if (copy) {
     copy.hidden = !url;
@@ -2276,8 +2330,10 @@ function openJellyfinConnect() {
 function openTailscaleShares() {
   sharesOpen = true;
   showSettingsPage("files");
-  const panel = $("tailscale-shares");
-  if (panel) panel.scrollIntoView({ block: "start" });
+  requestAnimationFrame(() => {
+    const panel = $("jellyfin-connect") || $("exit-node-guide") || $("tailscale-shares");
+    if (panel) panel.scrollIntoView({ block: "start" });
+  });
   desktopCommand("containers:share-list");
 }
 
@@ -2438,7 +2494,7 @@ function renderContainers(payload) {
   }
   paintWireguardSetup();
   paintEndpointChoice(payload.items);
-  paintTailscaleSetup(payload.items);
+  paintTailscaleSetup(payload);
   paintJellyfinPhone(payload);
   paintMedia(payload);
   paintShares(payload);
@@ -2501,11 +2557,11 @@ function renderContainers(payload) {
       });
     }
     if (item.name === "tailscale" && running && !item.reason) {
-      small.textContent = `${small.textContent} · click for phone folders`;
+      small.textContent = `${small.textContent} · click for Tailscale IP`;
       line.classList.add("is-share");
       line.tabIndex = 0;
       line.setAttribute("role", "button");
-      line.title = "Share folders with your phone";
+      line.title = "Tailscale IP, sign in, and phone folders";
       line.addEventListener("click", () => openTailscaleShares());
       line.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -4390,7 +4446,7 @@ function bind() {
         return;
       }
       if (kind === "tailscale") {
-        fillLaunch(kind, button.dataset.image, "In Docker, click Tailscale, then Run. Press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. State stays in a Docker volume so login survives a recreate.", {
+        fillLaunch(kind, button.dataset.image, "In Docker, click Tailscale, then Run. Open the running tailscale container, press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. State stays in a Docker volume so login survives a recreate.", {
           vpn: true,
           ports: [],
           command: [],
@@ -4474,9 +4530,18 @@ function bind() {
     button.dataset.busy = "1";
     button.disabled = true;
     button.textContent = "Waiting for the link…";
+    const error = $("tailscale-error");
+    const auth = $("tailscale-auth");
+    if (error) error.textContent = "";
+    if (auth) auth.textContent = "Signing in to Tailscale. The link appears here. Open it before the wait ends.";
     $("container-error").textContent = "";
     $("container-status").textContent = "Signing in to Tailscale. The link appears here. Open it before the wait ends.";
     desktopCommand("containers:tailscale-up");
+  });
+  $("tailscale-login-link").addEventListener("click", () => {
+    const url = tailscaleEnableUrl($("tailscale-login-link").dataset.url || "");
+    if (!url) return;
+    desktopCommand(`open:${url}`);
   });
   $("share-computer").addEventListener("click", () => {
     const form = $("share-name-form");

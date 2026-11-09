@@ -754,36 +754,125 @@ class PolicyTest(unittest.TestCase):
             self.assertTrue(again["ok"], again.get("error"))
             self.assertEqual(calls[-1][0][:3], ["exec", "tailscale", "ls"])
 
-    def test_tailscale_sign_in_runs_only_the_fixed_command(self):
-        with tempfile.TemporaryDirectory() as folder:
-            guard = Guard(folder, docker="docker")
-            calls = []
+    def _running_tailscale_guard(self, run):
+        folder_cm = tempfile.TemporaryDirectory()
+        folder = folder_cm.__enter__()
+        self.addCleanup(folder_cm.cleanup)
+        guard = Guard(folder, docker="docker")
 
-            def inspect(name):
-                body = info()
-                body["Name"] = f"/{name}"
-                body["State"] = {"Running": True, "Status": "running"}
-                body["Config"] = {"Image": "tailscale/tailscale:latest"}
-                return body, ""
+        def inspect(name):
+            body = info()
+            body["Name"] = f"/{name}"
+            body["State"] = {"Running": True, "Status": "running"}
+            body["Config"] = {"Image": "tailscale/tailscale:latest"}
+            return body, ""
 
-            def run(args, timeout=8):
-                calls.append((list(args), timeout))
-                if args[:3] == ["exec", "tailscale", "tailscale"]:
-                    return subprocess.CompletedProcess(args, 0, "https://login.tailscale.com/a/example\n", "")
-                raise AssertionError(args)
+        guard.inspect = inspect
+        guard.run = run
+        guard.items = lambda: []
+        guard.docker_running = lambda: True
+        return guard
 
-            guard.inspect = inspect
-            guard.run = run
-            guard.items = lambda: []
-            guard.docker_running = lambda: True
-            result = guard.handle("tailscale-up", "tailscale; rm -rf /")
-            self.assertTrue(result["ok"], result.get("error"))
-            self.assertEqual(
-                calls[0],
-                (["exec", "tailscale", "tailscale", "up", "--advertise-exit-node", "--timeout=90s"], 100),
-            )
-            self.assertIn("https://login.tailscale.com/a/example", result["notice"])
-            self.assertEqual(len(calls), 1)
+    def test_tailscale_sign_in_uses_existing_auth_url(self):
+        calls = []
+
+        def run(args, timeout=8):
+            calls.append((list(args), timeout))
+            if args == ["exec", "tailscale", "tailscale", "status", "--json"]:
+                body = '{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/example"}\n'
+                return subprocess.CompletedProcess(args, 0, body, "")
+            raise AssertionError(args)
+
+        guard = self._running_tailscale_guard(run)
+        result = guard.handle("tailscale-up", "tailscale; rm -rf /")
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["tailscaleLoginUrl"], "https://login.tailscale.com/a/example")
+        self.assertTrue(result["openLogin"])
+        self.assertIn("https://login.tailscale.com/a/example", result["notice"])
+        self.assertEqual(calls, [(["exec", "tailscale", "tailscale", "status", "--json"], 15)])
+        self.assertFalse(any("up" in item[0] for item in calls))
+
+    def test_tailscale_sign_in_reports_already_logged_in(self):
+        calls = []
+
+        def run(args, timeout=8):
+            calls.append((list(args), timeout))
+            if args == ["exec", "tailscale", "tailscale", "status", "--json"]:
+                body = '{"BackendState":"Running","AuthURL":""}\n'
+                return subprocess.CompletedProcess(args, 0, body, "")
+            raise AssertionError(args)
+
+        guard = self._running_tailscale_guard(run)
+        result = guard.handle("tailscale-up", "tailscale")
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["error"], "")
+        self.assertFalse(result["openLogin"])
+        self.assertEqual(result["tailscaleLoginUrl"], "")
+        self.assertIn("signed in", result["notice"].lower())
+        self.assertEqual(calls, [(["exec", "tailscale", "tailscale", "status", "--json"], 15)])
+
+    def test_tailscale_sign_in_runs_login_when_status_has_no_url(self):
+        calls = []
+
+        def run(args, timeout=8):
+            calls.append((list(args), timeout))
+            if args == ["exec", "tailscale", "tailscale", "status", "--json"]:
+                if any(item[0][:5] == ["exec", "tailscale", "tailscale", "login", "--timeout=90s"] for item in calls):
+                    body = '{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/after-login"}\n'
+                else:
+                    body = '{"BackendState":"NeedsLogin","AuthURL":""}\n'
+                return subprocess.CompletedProcess(args, 0, body, "")
+            if args == ["exec", "tailscale", "tailscale", "login", "--timeout=90s"]:
+                warning = (
+                    "Warning: UDP GRO forwarding is suboptimally configured on eth0, "
+                    "UDP forwarding throughput capability will increase with a configuration change. "
+                    "See https://tailscale.com/s/ethtool-config-udp-gro "
+                )
+                return subprocess.CompletedProcess(
+                    args,
+                    1,
+                    "",
+                    warning + "https://login.tailscale.com/a/after-login\n",
+                )
+            raise AssertionError(args)
+
+        guard = self._running_tailscale_guard(run)
+        result = guard.handle("tailscale-up", "tailscale")
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["tailscaleLoginUrl"], "https://login.tailscale.com/a/after-login")
+        self.assertTrue(result["openLogin"])
+        self.assertIn("https://login.tailscale.com/a/after-login", result["notice"])
+        self.assertNotIn("UDP GRO", result["error"])
+        self.assertNotIn("UDP GRO", result["notice"])
+        self.assertEqual(
+            calls[1],
+            (["exec", "tailscale", "tailscale", "login", "--timeout=90s"], 100),
+        )
+        self.assertFalse(any(item[0][3] == "up" for item in calls if len(item[0]) > 3))
+
+    def test_tailscale_sign_in_strips_udp_gro_warning_from_errors(self):
+        calls = []
+
+        def run(args, timeout=8):
+            calls.append((list(args), timeout))
+            if args == ["exec", "tailscale", "tailscale", "status", "--json"]:
+                return subprocess.CompletedProcess(args, 0, '{"BackendState":"NeedsLogin","AuthURL":""}\n', "")
+            if args == ["exec", "tailscale", "tailscale", "login", "--timeout=90s"]:
+                warning = (
+                    "Warning: UDP GRO forwarding is suboptimally configured on eth0, "
+                    "UDP forwarding throughput capability will increase with a configuration change. "
+                    "See https://tailscale.com/s/ethtool-config-udp-gro "
+                )
+                return subprocess.CompletedProcess(args, 1, "", warning + "login server was unreachable\n")
+            raise AssertionError(args)
+
+        guard = self._running_tailscale_guard(run)
+        result = guard.handle("tailscale-up", "tailscale")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "login server was unreachable")
+        self.assertNotIn("UDP GRO", result["error"])
 
     def test_drop_lands_in_the_jellyfin_folder(self):
         self.assertIsNone(drop_file_path("http://example.com/a.jpg"))

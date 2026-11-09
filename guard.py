@@ -93,6 +93,31 @@ def image_brings_command(image):
 SHARE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,24}$")
 SHARE_PORTS = range(8101, 8117)
 SERVE_ENABLE_RE = re.compile(r"https://login\.tailscale\.com/[A-Za-z0-9_./?=&%-]+")
+GRO_WARNING_RE = re.compile(
+    r"Warning: UDP GRO forwarding is suboptimally configured on \S+, "
+    r"UDP forwarding throughput capability will increase with a configuration change\. "
+    r"See https://tailscale\.com/s/ethtool-config-udp-gro\s*",
+    re.IGNORECASE,
+)
+LOGGED_IN_STATES = {"Running", "NeedsMachineAuth"}
+
+
+def scrub_tailscale_output(text):
+    return GRO_WARNING_RE.sub("", str(text or "")).strip()
+
+
+def tailscale_auth_url(*parts):
+    for part in parts:
+        if not part:
+            continue
+        match = SERVE_ENABLE_RE.search(str(part))
+        if not match:
+            continue
+        url = match.group(0)
+        if len(url) < 30 or len(url) >= 300 or any(ch.isspace() for ch in url):
+            continue
+        return url
+    return ""
 
 
 def shares_root():
@@ -901,11 +926,27 @@ class Guard:
             for item in items
         )
         url = ""
-        if running and jellyfin_up:
+        ts_ip = ""
+        ts_state = ""
+        ts_login = ""
+        ts_up = any(
+            isinstance(item, dict) and item.get("name") == "tailscale" and item.get("state") == "running" and not item.get("reason")
+            for item in items
+        )
+        if running and ts_up:
             try:
-                url = self.jellyfin_phone_url()
+                ts_ip = self.tailscale_ipv4()
             except (RuntimeError, OSError):
-                url = ""
+                ts_ip = ""
+            backend = self.tailscale_backend()
+            ts_state = backend.get("state") or ""
+            if ts_state == "NeedsLogin":
+                ts_login = backend.get("loginUrl") or ""
+            if jellyfin_up and ts_ip:
+                try:
+                    url = self.jellyfin_phone_url(ts_ip)
+                except (RuntimeError, OSError):
+                    url = ""
         media_path, media_rows = self.media_view()
         return {
             "ok": True,
@@ -914,6 +955,9 @@ class Guard:
             "items": items,
             "wireguard": self.wireguard_module_loaded(),
             "jellyfinUrl": url,
+            "tailscaleIp": ts_ip,
+            "tailscaleState": ts_state,
+            "tailscaleLoginUrl": ts_login,
             "media": media_rows,
             "mediaPath": media_path,
         }
@@ -955,8 +999,8 @@ class Guard:
             "items": self._offline_items(),
         }
 
-    def jellyfin_phone_url(self):
-        ip = self.tailscale_ipv4()
+    def jellyfin_phone_url(self, ip=None):
+        ip = ip or self.tailscale_ipv4()
         if not ip:
             return ""
         info, _error = self.inspect("jellyfin")
@@ -1110,23 +1154,37 @@ class Guard:
         temporary.replace(self.shares_path())
         os.chmod(self.shares_path(), 0o600)
 
+    def tailscale_status_payload(self):
+        try:
+            result = self.run(["exec", "tailscale", "tailscale", "status", "--json"], timeout=15)
+        except RuntimeError:
+            return {}, ""
+        blob = (result.stdout or "") + (result.stderr or "")
+        try:
+            raw = json.loads(result.stdout or "")
+        except json.JSONDecodeError:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return raw, blob
+
+    def tailscale_backend(self):
+        raw, blob = self.tailscale_status_payload()
+        return {
+            "state": str(raw.get("BackendState") or ""),
+            "loginUrl": tailscale_auth_url(raw.get("AuthURL") or "", blob),
+        }
+
     def tailscale_dns(self):
         info, _error = self.inspect("tailscale")
         state = info.get("State") if isinstance(info, dict) and isinstance(info.get("State"), dict) else {}
         if state.get("Running") is not True:
             return "", False
-        try:
-            result = self.run(["exec", "tailscale", "tailscale", "status", "--json"], timeout=15)
-        except RuntimeError:
+        raw, _blob = self.tailscale_status_payload()
+        if not raw:
             return "", True
-        if result.returncode != 0:
-            return "", True
-        try:
-            raw = json.loads(result.stdout or "{}")
-        except json.JSONDecodeError:
-            return "", True
-        self_info = raw.get("Self") if isinstance(raw, dict) else None
-        dns = str(self_info.get("DNSName") or "").rstrip(".") if isinstance(self_info, dict) else ""
+        self_info = raw.get("Self") if isinstance(raw.get("Self"), dict) else None
+        dns = str((self_info or {}).get("DNSName") or "").rstrip(".")
         if not dns or " " in dns or "/" in dns:
             return "", True
         return dns, True
@@ -1301,6 +1359,9 @@ class Guard:
             state = info.get("State") if isinstance(info, dict) and isinstance(info.get("State"), dict) else {}
             if state.get("Running") is True:
                 jellyfin = f"http://{ip}:8096"
+        backend = self.tailscale_backend() if live else {"state": "", "loginUrl": ""}
+        ts_state = backend.get("state") or ""
+        ts_login = backend.get("loginUrl") or "" if ts_state == "NeedsLogin" else ""
         media_path, media_rows = self.media_view()
         return {
             "ok": not error,
@@ -1312,6 +1373,9 @@ class Guard:
             "tailscale": live,
             "enableUrl": enable,
             "jellyfinUrl": jellyfin,
+            "tailscaleIp": ip,
+            "tailscaleState": ts_state,
+            "tailscaleLoginUrl": ts_login,
             "media": media_rows,
             "mediaPath": media_path,
         }
@@ -2049,6 +2113,32 @@ class Guard:
             "items": self.items(),
         }
 
+    def _tailscale_signed_in_payload(self, state, items=None):
+        if state == "NeedsMachineAuth":
+            notice = "Tailscale is signed in. Waiting for admin approval."
+        else:
+            notice = "Tailscale is signed in. On the phone, choose hog as the exit node."
+        return {
+            "ok": True,
+            "error": "",
+            "notice": notice,
+            "items": items if items is not None else self.items(),
+            "tailscaleState": state,
+            "tailscaleLoginUrl": "",
+            "openLogin": False,
+        }
+
+    def _tailscale_login_payload(self, url, state, items=None, open_login=False):
+        return {
+            "ok": True,
+            "error": "",
+            "notice": f"Open this link to sign in:\n{url}",
+            "items": items if items is not None else self.items(),
+            "tailscaleState": state,
+            "tailscaleLoginUrl": url,
+            "openLogin": bool(open_login),
+        }
+
     def tailscale_up(self):
         name = "tailscale"
         info, error = self.inspect(name)
@@ -2063,21 +2153,46 @@ class Guard:
         config = info.get("Config") if isinstance(info.get("Config"), dict) else {}
         if "tailscale" not in str(config.get("Image") or "").lower():
             return {"ok": False, "error": "That container is not the Tailscale image.", "items": self.items()}
+        backend = self.tailscale_backend()
+        backend_state = backend.get("state") or ""
+        url = backend.get("loginUrl") or ""
+        if backend_state in LOGGED_IN_STATES:
+            return self._tailscale_signed_in_payload(backend_state)
+        if url:
+            return self._tailscale_login_payload(url, backend_state, open_login=True)
         try:
             result = self.run(
-                ["exec", name, "tailscale", "up", "--advertise-exit-node", "--timeout=90s"],
+                ["exec", name, "tailscale", "login", "--timeout=90s"],
                 timeout=100,
             )
         except RuntimeError as exc:
-            return {"ok": False, "error": str(exc), "items": self.items()}
-        text = ((result.stdout or "") + (result.stderr or "")).strip()
-        if result.returncode != 0 and not text:
-            return {"ok": False, "error": "Tailscale did not return a sign-in link.", "items": self.items()}
+            return {"ok": False, "error": str(exc), "items": self.items(), "tailscaleState": backend_state, "tailscaleLoginUrl": "", "openLogin": False}
+        text = scrub_tailscale_output((result.stdout or "") + (result.stderr or ""))
+        backend = self.tailscale_backend()
+        backend_state = backend.get("state") or backend_state
+        url = backend.get("loginUrl") or tailscale_auth_url(text)
+        if backend_state in LOGGED_IN_STATES:
+            return self._tailscale_signed_in_payload(backend_state)
+        if url:
+            return self._tailscale_login_payload(url, backend_state, open_login=True)
+        if result.returncode != 0:
+            return {
+                "ok": False,
+                "error": text[-2000:] or "Tailscale did not return a sign-in link.",
+                "notice": "",
+                "items": self.items(),
+                "tailscaleState": backend_state,
+                "tailscaleLoginUrl": "",
+                "openLogin": False,
+            }
         return {
-            "ok": result.returncode == 0,
-            "error": "" if result.returncode == 0 else text[-2000:],
+            "ok": True,
+            "error": "",
             "notice": text[-4000:] or "Tailscale is signed in. On the phone, choose hog as the exit node.",
             "items": self.items(),
+            "tailscaleState": backend_state or "Running",
+            "tailscaleLoginUrl": "",
+            "openLogin": False,
         }
 
     def prompt_wireguard_module(self):
