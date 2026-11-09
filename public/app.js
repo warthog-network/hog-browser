@@ -1789,9 +1789,12 @@ function composeCommand(spec) {
   for (const cap of SSH_CAPS) parts.push(`--cap-add=${cap}`);
   if (spec.vpn) parts.push("--cap-add=NET_ADMIN", "--device", "/dev/net/tun");
   parts.push("--pids-limit", "1024", "--memory", "2g", "--memory-swap", "2g");
-  for (const port of spec.ports) parts.push("-p", publishSpec(port));
+  if (spec.network) parts.push("--network", spec.network);
+  if (spec.network !== "host") {
+    for (const port of spec.ports) parts.push("-p", publishSpec(port));
+    for (const item of spec.sysctls || []) parts.push("--sysctl", item);
+  }
   for (const item of spec.env || []) parts.push("-e", item);
-  for (const item of spec.sysctls || []) parts.push("--sysctl", item);
   parts.push(spec.image);
   if (spec.command && spec.command.length) parts.push(...spec.command);
   else if (!imageBringsCommand(spec.image)) parts.push("sleep", "infinity");
@@ -1834,6 +1837,7 @@ function readLaunch(text) {
   const sysctls = [];
   let vpn = false;
   let tun = false;
+  let network = "";
   const positional = [];
   let index = 2;
   while (index < tokens.length) {
@@ -1912,9 +1916,16 @@ function readLaunch(text) {
     }
     if (token === "--sysctl" || token.startsWith("--sysctl=")) {
       const value = token === "--sysctl" ? tokens[index + 1] : token.slice("--sysctl=".length);
-      if (value !== "net.ipv4.conf.all.src_valid_mark=1" && value !== "net.ipv4.ip_forward=1") return null;
+      if (value !== "net.ipv4.conf.all.src_valid_mark=1" && value !== "net.ipv4.ip_forward=1" && value !== "net.ipv6.conf.all.forwarding=1") return null;
       sysctls.push(value);
       index += token === "--sysctl" ? 2 : 1;
+      continue;
+    }
+    if (token === "--network" || token === "--net" || token.startsWith("--network=") || token.startsWith("--net=")) {
+      const value = token === "--network" || token === "--net" ? tokens[index + 1] : token.slice(token.indexOf("=") + 1);
+      if (value !== "hog-tailscale" || network) return null;
+      network = "hog-tailscale";
+      index += token === "--network" || token === "--net" ? 2 : 1;
       continue;
     }
     if (token.startsWith("-")) return null;
@@ -1930,7 +1941,8 @@ function readLaunch(text) {
   if (command.some((part) => !/^[A-Za-z0-9_./:-]+$/.test(part))) return null;
   if (tun && !vpn) return null;
   if (ports.length > 8 || env.length > 16) return null;
-  return { name, image, ports, vpn, command, env, sysctls };
+  if (network && (name !== "tailscale" || !String(image).toLowerCase().includes("tailscale") || network !== "hog-tailscale")) return null;
+  return { name, image, ports, vpn, command, env, sysctls, network };
 }
 
 function paintLaunch(spec, status) {
@@ -1951,6 +1963,7 @@ function fillLaunch(name, image, status, extra = {}) {
     command: Object.prototype.hasOwnProperty.call(extra, "command") ? extra.command : ["sleep", "infinity"],
     env: extra.env || [],
     sysctls: extra.sysctls || [],
+    network: extra.network || "",
   }, status);
 }
 
@@ -4377,12 +4390,13 @@ function bind() {
         return;
       }
       if (kind === "tailscale") {
-        fillLaunch(kind, button.dataset.image, "In Docker, click Tailscale, then Run. Press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page.", {
+        fillLaunch(kind, button.dataset.image, "In Docker, click Tailscale, then Run. Press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. State stays in a Docker volume so login survives a recreate.", {
           vpn: true,
           ports: [],
           command: [],
           env: ["TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"],
-          sysctls: ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1"],
+          sysctls: ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"],
+          network: "hog-tailscale",
         });
         return;
       }

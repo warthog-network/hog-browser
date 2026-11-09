@@ -80,7 +80,11 @@ mkdir -p \
   "${STAGE}/usr/bin" \
   "${STAGE}/usr/share/applications" \
   "${STAGE}/usr/share/icons/hicolor/256x256/apps" \
+  "${STAGE}/etc/sysctl.d" \
   "${STAGE}/DEBIAN"
+
+install -m 644 "${ROOT}/packaging/99-hog-tailscale.conf" \
+  "${STAGE}/etc/sysctl.d/99-hog-tailscale.conf"
 
 # Runtime only. Bundles are already in public/ from the build step.
 # warthog-js is compiled into the wallet bundle; do not ship the sibling.
@@ -140,6 +144,8 @@ Description: Hog Browser
  A small local Ubuntu browser with a Warthog wallet in the sidebar.
  Ships a GTK3 + WebKitGTK shell and a local Node server under
  /opt/hog-browser. User data lives in ~/.local/share/hog-browser.
+ Installs /etc/sysctl.d/99-hog-tailscale.conf so a Tailscale exit
+ node can forward IPv4 and IPv6; apply with sudo sysctl --system.
 CONTROL
 
 mkdir -p "${OUT_DIR}"

@@ -11,7 +11,13 @@ A small local Ubuntu browser with a Warthog wallet in the sidebar. It is its own
 sudo apt install ./hog-browser_*.deb
 ```
 
-`apt` will pull in Python GI, WebKitGTK, and Node.js if they are missing. Start Hog from the app menu (**Hog Browser**) or run:
+`apt` will pull in Python GI, WebKitGTK, and Node.js if they are missing. The package also installs `/etc/sysctl.d/99-hog-tailscale.conf` so Hog can use Tailscale as an IPv6 exit node without dropping this computer's router IPv6 route. Apply it once (or reboot):
+
+```bash
+sudo sysctl --system
+```
+
+Then confirm the default IPv6 route is still present (`ip -6 route show default`). Start Hog from the app menu (**Hog Browser**) or run:
 
 ```bash
 hog-browser
@@ -51,6 +57,7 @@ No root is required for the build. Installing the package still needs `sudo apt 
 
 ```bash
 npm test          # Node tests (also needs ../warthog-js)
+python3 -m unittest discover -s test -p '*_test.py'
 npm run build     # rebuild public/*-bundle.js via esbuild
 ```
 

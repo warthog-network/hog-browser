@@ -245,7 +245,7 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("--cap-add=SETUID", text)
         self.assertIn("--memory 2g", text)
         self.assertTrue(text.endswith("ubuntu:24.04 sleep infinity"))
-        self.assertEqual(parse_run(text), ("ubuntu", "ubuntu:24.04", (), False, ("sleep", "infinity"), (), ()))
+        self.assertEqual(parse_run(text), ("ubuntu", "ubuntu:24.04", (), False, ("sleep", "infinity"), (), (), (), ""))
 
     def test_command_accepts_port_vpn_and_local_bind(self):
         parsed = parse_run(
@@ -632,7 +632,9 @@ class PolicyTest(unittest.TestCase):
             True,
             (),
             ("TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"),
-            ("net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1"),
+            ("net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"),
+            (),
+            "hog-tailscale",
         )
         self.assertNotIn("sleep", text)
         self.assertNotIn("-p ", f"{text} ")
@@ -643,18 +645,28 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("-e TS_EXTRA_ARGS=--advertise-exit-node", text)
         self.assertIn("-e TS_BOOT_TIMEOUT=10m", text)
         self.assertIn("-e TS_DEBUG_FIREWALL_MODE=nftables", text)
-        self.assertIn("--sysctl net.ipv4.conf.all.src_valid_mark=1", text)
+        self.assertIn("--network hog-tailscale", text)
+        self.assertIn("--sysctl net.ipv6.conf.all.forwarding=1", text)
+        self.assertNotIn(" -v ", f" {text} ")
+        self.assertNotIn("--network host", text)
         self.assertTrue(text.endswith("tailscale/tailscale:latest"))
         parsed = parse_run(text)
         self.assertEqual(parsed[4], ())
+        self.assertEqual(parsed[8], "hog-tailscale")
         self.assertEqual(parse_run(canonical_command(*parsed)), parsed)
+        # Volume and host network stay blocked. The state volume and IPv6
+        # network are attached outside the typed command, like Jellyfin's media folder.
         for line in (
             "docker run --name tailscale --cap-add NET_RAW tailscale/tailscale:latest",
             "docker run --name tailscale -v tailscale:/var/lib/tailscale tailscale/tailscale:latest",
             "docker run --name tailscale --network host tailscale/tailscale:latest",
+            "docker run --name tailscale --network hog-tailscale ubuntu:24.04",
+            "docker run --name demo --network hog-tailscale tailscale/tailscale:latest",
         ):
             with self.assertRaises(CommandError):
                 parse_run(line)
+        allowed = parse_run("docker run --name tailscale --network hog-tailscale tailscale/tailscale:latest")
+        self.assertEqual(allowed[8], "hog-tailscale")
 
     def test_tailscale_run_switches_the_firewall_command_once(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -670,14 +682,16 @@ class PolicyTest(unittest.TestCase):
                     "Config": {"Image": "tailscale/tailscale:latest"},
                     "HostConfig": {
                         "Privileged": False,
-                        "NetworkMode": "bridge",
+                        "NetworkMode": "hog-tailscale",
                         "PidMode": "",
                         "IpcMode": "private",
                         "CapAdd": ["NET_ADMIN"],
-                        "Binds": None,
+                        "Binds": ["hog-tailscale-state:/var/lib/tailscale"],
                         "Devices": [{"PathOnHost": "/dev/net/tun"}],
                     },
-                    "Mounts": [],
+                    "Mounts": [
+                        {"Name": "hog-tailscale-state", "Source": "/var/lib/docker/volumes/hog-tailscale-state/_data", "Destination": "/var/lib/tailscale", "Type": "volume"},
+                    ],
                 }
 
             def inspect(name):
@@ -711,10 +725,21 @@ class PolicyTest(unittest.TestCase):
                 True,
                 (),
                 ("TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"),
-                ("net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1"),
+                ("net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"),
+                (),
+                "hog-tailscale",
             )
             created = guard.handle("run", line)
             self.assertTrue(created["ok"], created.get("error"))
+            run_args = next(item[0] for item in calls if item[0][0] == "run")
+            self.assertIn("--network", run_args)
+            self.assertIn("hog-tailscale", run_args)
+            self.assertIn("-v", run_args)
+            self.assertIn("hog-tailscale-state:/var/lib/tailscale", run_args)
+            self.assertIn("net.ipv6.conf.all.forwarding=1", run_args)
+            self.assertNotIn("-v", created["command"])
+            self.assertIn("--network hog-tailscale", created["command"])
+            self.assertTrue(any(item[0][:2] == ["network", "inspect"] or item[0][:2] == ["network", "create"] for item in calls))
             self.assertEqual(
                 [item[0][:3] for item in calls if item[0][0] == "exec"],
                 [

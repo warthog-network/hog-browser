@@ -47,7 +47,9 @@ jobs:
 
       - name: Test
         working-directory: hog-browser
-        run: npm test
+        run: |
+          npm test
+          python3 -m unittest discover -s test -p '*_test.py'
 
       - name: Build .deb
         working-directory: hog-browser

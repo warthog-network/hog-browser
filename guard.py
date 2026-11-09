@@ -58,12 +58,16 @@ ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}=[A-Za-z0-9_.:/+@,-]{1,80}$")
 SYSCTLS = {
     "net.ipv4.conf.all.src_valid_mark=1",
     "net.ipv4.ip_forward=1",
+    "net.ipv6.conf.all.forwarding=1",
 }
 MAX_PORTS = 8
 MAX_ENV = 16
 MAX_COMMAND = 4000
 SOCK_MARKERS = ("docker.sock", "containerd.sock", "podman.sock")
 HOST_MODES = ("host",)
+TAILSCALE_NETWORK = "hog-tailscale"
+TAILSCALE_IPV6_SUBNET = "fd00:686f:6700:1::/64"
+TAILSCALE_STATE_MOUNT = "hog-tailscale-state:/var/lib/tailscale"
 
 
 def wallet_dir(path=None):
@@ -480,19 +484,22 @@ def format_publish(port):
     return spec
 
 
-def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"), env=(), sysctls=(), mounts=()):
+def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"), env=(), sysctls=(), mounts=(), network=""):
     args = ["run", "-d", "--name", name, "--cap-drop=ALL"]
     args.extend(f"--cap-add={cap}" for cap in SSH_CAPS)
     if vpn:
         args.append("--cap-add=NET_ADMIN")
         args.extend(["--device", "/dev/net/tun"])
     args.extend(["--pids-limit", "1024", "--memory", "2g", "--memory-swap", "2g"])
-    for port in ports:
-        args.extend(["-p", format_publish(port)])
+    if network:
+        args.extend(["--network", network])
+    if network not in HOST_MODES:
+        for port in ports:
+            args.extend(["-p", format_publish(port)])
+        for item in sysctls:
+            args.extend(["--sysctl", item])
     for item in env:
         args.extend(["-e", item])
-    for item in sysctls:
-        args.extend(["--sysctl", item])
     for mount in mounts:
         args.extend(["-v", mount])
     args.append(image)
@@ -502,8 +509,8 @@ def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"),
     return args
 
 
-def canonical_command(name, image, ports, vpn, command, env=(), sysctls=()):
-    return shlex.join(["docker", *compose_run(name, image, ports, vpn, command, env, sysctls)])
+def canonical_command(name, image, ports, vpn, command, env=(), sysctls=(), mounts=(), network=""):
+    return shlex.join(["docker", *compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network)])
 
 
 def launch_args(preset, image=""):
@@ -557,6 +564,7 @@ def parse_run(cmdline):
     sysctls = []
     vpn = False
     tun = False
+    network = ""
     positional = []
     index = 2
     while index < len(tokens):
@@ -568,15 +576,23 @@ def parse_run(cmdline):
             raise CommandError("That flag is not available.")
         if token.startswith(("-v", "--volume=", "--mount=", "--volumes-from=")):
             raise CommandError("Mounts are not available from this launcher.")
-        if token in {"--network", "--net", "--pid", "--ipc"}:
-            if index + 1 >= len(tokens):
-                raise CommandError("That flag is not available.")
-            mode = tokens[index + 1]
-            if mode == "host" or mode.startswith("container:"):
-                raise CommandError("That flag is not available.")
+        if token in {"--pid", "--ipc"}:
             raise CommandError("That flag is not available.")
-        if token.startswith(("--network=", "--net=", "--pid=", "--ipc=")):
+        if token.startswith(("--pid=", "--ipc=")):
             raise CommandError("That flag is not available.")
+        if token in {"--network", "--net"} or token.startswith(("--network=", "--net=")):
+            if token in {"--network", "--net"}:
+                if index + 1 >= len(tokens):
+                    raise CommandError("That flag is not available.")
+                mode = tokens[index + 1]
+                index += 2
+            else:
+                mode = token.split("=", 1)[1]
+                index += 1
+            if mode != TAILSCALE_NETWORK or network:
+                raise CommandError("That flag is not available.")
+            network = mode
+            continue
         if token in {"--cap-add"}:
             if index + 1 >= len(tokens):
                 raise CommandError("That capability is not available.")
@@ -699,7 +715,10 @@ def parse_run(cmdline):
         raise CommandError("The container command can only be plain words.")
     if tun and not vpn:
         raise CommandError("The tun device needs NET_ADMIN.")
-    return name, image, tuple(ports), vpn, tuple(command), tuple(env), tuple(sysctls)
+    if network:
+        if name != "tailscale" or "tailscale" not in image.lower() or network != TAILSCALE_NETWORK:
+            raise CommandError("That flag is not available.")
+    return name, image, tuple(ports), vpn, tuple(command), tuple(env), tuple(sysctls), (), network
 
 
 def strip_ascii_qr(text):
@@ -1128,12 +1147,17 @@ class Guard:
         return text
 
     def publish_port(self, port):
+        # host.docker.internal reaches share_page.py and Jellyfin on this
+        # computer from both a bridge container and Docker Desktop
+        # --network host. Under Desktop, 127.0.0.1 is the engine VM, so
+        # folder shares bound to the computer's loopback would miss it.
         port = int(port)
+        host = "host.docker.internal"
         if port == 8096:
             self.capture(["exec", "tailscale", "tailscale", "serve", "--https=8096", "off"], timeout=10)
-            args = ["exec", "tailscale", "tailscale", "serve", "--bg", "--yes", "--tcp=8096", "tcp://host.docker.internal:8096"]
+            args = ["exec", "tailscale", "tailscale", "serve", "--bg", "--yes", "--tcp=8096", f"tcp://{host}:8096"]
         else:
-            args = ["exec", "tailscale", "tailscale", "serve", "--bg", f"--https={port}", f"http://host.docker.internal:{port}"]
+            args = ["exec", "tailscale", "tailscale", "serve", "--bg", f"--https={port}", f"http://{host}:{port}"]
         text, code = self.capture(args, timeout=8)
         match = SERVE_ENABLE_RE.search(text)
         if match:
@@ -1722,10 +1746,10 @@ class Guard:
 
     def apply_command(self, cmdline, replace=False):
         try:
-            name, image, ports, vpn, command, env, sysctls = parse_run(cmdline)
+            name, image, ports, vpn, command, env, sysctls, _mounts, network = parse_run(cmdline)
         except CommandError as exc:
             return {"ok": False, "error": str(exc), "items": self.items()}
-        command_text = canonical_command(name, image, ports, vpn, command, env, sysctls)
+        command_text = canonical_command(name, image, ports, vpn, command, env, sysctls, (), network)
         if "wireguard" in image.lower():
             problem = self.load_wireguard_module()
             if problem:
@@ -1767,8 +1791,14 @@ class Guard:
             root.mkdir(parents=True, exist_ok=True)
             os.chmod(root, 0o755)
             mounts = (f"{root.resolve()}:/media:ro",)
+        if "tailscale" in image.lower():
+            mounts = (*mounts, TAILSCALE_STATE_MOUNT)
+            network = TAILSCALE_NETWORK
+            problem = self.ensure_tailscale_network()
+            if problem:
+                return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
         result = self.run(
-            compose_run(name, image, ports, vpn, command, env, sysctls, mounts),
+            compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network),
             timeout=300 if mounts else 180,
         )
         blob = f"{result.stderr or ''}\n{result.stdout or ''}"
@@ -1814,6 +1844,19 @@ class Guard:
             "command": command_text,
             "items": self.items(),
         }
+
+    def ensure_tailscale_network(self):
+        inspected = self.run(["network", "inspect", TAILSCALE_NETWORK], timeout=10)
+        if inspected.returncode == 0:
+            return ""
+        created = self.run(
+            ["network", "create", "--ipv6", "--subnet", TAILSCALE_IPV6_SUBNET, TAILSCALE_NETWORK],
+            timeout=20,
+        )
+        if created.returncode != 0:
+            detail = f"{created.stderr or ''}\n{created.stdout or ''}".strip().splitlines()
+            return detail[-1][:180] if detail else "Docker could not create the tailscale network."
+        return ""
 
     def prepare_tailscale_firewall(self, name, info):
         config = info.get("Config") if isinstance(info, dict) and isinstance(info.get("Config"), dict) else {}
