@@ -224,6 +224,55 @@ button { cursor: pointer; }
 #default-browser-toggle.is-on { border-color: rgba(253, 185, 19, 0.7); color: var(--gold); background: rgba(253, 185, 19, 0.12); }
 #default-browser-toggle:disabled { opacity: 0.6; cursor: wait; }
 #default-browser-card + #jellyfin-connect { margin-top: 10px; }
+
+.runtime-row { margin-top: 12px; align-items: flex-start; max-width: 720px; }
+.runtime-actions { display: flex; flex-direction: column; gap: 8px; }
+#runtime-engine, #runtime-desktop, #network-runtime-engine, #network-runtime-desktop,
+.container-runtime-btn {
+  border: 1px solid rgba(253, 185, 19, 0.55);
+  background: #18181b;
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+#runtime-engine.is-on, #runtime-desktop.is-on, #network-runtime-engine.is-on, #network-runtime-desktop.is-on,
+.container-runtime-btn.is-on {
+  border-color: rgba(253, 185, 19, 0.7);
+  color: var(--gold);
+  background: rgba(253, 185, 19, 0.12);
+}
+#runtime-engine:disabled, #runtime-desktop:disabled, #network-runtime-engine:disabled, #network-runtime-desktop:disabled,
+.container-runtime-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+#docker-networks-card { margin: 16px 0 8px; max-width: 720px; }
+.network-create, .network-attach {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 12px;
+  margin-top: 12px;
+  align-items: end;
+}
+.network-create label, .network-attach label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.network-create input, .network-create select, .network-attach select {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: #0f0f12;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.network-internal { flex-direction: row !important; align-items: center; gap: 8px; }
+#network-list { margin-top: 10px; }
+#network-list .menu-row small { display: block; }
+#network-create, #network-connect, #network-disconnect {
+  border: 1px solid rgba(253, 185, 19, 0.55);
+  background: #18181b;
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+#network-create:disabled, #network-connect:disabled, #network-disconnect:disabled { opacity: 0.6; cursor: wait; }
+
 #jellyfin-gpu-card { margin: 16px 0 8px; max-width: 720px; }
 #jellyfin-gpu-toggle {
   border: 1px solid rgba(253, 185, 19, 0.55);

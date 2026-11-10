@@ -100,6 +100,12 @@ UPDATE_HOSTS = {
     "github-releases.githubusercontent.com",
     "media.githubusercontent.com",
 }
+RUNTIME_ENGINE = "engine"
+RUNTIME_DESKTOP = "desktop"
+RUNTIMES = (RUNTIME_ENGINE, RUNTIME_DESKTOP)
+BUILTIN_NETWORKS = frozenset({"bridge", "host", "none"})
+NETWORK_DRIVERS = frozenset({"bridge", "macvlan", "ipvlan"})
+IFACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,15}$")
 
 
 def docker_host_env(sock):
@@ -108,6 +114,93 @@ def docker_host_env(sock):
     env.pop("DOCKER_CONTEXT", None)
     env.pop("DOCKER_MACHINE_NAME", None)
     return env
+
+
+def valid_runtime(value):
+    return str(value or "") in RUNTIMES
+
+
+def runtime_label(value):
+    if str(value or "") == RUNTIME_ENGINE:
+        return "Docker Engine"
+    return "Docker Desktop"
+
+
+def valid_network_name(name, allow_builtin=False):
+    text = str(name or "")
+    if not NAME_RE.fullmatch(text):
+        return False
+    if not allow_builtin and text in BUILTIN_NETWORKS:
+        return False
+    return True
+
+
+def valid_network_driver(driver):
+    return str(driver or "") in NETWORK_DRIVERS
+
+
+def valid_iface(name):
+    return bool(IFACE_RE.fullmatch(str(name or "")))
+
+
+def _ipv4_ok(text):
+    parts = str(text or "").split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part.isdigit() or int(part) > 255:
+            return False
+    return True
+
+
+def valid_cidr(text):
+    raw = str(text or "").strip()
+    if raw.count("/") != 1:
+        return False
+    addr, prefix = raw.split("/", 1)
+    if not prefix.isdigit():
+        return False
+    number = int(prefix)
+    if _ipv4_ok(addr):
+        return 0 <= number <= 32
+    try:
+        socket.inet_pton(socket.AF_INET6, addr)
+    except (OSError, ValueError):
+        return False
+    return 0 <= number <= 128
+
+
+def valid_gateway(text):
+    raw = str(text or "").strip()
+    if _ipv4_ok(raw):
+        return True
+    try:
+        socket.inet_pton(socket.AF_INET6, raw)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def network_delete_problem(name, containers=()):
+    text = str(name or "")
+    if text in BUILTIN_NETWORKS:
+        return "Built-in Docker networks cannot be deleted."
+    if not valid_network_name(text):
+        return "Use a plain network name."
+    attached = [item for item in containers or () if str(item or "").strip()]
+    if attached:
+        return "That network still has containers attached."
+    return ""
+
+
+def tailscale_serve_host(runtime):
+    if str(runtime or "") == RUNTIME_ENGINE:
+        return "127.0.0.1"
+    return "host.docker.internal"
+
+
+def is_tailscale_image(name, image=""):
+    return str(name or "") == "tailscale" and "tailscale" in str(image or "").lower()
 
 
 def nvidia_device_path(text):
@@ -1105,7 +1198,7 @@ def parse_run(cmdline):
             else:
                 mode = token.split("=", 1)[1]
                 index += 1
-            if mode != TAILSCALE_NETWORK or network:
+            if network or mode not in {TAILSCALE_NETWORK, "host"}:
                 raise CommandError("That flag is not available.")
             network = mode
             continue
@@ -1232,7 +1325,7 @@ def parse_run(cmdline):
     if tun and not vpn:
         raise CommandError("The tun device needs NET_ADMIN.")
     if network:
-        if name != "tailscale" or "tailscale" not in image.lower() or network != TAILSCALE_NETWORK:
+        if name != "tailscale" or "tailscale" not in image.lower() or network not in {TAILSCALE_NETWORK, "host"}:
             raise CommandError("That flag is not available.")
     return name, image, tuple(ports), vpn, tuple(command), tuple(env), tuple(sysctls), (), network
 
@@ -1321,8 +1414,12 @@ def assess(info, name, data):
     host = info.get("HostConfig") if isinstance(info.get("HostConfig"), dict) else {}
     if host.get("Privileged") is True:
         return "That container is privileged."
+    config = info.get("Config") if isinstance(info.get("Config"), dict) else {}
+    image = str((config or {}).get("Image") or "")
     for key in ("NetworkMode", "PidMode", "IpcMode", "UTSMode", "CgroupnsMode", "UsernsMode"):
         mode = str(host.get(key) or "")
+        if mode == "host" and key == "NetworkMode" and is_tailscale_image(name, image):
+            continue
         if mode == "host" or mode.startswith("container:"):
             return "That container shares the host or another container."
     caps = host.get("CapAdd") or []
@@ -1458,8 +1555,174 @@ class Guard:
     def desktop_sock(self):
         return DESKTOP_DOCKER_SOCK if DESKTOP_DOCKER_SOCK.exists() else None
 
+    def runtimes_path(self):
+        return self.data / "runtimes.json"
+
+    def read_runtimes(self):
+        try:
+            raw = json.loads(self.runtimes_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        items = raw.get("runtimes") if isinstance(raw, dict) else None
+        if not isinstance(items, dict):
+            return {}
+        saved = {}
+        for name, side in items.items():
+            if valid_name(name) and valid_runtime(side):
+                saved[name] = side
+        return saved
+
+    def write_runtimes(self, mapping):
+        payload = {
+            "runtimes": {
+                name: side
+                for name, side in (mapping or {}).items()
+                if valid_name(name) and valid_runtime(side)
+            }
+        }
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.runtimes_path()
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        return payload["runtimes"]
+
+    def save_runtime(self, name, side):
+        if not valid_name(name) or not valid_runtime(side):
+            return self.read_runtimes()
+        mapping = self.read_runtimes()
+        mapping[name] = side
+        return self.write_runtimes(mapping)
+
+    def forget_runtime(self, name):
+        mapping = self.read_runtimes()
+        if name in mapping:
+            del mapping[name]
+            self.write_runtimes(mapping)
+
+    def runtime_sock(self, side):
+        if side == RUNTIME_ENGINE:
+            return self.engine_sock()
+        return None
+
+    def desktop_status(self):
+        status = {
+            "id": RUNTIME_DESKTOP,
+            "label": "Docker Desktop",
+            "ok": False,
+            "available": False,
+            "detail": "Docker Desktop is not installed, or its socket is missing.",
+        }
+        sock = self.desktop_sock()
+        if sock is None and not self._socket_usable(self.engine_sock()):
+            if self.docker_running():
+                status["available"] = True
+                status["ok"] = True
+                status["detail"] = "The default Docker context is running."
+            return status
+        if sock is None:
+            if self.docker_running() and not self._same_socket(self.engine_sock(), DESKTOP_DOCKER_SOCK):
+                # Default context may still be Desktop even if the usual socket path is missing.
+                if self.docker_running():
+                    status["available"] = True
+                    status["ok"] = True
+                    status["detail"] = "The default Docker context is running."
+            return status
+        status["available"] = True
+        if not self._socket_usable(sock):
+            status["detail"] = "Docker Desktop is installed, but its socket is not reachable."
+            return status
+        info = self.docker_info_on(sock)
+        if info is None:
+            if self.docker_running():
+                status["ok"] = True
+                status["detail"] = "Docker Desktop is running."
+                return status
+            status["detail"] = "Docker Desktop is installed, but it is not running. Press Start Docker."
+            return status
+        status["ok"] = True
+        status["detail"] = "Docker Desktop is running."
+        return status
+
+    def engine_runtime_status(self):
+        engine = self._native_engine_status()
+        status = {
+            "id": RUNTIME_ENGINE,
+            "label": "Docker Engine",
+            "ok": bool(engine.get("ok")),
+            "available": bool(engine.get("installed") or engine.get("ok")),
+            "permission": bool(engine.get("permission", True)),
+            "detail": "",
+        }
+        if engine.get("ok"):
+            status["detail"] = "Native Docker Engine is installed and running."
+        elif engine.get("installed") and not engine.get("permission", True):
+            status["available"] = True
+            status["detail"] = (
+                "Docker Engine is installed, but this user cannot use /var/run/docker.sock. "
+                "Add the user to the docker group, then log out and back in."
+            )
+        elif engine.get("installed"):
+            status["detail"] = "Docker Engine is installed but not running."
+        else:
+            status["detail"] = (
+                "Install Docker Engine (docker-ce) next to Docker Desktop, then add this user "
+                "to the docker group and log out and back in."
+            )
+        return status
+
+    def runtime_fields(self):
+        engine = self.engine_runtime_status()
+        desktop = self.desktop_status()
+        return {
+            "dockerRuntimes": {
+                RUNTIME_ENGINE: engine,
+                RUNTIME_DESKTOP: desktop,
+            },
+            "runtimeDefaults": {
+                "tailscale": RUNTIME_ENGINE if engine.get("ok") else RUNTIME_DESKTOP,
+            },
+        }
+
+    def runtime_available(self, side):
+        fields = self.runtime_fields()["dockerRuntimes"].get(side) or {}
+        return bool(fields.get("ok"))
+
+    def _name_on_runtime(self, name, side):
+        if not valid_name(name):
+            return False
+        info, _error = self.inspect_on(name, sock=self.runtime_sock(side))
+        return info is not None
+
+    def container_runtime(self, name=""):
+        name = str(name or "")
+        if name == "jellyfin" and self.gpu_enabled():
+            return RUNTIME_ENGINE
+        saved = self.read_runtimes().get(name)
+        if valid_runtime(saved):
+            return saved
+        return RUNTIME_DESKTOP
+
+    def recommended_runtime(self, name="", image=""):
+        name = str(name or "")
+        image = str(image or "")
+        if name == "jellyfin" and self.gpu_enabled():
+            return RUNTIME_ENGINE
+        saved = self.read_runtimes().get(name)
+        if valid_runtime(saved):
+            return saved
+        if name and self._name_on_runtime(name, RUNTIME_DESKTOP) and not self._name_on_runtime(name, RUNTIME_ENGINE):
+            return RUNTIME_DESKTOP
+        if name and self._name_on_runtime(name, RUNTIME_ENGINE) and not self._name_on_runtime(name, RUNTIME_DESKTOP):
+            return RUNTIME_ENGINE
+        if (name == "tailscale" or "tailscale" in image.lower()) and self.runtime_available(RUNTIME_ENGINE):
+            return RUNTIME_ENGINE
+        return RUNTIME_DESKTOP
+
     def container_sock(self, name=""):
-        if str(name or "") == "jellyfin" and self.gpu_enabled():
+        if self.container_runtime(name) == RUNTIME_ENGINE:
             return self.engine_sock()
         return None
 
@@ -1697,6 +1960,11 @@ class Guard:
             payload.setdefault("jellyfinGpu", self.gpu_enabled())
             payload.setdefault("jellyfinGpuReady", False)
             payload.setdefault("jellyfinGpuChecks", [])
+        try:
+            payload.update(self.runtime_fields())
+        except Exception:
+            payload.setdefault("dockerRuntimes", {})
+            payload.setdefault("runtimeDefaults", {})
         return payload
 
     def update_cache_path(self):
@@ -2033,7 +2301,7 @@ class Guard:
             return detail[-1][:180] if detail else "Docker did not remove that container."
         return ""
 
-    def _start_jellyfin_on(self, side, image="jellyfin/jellyfin:latest"):
+    def _start_jellyfin_on(self, side, image="jellyfin/jellyfin:latest", gpus=None):
         sock = self.engine_sock() if side == "engine" else None
         info, _error = self.inspect_on("jellyfin", sock=sock)
         if info is not None:
@@ -2042,7 +2310,9 @@ class Guard:
             self.save_jellyfin_volumes(info, side=side)
         mounts = self.jellyfin_mounts(info, side=side)
         env = ()
-        gpus = side == "engine"
+        if gpus is None:
+            gpus = side == "engine" and self.gpu_enabled()
+        gpus = bool(gpus) and side == "engine"
         if gpus:
             env = (NVIDIA_VISIBLE_ENV, NVIDIA_CAPS_ENV)
         volumes = self.jellyfin_volume_names(info, side=side)
@@ -2109,6 +2379,7 @@ class Guard:
                     payload["error"] = problem
                     return payload
             self.write_gpu_state(enabled=True)
+            self.save_runtime("jellyfin", RUNTIME_ENGINE)
             if desktop_info or engine_info:
                 _info, error = self._start_jellyfin_on(
                     "engine",
@@ -2125,7 +2396,7 @@ class Guard:
                     "Jellyfin is running on Docker Engine with the NVIDIA GPU. "
                     "In Jellyfin Dashboard → Playback → Transcoding, pick NVIDIA NVENC. "
                     "Login and libraries from Docker Desktop do not carry over; this engine has its own config volume. "
-                    "~/hog-shares is the same folder. Tailscale stays on Docker Desktop and still reaches Jellyfin at host.docker.internal:8096."
+                    "~/hog-shares is the same folder. If Tailscale is on Docker Engine, it reaches Jellyfin at 127.0.0.1:8096; on Docker Desktop it uses host.docker.internal:8096."
                 )
             else:
                 notice = (
@@ -2143,10 +2414,12 @@ class Guard:
                     payload["error"] = problem
                     return payload
             self.write_gpu_state(enabled=False)
+            self.save_runtime("jellyfin", RUNTIME_ENGINE)
             if desktop_info or engine_info:
                 _info, error = self._start_jellyfin_on(
-                    "desktop",
-                    image=container_image(desktop_info) if desktop_info else container_image(engine_info),
+                    "engine",
+                    image=container_image(engine_info) if engine_info else container_image(desktop_info),
+                    gpus=False,
                 )
                 if error:
                     self.write_gpu_state(enabled=True)
@@ -2156,12 +2429,12 @@ class Guard:
                     return payload
                 started = True
                 notice = (
-                    "Jellyfin is back on Docker Desktop (CPU). "
-                    "Settings from this Desktop engine are reused when those volumes were kept. "
-                    "GPU Engine settings stay on Docker Engine's volumes."
+                    "GPU acceleration is off. Jellyfin is still on Docker Engine, now without the NVIDIA GPU. "
+                    "Use the runtime control if you want to move it back to Docker Desktop. "
+                    "Desktop settings stay on Docker Desktop's volumes."
                 )
             else:
-                notice = "GPU acceleration is off. Start Jellyfin and it will run on Docker Desktop (CPU)."
+                notice = "GPU acceleration is off. Start Jellyfin and it will run on Docker Engine without the GPU, unless you move it to Docker Desktop."
         payload = self.engine_status()
         payload["notice"] = notice
         if started:
@@ -2189,7 +2462,7 @@ class Guard:
 
     def _offline_items(self):
         return [
-            {"name": name, "state": "unknown", "image": "", "reason": ""}
+            {"name": name, "state": "unknown", "image": "", "reason": "", "runtime": self.container_runtime(name)}
             for name in self.read_names()
         ]
 
@@ -2308,7 +2581,13 @@ class Guard:
         image = ""
         if isinstance(info.get("Config"), dict):
             image = str(info["Config"].get("Image") or "")
-        return {"name": name, "state": state or "unknown", "image": image, "reason": reason}
+        return {
+            "name": name,
+            "state": state or "unknown",
+            "image": image,
+            "reason": reason,
+            "runtime": self.container_runtime(name),
+        }
 
     def remember(self, name):
         names = self.read_names()
@@ -2320,6 +2599,7 @@ class Guard:
         names = self.read_names()
         if name in names:
             self.write_names([item for item in names if item != name])
+        self.forget_runtime(name)
 
     def _ps_names(self, sock=None):
         try:
@@ -2342,19 +2622,41 @@ class Guard:
         return names
 
     def listed_names(self):
-        names = self._ps_names()
-        if names is None:
+        desktop = self._ps_names()
+        engine = None
+        saved = self.read_runtimes()
+        scan_engine = bool(self.gpu_enabled() or RUNTIME_ENGINE in saved.values())
+        if not scan_engine:
+            # Still scan Engine when its socket is usable and Desktop did not
+            # answer, so Engine-only containers stay visible.
+            scan_engine = desktop is None and self._socket_usable(self.engine_sock())
+        if scan_engine and not self._same_socket(self.engine_sock(), self.desktop_sock()):
+            engine = self._ps_names(sock=self.engine_sock())
+        if desktop is None and engine is None:
             return None
-        if self.gpu_enabled():
+        names = list(desktop or [])
+        seen = set(names)
+        # Prefer the saved or GPU runtime when the same name exists on both.
+        for name in list(names):
+            if name in saved and saved[name] == RUNTIME_ENGINE:
+                names.remove(name)
+                seen.discard(name)
+        if self.gpu_enabled() and "jellyfin" in seen:
             names = [name for name in names if name != "jellyfin"]
-            engine_names = self._ps_names(sock=self.engine_sock())
-            if engine_names:
-                for name in engine_names:
-                    if name == "jellyfin" and name not in names:
-                        names.append(name)
-        for name in self.read_names():
-            if name not in names:
+            seen.discard("jellyfin")
+        for name in engine or []:
+            if name not in seen:
                 names.append(name)
+                seen.add(name)
+        for name in self.read_names():
+            if name not in seen:
+                names.append(name)
+                seen.add(name)
+        # Remember where Engine-only names live so later sock lookups work.
+        for name in engine or []:
+            if name not in saved and name not in (desktop or []):
+                if not (name == "jellyfin" and self.gpu_enabled()):
+                    self.save_runtime(name, RUNTIME_ENGINE)
         return names
 
     def items(self):
@@ -2363,13 +2665,14 @@ class Guard:
             return self._offline_items()
         return [self.snapshot(name) for name in names]
 
-    def capture(self, args, timeout=8):
+    def capture(self, args, timeout=8, sock=None):
         proc = subprocess.Popen(
             [self.docker, *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            env=docker_host_env(sock) if sock else None,
         )
         try:
             out, _ = proc.communicate(timeout=timeout)
@@ -2434,7 +2737,7 @@ class Guard:
 
     def tailscale_status_payload(self):
         try:
-            result = self.run(["exec", "tailscale", "tailscale", "status", "--json"], timeout=15)
+            result = self.container_run("tailscale", ["exec", "tailscale", "tailscale", "status", "--json"], timeout=15)
         except RuntimeError:
             return {}, ""
         blob = (result.stdout or "") + (result.stderr or "")
@@ -2473,7 +2776,7 @@ class Guard:
         if state.get("Running") is not True:
             return ""
         try:
-            result = self.run(["exec", "tailscale", "tailscale", "ip", "-4"], timeout=8)
+            result = self.container_run("tailscale", ["exec", "tailscale", "tailscale", "ip", "-4"], timeout=8)
         except RuntimeError:
             return ""
         text = (result.stdout or "").strip()
@@ -2483,18 +2786,19 @@ class Guard:
         return text
 
     def publish_port(self, port):
-        # host.docker.internal reaches share_page.py and Jellyfin on this
-        # computer from both a bridge container and Docker Desktop
-        # --network host. Under Desktop, 127.0.0.1 is the engine VM, so
-        # folder shares bound to the computer's loopback would miss it.
+        # Docker Desktop Tailscale runs in a VM, so 127.0.0.1 is that VM.
+        # host.docker.internal reaches this computer, including Jellyfin and
+        # share_page.py bound to the host loopback. Engine Tailscale uses
+        # host networking, so 127.0.0.1 is this computer.
         port = int(port)
-        host = "host.docker.internal"
+        host = tailscale_serve_host(self.container_runtime("tailscale"))
+        sock = self.container_sock("tailscale")
         if port == 8096:
-            self.capture(["exec", "tailscale", "tailscale", "serve", "--https=8096", "off"], timeout=10)
+            self.capture(["exec", "tailscale", "tailscale", "serve", "--https=8096", "off"], timeout=10, sock=sock)
             args = ["exec", "tailscale", "tailscale", "serve", "--bg", "--yes", "--tcp=8096", f"tcp://{host}:8096"]
         else:
             args = ["exec", "tailscale", "tailscale", "serve", "--bg", f"--https={port}", f"http://{host}:{port}"]
-        text, code = self.capture(args, timeout=8)
+        text, code = self.capture(args, timeout=8, sock=sock)
         match = SERVE_ENABLE_RE.search(text)
         if match:
             return "", match.group(0)
@@ -2505,11 +2809,13 @@ class Guard:
 
     def unpublish_port(self, port):
         port = int(port)
+        sock = self.container_sock("tailscale")
         if port == 8096:
-            self.capture(["exec", "tailscale", "tailscale", "serve", "--tcp=8096", "off"], timeout=10)
+            self.capture(["exec", "tailscale", "tailscale", "serve", "--tcp=8096", "off"], timeout=10, sock=sock)
         self.capture(
             ["exec", "tailscale", "tailscale", "serve", f"--https={port}", "off"],
             timeout=10,
+            sock=sock,
         )
 
     def port_open(self, port):
@@ -3136,6 +3442,564 @@ class Guard:
             notice=f"Default browser restored to {label}.",
         )
 
+    def _runtime_or_error(self, side):
+        if not valid_runtime(side):
+            return None, "Choose Docker Engine or Docker Desktop."
+        fields = (self.runtime_fields().get("dockerRuntimes") or {}).get(side) or {}
+        if not fields.get("ok"):
+            return None, fields.get("detail") or f"{runtime_label(side)} is not available."
+        return self.runtime_sock(side), ""
+
+    def _spec_from_info(self, name, info, fallback_image=""):
+        config = info.get("Config") if isinstance(info, dict) and isinstance(info.get("Config"), dict) else {}
+        host = info.get("HostConfig") if isinstance(info, dict) and isinstance(info.get("HostConfig"), dict) else {}
+        image = str(config.get("Image") or fallback_image or "")
+        command = tuple(part for part in (config.get("Cmd") or ()) if isinstance(part, str))
+        if image_brings_command(image) and (not command or command == ("sleep", "infinity")):
+            command = ()
+        env = []
+        for item in config.get("Env") or []:
+            text = str(item)
+            if ENV_RE.fullmatch(text) and text not in env:
+                env.append(text)
+        ports = []
+        bindings = host.get("PortBindings") or {}
+        if isinstance(bindings, dict):
+            for dest, maps in bindings.items():
+                dest_text = str(dest or "")
+                dest_port, _, proto = dest_text.partition("/")
+                proto = proto or "tcp"
+                if proto not in {"tcp", "udp"}:
+                    continue
+                try:
+                    dest_num = str(int(dest_port))
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(maps, list) or not maps:
+                    ports.append(("", dest_num, dest_num, proto))
+                    continue
+                for item in maps:
+                    if not isinstance(item, dict):
+                        continue
+                    bind = str(item.get("HostIp") or "")
+                    if bind and not _ipv4_ok(bind):
+                        bind = ""
+                    try:
+                        host_num = str(int(item.get("HostPort") or dest_num))
+                    except (TypeError, ValueError):
+                        host_num = dest_num
+                    ports.append((bind, host_num, dest_num, proto))
+        caps = self._cap_names(host.get("CapAdd"))
+        vpn = "NET_ADMIN" in caps
+        sysctls = []
+        raw = host.get("Sysctls") or {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                item = f"{key}={value}"
+                if item in SYSCTLS and item not in sysctls:
+                    sysctls.append(item)
+        return image, tuple(ports[:MAX_PORTS]), vpn, command, tuple(env[:MAX_ENV]), tuple(sysctls)
+
+    def _start_managed_on(self, name, side, info=None, image=""):
+        image, ports, vpn, command, env, sysctls = self._spec_from_info(name, info or {}, fallback_image=image)
+        if not valid_image(image):
+            return None, "Use an image like ubuntu:24.04."
+        mounts = ()
+        gpus = False
+        network = ""
+        jellyfin = "jellyfin" in image.lower() or name == "jellyfin"
+        tailscale = "tailscale" in image.lower() or name == "tailscale"
+        if jellyfin:
+            mounts = self.jellyfin_mounts(info, side=side)
+            if side == RUNTIME_ENGINE and self.gpu_enabled():
+                gpus = True
+                extra = []
+                if NVIDIA_VISIBLE_ENV not in env:
+                    extra.append(NVIDIA_VISIBLE_ENV)
+                if NVIDIA_CAPS_ENV not in env:
+                    extra.append(NVIDIA_CAPS_ENV)
+                env = tuple(env) + tuple(extra)
+        if tailscale:
+            mounts = (*mounts, TAILSCALE_STATE_MOUNT)
+            vpn = True
+            if side == RUNTIME_ENGINE:
+                network = "host"
+            else:
+                network = TAILSCALE_NETWORK
+                problem = self.ensure_tailscale_network(sock=self.runtime_sock(side))
+                if problem:
+                    return None, problem
+        sock = self.runtime_sock(side)
+        run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus)
+        if tailscale and network == "host":
+            if "--cap-add=NET_ADMIN" in run_args and "--cap-add=NET_RAW" not in run_args:
+                run_args = list(run_args)
+                run_args.insert(run_args.index("--cap-add=NET_ADMIN") + 1, "--cap-add=NET_RAW")
+        result = self.run_on(run_args, timeout=300 if mounts else 180, sock=sock) if sock is not None else self.run(run_args, timeout=300 if mounts else 180)
+        blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+        if result.returncode != 0:
+            if docker_offline(blob):
+                return None, "Docker is not running."
+            detail = [line.strip() for line in blob.splitlines() if line.strip()]
+            return None, detail[-1][:180] if detail else "Docker did not start that container."
+        started, error = self.inspect_on(name, sock=sock)
+        reason = assess(started, name, self.data) if started else (error or "Docker did not describe that container.")
+        if reason:
+            if sock is not None:
+                self.run_on(["rm", "-f", name], timeout=20, sock=sock)
+            else:
+                self.run(["rm", "-f", name], timeout=20)
+            return None, reason
+        self.remember(name)
+        problem = self.prepare_tailscale_firewall(name, started)
+        if problem:
+            return None, problem
+        return started, ""
+
+    def set_container_runtime(self, name, side):
+        name = str(name or "")
+        side = str(side or "")
+        if not valid_name(name):
+            return {"ok": False, "error": "Use a plain container name.", "items": self.items()}
+        if not valid_runtime(side):
+            return {"ok": False, "error": "Choose Docker Engine or Docker Desktop.", "items": self.items()}
+        _sock, unavailable = self._runtime_or_error(side)
+        if unavailable:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = unavailable
+            return payload
+        if name == "jellyfin" and side == RUNTIME_DESKTOP and self.gpu_enabled():
+            clear_gpu = True
+        else:
+            clear_gpu = False
+        current = self.container_runtime(name)
+        current_info, _current_error = self.inspect_on(name, sock=self.runtime_sock(current))
+        other = RUNTIME_ENGINE if current == RUNTIME_DESKTOP else RUNTIME_DESKTOP
+        other_info, _other_error = self.inspect_on(name, sock=self.runtime_sock(other))
+        exists = current_info or other_info
+        if not exists:
+            self.save_runtime(name, side)
+            if name == "jellyfin" and side == RUNTIME_DESKTOP and self.gpu_enabled():
+                self.write_gpu_state(enabled=False)
+            payload = self.engine_status()
+            payload["notice"] = f"New {name} containers will use {runtime_label(side)}."
+            return payload
+        if current == side and current_info and not other_info:
+            self.save_runtime(name, side)
+            payload = self.engine_status()
+            payload["notice"] = f"{name} is already on {runtime_label(side)}."
+            return payload
+        source_info = current_info or other_info
+        source_side = current if current_info else other
+        if name == "jellyfin" and source_info:
+            self.save_jellyfin_volumes(source_info, side=source_side)
+        problem = self._stop_rm_keep_volumes(name, sock=self.runtime_sock(source_side))
+        if problem:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = problem
+            return payload
+        if other_info and other != source_side:
+            leftover = self._stop_rm_keep_volumes(name, sock=self.runtime_sock(other))
+            if leftover:
+                payload = self.engine_status()
+                payload["ok"] = False
+                payload["error"] = leftover
+                return payload
+        if clear_gpu:
+            self.write_gpu_state(enabled=False)
+        self.save_runtime(name, side)
+        started, error = self._start_managed_on(
+            name,
+            side,
+            info=source_info,
+            image=container_image(source_info),
+        )
+        if error:
+            self.save_runtime(name, source_side)
+            if clear_gpu:
+                self.write_gpu_state(enabled=True)
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = error
+            return payload
+        notice = (
+            f"{name} is now on {runtime_label(side)}. "
+            "Login, libraries, and other files kept in that runtime's Docker volumes do not carry over."
+        )
+        if name == "tailscale" and side == RUNTIME_ENGINE:
+            notice += (
+                " Tailscale now uses this computer's network, so your phone can usually connect directly. "
+                "Sign in again. In the Tailscale admin page, delete the old hog or hog-1 machine, "
+                "then approve the new one as an exit node."
+            )
+        elif name == "tailscale":
+            notice += " Sign in again if Docker Desktop does not already have hog's Tailscale login volume."
+        if clear_gpu:
+            notice += " GPU acceleration was turned off because it needs Docker Engine."
+        payload = self.engine_status()
+        payload["notice"] = notice
+        dns, live = self.tailscale_dns()
+        if live and (name == "jellyfin" or name == "tailscale"):
+            problem, enable = self.publish_port(8096)
+            if enable:
+                payload["enableUrl"] = enable
+            elif problem:
+                payload["notice"] = f"{notice} {problem}"
+        return payload
+
+    def _parse_network_inspect(self, payload, side):
+        if not isinstance(payload, dict):
+            return None
+        name = str(payload.get("Name") or "")
+        if not valid_network_name(name, allow_builtin=True):
+            return None
+        ipam = payload.get("IPAM") if isinstance(payload.get("IPAM"), dict) else {}
+        configs = ipam.get("Config") if isinstance(ipam.get("Config"), list) else []
+        subnets = []
+        gateways = []
+        for item in configs:
+            if not isinstance(item, dict):
+                continue
+            subnet = str(item.get("Subnet") or "")
+            gateway = str(item.get("Gateway") or "")
+            if subnet:
+                subnets.append(subnet)
+            if gateway:
+                gateways.append(gateway)
+        attached = []
+        containers = payload.get("Containers") if isinstance(payload.get("Containers"), dict) else {}
+        for container in containers.values():
+            if not isinstance(container, dict):
+                continue
+            label = str(container.get("Name") or "")
+            if valid_name(label) and label not in attached:
+                attached.append(label)
+        options = payload.get("Options") if isinstance(payload.get("Options"), dict) else {}
+        parent = str(options.get("parent") or options.get("com.docker.network.bridge.name") or "")
+        return {
+            "name": name,
+            "runtime": side,
+            "driver": str(payload.get("Driver") or ""),
+            "scope": str(payload.get("Scope") or ""),
+            "internal": bool(payload.get("Internal")),
+            "builtin": name in BUILTIN_NETWORKS,
+            "subnet": subnets[0] if subnets else "",
+            "subnets": subnets,
+            "gateway": gateways[0] if gateways else "",
+            "containers": attached,
+            "parent": parent if valid_iface(parent) else "",
+        }
+
+    def list_networks(self, side=""):
+        sides = [side] if valid_runtime(side) else list(RUNTIMES)
+        networks = []
+        for item in sides:
+            sock, error = self._runtime_or_error(item)
+            if error:
+                continue
+            try:
+                listed = self.run_on(["network", "ls", "--format", "{{json .}}"], timeout=15, sock=sock) if sock is not None else self.run(["network", "ls", "--format", "{{json .}}"], timeout=15)
+            except RuntimeError as exc:
+                payload = self.engine_status()
+                payload["ok"] = False
+                payload["error"] = str(exc)
+                payload["networks"] = networks
+                return payload
+            blob = f"{listed.stderr or ''}\n{listed.stdout or ''}"
+            if listed.returncode != 0:
+                if docker_offline(blob):
+                    continue
+                continue
+            names = []
+            for line in (listed.stdout or "").splitlines():
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                label = str(row.get("Name") or "")
+                if valid_network_name(label, allow_builtin=True) and label not in names:
+                    names.append(label)
+            if names:
+                try:
+                    inspected = self.run_on(["network", "inspect", *names], timeout=20, sock=sock) if sock is not None else self.run(["network", "inspect", *names], timeout=20)
+                except RuntimeError:
+                    inspected = None
+                payload_rows = []
+                if inspected is not None and inspected.returncode == 0:
+                    try:
+                        raw = json.loads(inspected.stdout or "[]")
+                    except json.JSONDecodeError:
+                        raw = []
+                    if isinstance(raw, list):
+                        payload_rows = raw
+                found = {item.get("name"): item for item in (self._parse_network_inspect(row, item) for row in payload_rows) if item}
+                for label in names:
+                    networks.append(found.get(label) or {
+                        "name": label,
+                        "runtime": item,
+                        "driver": "",
+                        "scope": "",
+                        "internal": False,
+                        "builtin": label in BUILTIN_NETWORKS,
+                        "subnet": "",
+                        "subnets": [],
+                        "gateway": "",
+                        "containers": [],
+                        "parent": "",
+                    })
+        payload = self.engine_status()
+        payload["networks"] = networks
+        payload["networkRuntime"] = side if valid_runtime(side) else ""
+        return payload
+
+    def _network_request(self, blob):
+        if isinstance(blob, dict):
+            raw = blob
+        else:
+            text = str(blob or "").strip()
+            if not text:
+                return None, "That network request could not be read."
+            if text.startswith("{"):
+                try:
+                    raw = json.loads(text)
+                except json.JSONDecodeError:
+                    return None, "That network request could not be read."
+            else:
+                return None, "That network request could not be read."
+        if not isinstance(raw, dict):
+            return None, "That network request could not be read."
+        return raw, ""
+
+    def create_network(self, blob):
+        raw, error = self._network_request(blob)
+        if error:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = error
+            return payload
+        side = str(raw.get("runtime") or raw.get("side") or "")
+        name = str(raw.get("name") or "")
+        driver = str(raw.get("driver") or "bridge")
+        subnet = str(raw.get("subnet") or "").strip()
+        gateway = str(raw.get("gateway") or "").strip()
+        parent = str(raw.get("parent") or "").strip()
+        internal = bool(raw.get("internal"))
+        sock, unavailable = self._runtime_or_error(side)
+        if unavailable:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = unavailable
+            return payload
+        if not valid_network_name(name):
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "Use a plain network name. Built-in names such as bridge, host, and none cannot be created."
+            return payload
+        if not valid_network_driver(driver):
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "Use the bridge, macvlan, or ipvlan driver."
+            return payload
+        if subnet and not valid_cidr(subnet):
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "Use a subnet like 172.28.0.0/16."
+            return payload
+        if gateway and not valid_gateway(gateway):
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "Use a gateway address like 172.28.0.1."
+            return payload
+        if gateway and not subnet:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "A gateway needs a subnet."
+            return payload
+        if parent and not valid_iface(parent):
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "Use a plain parent interface name."
+            return payload
+        if parent and driver == "bridge":
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "A parent interface is only used with macvlan or ipvlan."
+            return payload
+        args = ["network", "create", "--driver", driver]
+        if subnet:
+            args.extend(["--subnet", subnet])
+        if gateway:
+            args.extend(["--gateway", gateway])
+        if internal:
+            args.append("--internal")
+        if parent:
+            args.extend(["--opt", f"parent={parent}"])
+        args.append(name)
+        try:
+            result = self.run_on(args, timeout=20, sock=sock) if sock is not None else self.run(args, timeout=20)
+        except RuntimeError as exc:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = str(exc)
+            return payload
+        blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+        if result.returncode != 0:
+            detail = [line.strip() for line in blob.splitlines() if line.strip()]
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = detail[-1][:180] if detail else "Docker could not create that network."
+            return payload
+        payload = self.list_networks(side)
+        payload["notice"] = f"Created {name} on {runtime_label(side)}."
+        return payload
+
+    def remove_network(self, blob):
+        raw, error = self._network_request(blob) if str(blob or "").startswith("{") else (None, "")
+        if raw is None and not error:
+            text = str(blob or "")
+            side, _, name = text.partition(":")
+            raw = {"runtime": side, "name": name}
+        if error:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = error
+            return payload
+        side = str(raw.get("runtime") or raw.get("side") or "")
+        name = str(raw.get("name") or "")
+        sock, unavailable = self._runtime_or_error(side)
+        if unavailable:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = unavailable
+            return payload
+        if name in BUILTIN_NETWORKS or not valid_network_name(name, allow_builtin=True):
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = network_delete_problem(name)
+            return payload
+        try:
+            inspected = self.run_on(["network", "inspect", name], timeout=15, sock=sock) if sock is not None else self.run(["network", "inspect", name], timeout=15)
+        except RuntimeError as exc:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = str(exc)
+            return payload
+        attached = []
+        if inspected.returncode == 0:
+            try:
+                rows = json.loads(inspected.stdout or "[]")
+            except json.JSONDecodeError:
+                rows = []
+            parsed = self._parse_network_inspect(rows[0], side) if isinstance(rows, list) and rows else None
+            if parsed:
+                attached = parsed.get("containers") or []
+        problem = network_delete_problem(name, attached)
+        if problem:
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = problem
+            return payload
+        try:
+            result = self.run_on(["network", "rm", name], timeout=20, sock=sock) if sock is not None else self.run(["network", "rm", name], timeout=20)
+        except RuntimeError as exc:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = str(exc)
+            return payload
+        if result.returncode != 0:
+            detail = f"{result.stderr or ''}\n{result.stdout or ''}".strip().splitlines()
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = detail[-1][:180] if detail else "Docker could not delete that network."
+            return payload
+        payload = self.list_networks(side)
+        payload["notice"] = f"Deleted {name}."
+        return payload
+
+    def _network_membership(self, blob, action):
+        raw, error = self._network_request(blob) if str(blob or "").startswith("{") else (None, "")
+        if raw is None and not error:
+            parts = str(blob or "").split(":")
+            if len(parts) >= 3:
+                raw = {"runtime": parts[0], "name": parts[1], "container": parts[2]}
+            else:
+                error = "Choose a runtime, a network, and a container."
+        if error:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = error
+            return payload
+        side = str(raw.get("runtime") or raw.get("side") or "")
+        net = str(raw.get("name") or raw.get("network") or "")
+        container = str(raw.get("container") or "")
+        sock, unavailable = self._runtime_or_error(side)
+        if unavailable:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = unavailable
+            return payload
+        if not valid_network_name(net, allow_builtin=True) or net in {"host", "none"}:
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = "Choose a user-defined Docker network."
+            return payload
+        if not valid_name(container):
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = "Use a plain container name."
+            return payload
+        remembered = set(self.read_names()) | set(self.listed_names() or [])
+        if container not in remembered:
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = "Hog can only attach containers it already manages."
+            return payload
+        if self.container_runtime(container) != side:
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = f"{container} is not on {runtime_label(side)}."
+            return payload
+        info, inspect_error = self.inspect(container)
+        if info is None:
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = inspect_error or "Docker did not find that container."
+            return payload
+        host = info.get("HostConfig") if isinstance(info.get("HostConfig"), dict) else {}
+        if str(host.get("NetworkMode") or "") == "host":
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = "A container on the host network cannot join another network."
+            return payload
+        args = ["network", action, net, container]
+        try:
+            result = self.container_run(container, args, timeout=20)
+        except RuntimeError as exc:
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = str(exc)
+            return payload
+        if result.returncode != 0:
+            detail = f"{result.stderr or ''}\n{result.stdout or ''}".strip().splitlines()
+            payload = self.list_networks(side)
+            payload["ok"] = False
+            payload["error"] = detail[-1][:180] if detail else f"Docker could not {action} that network."
+            return payload
+        payload = self.list_networks(side)
+        verb = "Connected" if action == "connect" else "Disconnected"
+        payload["notice"] = f"{verb} {container} {'to' if action == 'connect' else 'from'} {net}."
+        return payload
+
+    def connect_network(self, blob):
+        return self._network_membership(blob, "connect")
+
+    def disconnect_network(self, blob):
+        return self._network_membership(blob, "disconnect")
+
     def handle(self, action, name="", image=""):
         if action == "update-status":
             return self.update_status()
@@ -3159,6 +4023,18 @@ class Guard:
             return self._mark_docker(self.set_jellyfin_gpu(False))
         if action == "jellyfin-gpu-install":
             return self._mark_docker(self.install_nvidia_toolkit())
+        if action == "runtime-set":
+            return self._mark_docker(self.set_container_runtime(name, image))
+        if action == "network-list":
+            return self._mark_docker(self.list_networks(name))
+        if action == "network-create":
+            return self._mark_docker(self.create_network(name))
+        if action == "network-remove":
+            return self._mark_docker(self.remove_network(name))
+        if action == "network-connect":
+            return self._mark_docker(self.connect_network(name))
+        if action == "network-disconnect":
+            return self._mark_docker(self.disconnect_network(name))
         if action == "engine":
             return self.engine_status()
         if action == "share-list":
@@ -3196,7 +4072,7 @@ class Guard:
         if action == "tailscale-up":
             return self._mark_docker(self.tailscale_up())
         if action in {"run", "recreate"}:
-            return self._mark_docker(self.apply_command(name, replace=action == "recreate"))
+            return self._mark_docker(self.apply_command(name, replace=action == "recreate", runtime=image))
         return self._mark_docker(self._act(action, name, image))
 
     def _act(self, action, name="", image=""):
@@ -3257,7 +4133,7 @@ class Guard:
             return {"ok": False, "error": error, "items": self.items()}
         created = False
         if info is None:
-            result = self.run(launch_args({"name": name, "image": image}, image), timeout=180)
+            result = self.container_run(name, launch_args({"name": name, "image": image}, image), timeout=180)
             blob = f"{result.stderr or ''}\n{result.stdout or ''}"
             if result.returncode != 0:
                 if docker_offline(blob):
@@ -3273,11 +4149,11 @@ class Guard:
         reason = assess(info, name, self.data) if info else (error or "Docker did not describe that container.")
         if reason:
             if created:
-                self.run(["rm", "-f", name], timeout=20)
+                self.container_run(name, ["rm", "-f", name], timeout=20)
             return {"ok": False, "error": reason, "items": self.items()}
         running = isinstance(info.get("State"), dict) and info["State"].get("Running") is True
         if not running:
-            started = self.run(["start", name])
+            started = self.container_run(name, ["start", name])
             if started.returncode != 0:
                 detail = f"{started.stderr or ''}\n{started.stdout or ''}".strip().splitlines()
                 return {
@@ -3288,11 +4164,19 @@ class Guard:
         self.remember(name)
         return {"ok": True, "error": "", "items": self.items()}
 
-    def apply_command(self, cmdline, replace=False):
+    def apply_command(self, cmdline, replace=False, runtime=""):
         try:
             name, image, ports, vpn, command, env, sysctls, _mounts, network = parse_run(cmdline)
         except CommandError as exc:
             return {"ok": False, "error": str(exc), "items": self.items()}
+        if valid_runtime(runtime):
+            if name == "jellyfin" and runtime == RUNTIME_DESKTOP and self.gpu_enabled():
+                return {
+                    "ok": False,
+                    "error": "GPU acceleration needs Docker Engine. Turn off the NVIDIA GPU toggle first, or keep Jellyfin on Docker Engine.",
+                    "items": self.items(),
+                }
+            self.save_runtime(name, runtime)
         command_text = canonical_command(name, image, ports, vpn, command, env, sysctls, (), network)
         if "wireguard" in image.lower():
             problem = self.load_wireguard_module()
@@ -3351,13 +4235,21 @@ class Guard:
                 if NVIDIA_CAPS_ENV not in env:
                     extra.append(NVIDIA_CAPS_ENV)
                 env = tuple(env) + tuple(extra)
-        if "tailscale" in image.lower():
+        if "tailscale" in image.lower() or name == "tailscale":
             mounts = (*mounts, TAILSCALE_STATE_MOUNT)
-            network = TAILSCALE_NETWORK
-            problem = self.ensure_tailscale_network()
-            if problem:
-                return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
+            side = self.container_runtime(name)
+            if side == RUNTIME_ENGINE:
+                network = "host"
+            else:
+                network = TAILSCALE_NETWORK
+                problem = self.ensure_tailscale_network(sock=self.container_sock(name))
+                if problem:
+                    return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
         run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus)
+        if ("tailscale" in image.lower() or name == "tailscale") and network == "host":
+            if "--cap-add=NET_ADMIN" in run_args and "--cap-add=NET_RAW" not in run_args:
+                run_args = list(run_args)
+                run_args.insert(run_args.index("--cap-add=NET_ADMIN") + 1, "--cap-add=NET_RAW")
         result = self.container_run(name, run_args, timeout=300 if mounts else 180)
         blob = f"{result.stderr or ''}\n{result.stdout or ''}"
         if result.returncode != 0:
@@ -3376,6 +4268,10 @@ class Guard:
             self.container_run(name, ["rm", "-f", name], timeout=20)
             return {"ok": False, "error": reason, "items": self.items(), "command": command_text}
         self.remember(name)
+        if "tailscale" in image.lower() or name == "tailscale":
+            self.save_runtime(name, self.container_runtime(name))
+        elif jellyfin:
+            self.save_runtime(name, RUNTIME_ENGINE if self.gpu_enabled() else self.container_runtime(name))
         problem = self.prepare_tailscale_firewall(name, info)
         if problem:
             return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
@@ -3405,13 +4301,16 @@ class Guard:
             "items": self.items(),
         }
 
-    def ensure_tailscale_network(self):
-        inspected = self.run(["network", "inspect", TAILSCALE_NETWORK], timeout=10)
+    def ensure_tailscale_network(self, sock=None):
+        runner = (lambda args, timeout=10: self.run_on(args, timeout=timeout, sock=sock)) if sock is not None else (
+            lambda args, timeout=10: self.run(args, timeout=timeout)
+        )
+        inspected = runner(["network", "inspect", TAILSCALE_NETWORK], 10)
         if inspected.returncode == 0:
             return ""
-        created = self.run(
+        created = runner(
             ["network", "create", "--ipv6", "--subnet", TAILSCALE_IPV6_SUBNET, TAILSCALE_NETWORK],
-            timeout=20,
+            20,
         )
         if created.returncode != 0:
             detail = f"{created.stderr or ''}\n{created.stdout or ''}".strip().splitlines()
@@ -3422,17 +4321,17 @@ class Guard:
         config = info.get("Config") if isinstance(info, dict) and isinstance(info.get("Config"), dict) else {}
         if "tailscale" not in str(config.get("Image") or "").lower():
             return ""
-        listed = self.run(["exec", name, "ls", "-l", "/usr/sbin/iptables", "/usr/sbin/ip6tables"], timeout=15)
+        listed = self.container_run(name, ["exec", name, "ls", "-l", "/usr/sbin/iptables", "/usr/sbin/ip6tables"], timeout=15)
         text = f"{listed.stdout or ''}\n{listed.stderr or ''}"
         if listed.returncode != 0:
             return "Tailscale did not show its firewall command."
         if text.count("xtables-nft-multi") >= 2 and "legacy" not in text:
             return ""
         for path in ("/usr/sbin/iptables", "/usr/sbin/ip6tables"):
-            linked = self.run(["exec", name, "ln", "-sfn", "xtables-nft-multi", path], timeout=15)
+            linked = self.container_run(name, ["exec", name, "ln", "-sfn", "xtables-nft-multi", path], timeout=15)
             if linked.returncode != 0:
                 return "Tailscale could not switch its firewall command."
-        restarted = self.run(["restart", name], timeout=40)
+        restarted = self.container_run(name, ["restart", name], timeout=40)
         if restarted.returncode != 0:
             return "Tailscale did not restart after the firewall change."
         return ""
@@ -3446,6 +4345,7 @@ class Guard:
                     capture_output=True,
                     timeout=15,
                     check=False,
+                    env=docker_host_env(self.container_sock(name)) if self.container_sock(name) else None,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 return b""
@@ -3457,7 +4357,7 @@ class Guard:
         if assess(info, name, self.data):
             return []
         try:
-            listed = self.run(["exec", name, "find", "/config", "-maxdepth", "3", "-name", "*.png"], timeout=15)
+            listed = self.container_run(name, ["exec", name, "find", "/config", "-maxdepth", "3", "-name", "*.png"], timeout=15)
         except RuntimeError:
             return []
         if listed.returncode != 0:
@@ -3484,7 +4384,8 @@ class Guard:
         if not valid_name(name) or not PEER_CONF_RE.fullmatch(path):
             return ""
         try:
-            result = self.run(
+            result = self.container_run(
+                name,
                 ["exec", name, "grep", "-m", "1", "-E", r"^Endpoint[[:space:]]*=", path],
                 timeout=10,
             )
@@ -3532,6 +4433,7 @@ class Guard:
                     capture_output=True,
                     timeout=15,
                     check=False,
+                    env=docker_host_env(self.container_sock(name)) if self.container_sock(name) else None,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 return False
@@ -3560,7 +4462,7 @@ class Guard:
             return {"ok": False, "error": missing, "items": self.items()}
         endpoint = f"{address}:51820"
         try:
-            listed = self.run(["exec", name, "find", "/config", "-maxdepth", "3", "-name", "*.conf"], timeout=15)
+            listed = self.container_run(name, ["exec", name, "find", "/config", "-maxdepth", "3", "-name", "*.conf"], timeout=15)
         except RuntimeError as exc:
             return {"ok": False, "error": str(exc), "items": self.items()}
         if listed.returncode != 0:
@@ -3657,7 +4559,8 @@ class Guard:
         if url:
             return self._tailscale_login_payload(url, backend_state, open_login=True)
         try:
-            result = self.run(
+            result = self.container_run(
+                name,
                 ["exec", name, "tailscale", "login", "--timeout=90s"],
                 timeout=100,
             )
@@ -3759,7 +4662,7 @@ class Guard:
             return {"ok": False, "error": error, "items": self.items()}
         created = False
         if info is None:
-            result = self.run(launch_args(preset, self.image_for(preset)), timeout=180)
+            result = self.container_run(name, launch_args(preset, self.image_for(preset)), timeout=180)
             blob = f"{result.stderr or ''}\n{result.stdout or ''}"
             if result.returncode != 0:
                 if docker_offline(blob):
@@ -3775,11 +4678,11 @@ class Guard:
         reason = assess(info, name, self.data) if info else (error or "Docker did not describe that container.")
         if reason:
             if created:
-                self.run(["rm", "-f", name], timeout=20)
+                self.container_run(name, ["rm", "-f", name], timeout=20)
             return {"ok": False, "error": reason, "items": self.items()}
         running = isinstance(info.get("State"), dict) and info["State"].get("Running") is True
         if not running:
-            started = self.run(["start", name])
+            started = self.container_run(name, ["start", name])
             if started.returncode != 0:
                 detail = f"{started.stderr or ''}\n{started.stdout or ''}".strip().splitlines()
                 return {
@@ -3814,10 +4717,10 @@ class Guard:
         adds = self._cap_names(host.get("CapAdd"))
         if "ALL" not in drops or ("SETUID" in adds and "SYS_CHROOT" in adds):
             return info, ""
-        removed = self.run(["rm", "-f", name], timeout=30)
+        removed = self.container_run(name, ["rm", "-f", name], timeout=30)
         if removed.returncode != 0:
             return None, "Hog could not replace that container."
-        started = self.run(launch_args(preset, self.image_for(preset)), timeout=180)
+        started = self.container_run(name, launch_args(preset, self.image_for(preset)), timeout=180)
         if started.returncode != 0:
             blob = f"{started.stderr or ''}\n{started.stdout or ''}"
             if docker_offline(blob):
@@ -3856,6 +4759,7 @@ class Guard:
             reason = assess(info, name, self.data)
             if reason:
                 return self._shell_fail(name, reason)
+            self.shell.docker_sock = self.container_sock(name)
             self.shell.prepare(name)
             session = self.shell.mint(name)
         except ShellError as exc:
@@ -3881,7 +4785,7 @@ class Guard:
         if not valid_name(preset["name"]):
             return preset["image"]
         try:
-            result = self.run(["image", "inspect", "--format", "{{.Id}}", tag], timeout=15)
+            result = self.container_run(preset["name"], ["image", "inspect", "--format", "{{.Id}}", tag], timeout=15)
         except RuntimeError:
             return preset["image"]
         if result.returncode == 0 and (result.stdout or "").strip():
@@ -3914,7 +4818,7 @@ class Guard:
     def _commit_result(self, name):
         tag = f"{name}:local"
         try:
-            result = self.run(["commit", name, tag], timeout=300)
+            result = self.container_run(name, ["commit", name, tag], timeout=300)
         except RuntimeError as exc:
             return {"name": name, "image": tag, "error": str(exc)}
         blob = f"{result.stderr or ''}\n{result.stdout or ''}"

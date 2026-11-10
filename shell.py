@@ -25,7 +25,7 @@ import time
 import tty
 from pathlib import Path
 
-from guard import docker_offline, valid_name, wallet_dir
+from guard import docker_host_env, docker_offline, valid_name, wallet_dir
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 PUBKEY_RE = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+ hog-browser$")
@@ -34,6 +34,13 @@ PROXY_SOURCE = """import os, re, sys
 name = os.environ.get("HOG_SSH_CONTAINER", "")
 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name or ""):
     sys.exit(1)
+host = os.environ.get("HOG_DOCKER_HOST", "")
+if host:
+    if not re.fullmatch(r"unix:///var/run/docker.sock|unix:///home/[A-Za-z0-9._][A-Za-z0-9._-]{0,31}/\\.docker/desktop/docker.sock", host):
+        sys.exit(1)
+    os.environ["DOCKER_HOST"] = host
+    os.environ.pop("DOCKER_CONTEXT", None)
+    os.environ.pop("DOCKER_MACHINE_NAME", None)
 os.execvp("docker", ["docker", "exec", "-i", name, "socat", "STDIO", "TCP:127.0.0.1:22"])
 """
 
@@ -188,6 +195,7 @@ class ShellHost:
         self.docker_bin = docker
         self.origin = origin
         self.ssh_bin = ssh_bin
+        self.docker_sock = None
         self.key = self.root / "id_ed25519"
         self.proxy_path = self.root / "proxy.py"
         self.known_dir = self.root / "known"
@@ -268,6 +276,7 @@ class ShellHost:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=docker_host_env(self.docker_sock) if self.docker_sock else None,
             )
         except FileNotFoundError as exc:
             raise ShellError("Docker is not installed.") from exc
@@ -426,6 +435,10 @@ class ShellHost:
         try:
             env = os.environ.copy()
             env["HOG_SSH_CONTAINER"] = name
+            if self.docker_sock:
+                env["HOG_DOCKER_HOST"] = f"unix://{self.docker_sock}"
+            else:
+                env.pop("HOG_DOCKER_HOST", None)
             master, slave = pty.openpty()
             if self.raw:
                 tty.setraw(slave)

@@ -36,7 +36,17 @@ from guard import (
     nvidia_toolkit_install_commands,
     parse_nvidia_gpu_name,
     parse_run,
+    network_delete_problem,
+    tailscale_serve_host,
+    valid_cidr,
+    valid_gateway,
     valid_name,
+    valid_network_driver,
+    valid_network_name,
+    valid_runtime,
+    RUNTIME_ENGINE,
+    RUNTIME_DESKTOP,
+    BUILTIN_NETWORKS,
     SELF_UPDATE_HELPER,
     allowed_update_url,
     canonical_update_path,
@@ -88,6 +98,14 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("host", assess(info(NetworkMode="host"), "demo", DATA))
         self.assertIn("host", assess(info(PidMode="host"), "demo", DATA))
         self.assertIn("capability", assess(info(CapAdd=["SYS_ADMIN"]), "demo", DATA))
+        tailscale = info(NetworkMode="host")
+        tailscale["Name"] = "/tailscale"
+        tailscale["Config"] = {"Image": "tailscale/tailscale:latest"}
+        self.assertEqual(assess(tailscale, "tailscale", DATA), "")
+        busybox = info(NetworkMode="host")
+        busybox["Name"] = "/tailscale"
+        busybox["Config"] = {"Image": "busybox"}
+        self.assertIn("host", assess(busybox, "tailscale", DATA))
 
     def test_rejects_socket_wallet_and_system_mounts(self):
         sock = info(Binds=["/var/run/docker.sock:/var/run/docker.sock"])
@@ -678,19 +696,39 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(parsed[4], ())
         self.assertEqual(parsed[8], "hog-tailscale")
         self.assertEqual(parse_run(canonical_command(*parsed)), parsed)
-        # Volume and host network stay blocked. The state volume and IPv6
-        # network are attached outside the typed command, like Jellyfin's media folder.
+        # Volume and NET_RAW stay blocked in the typed command. Host
+        # networking is allowed only for the Tailscale image. The state
+        # volume and NET_RAW are attached outside the command when Hog
+        # starts Tailscale on Docker Engine.
         for line in (
             "docker run --name tailscale --cap-add NET_RAW tailscale/tailscale:latest",
             "docker run --name tailscale -v tailscale:/var/lib/tailscale tailscale/tailscale:latest",
-            "docker run --name tailscale --network host tailscale/tailscale:latest",
             "docker run --name tailscale --network hog-tailscale ubuntu:24.04",
             "docker run --name demo --network hog-tailscale tailscale/tailscale:latest",
+            "docker run --name demo --network host ubuntu:24.04",
         ):
             with self.assertRaises(CommandError):
                 parse_run(line)
         allowed = parse_run("docker run --name tailscale --network hog-tailscale tailscale/tailscale:latest")
         self.assertEqual(allowed[8], "hog-tailscale")
+        host_cmd = parse_run("docker run --name tailscale --network host tailscale/tailscale:latest")
+        self.assertEqual(host_cmd[8], "host")
+        host_text = canonical_command(
+            "tailscale",
+            "tailscale/tailscale:latest",
+            (),
+            True,
+            (),
+            ("TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"),
+            (),
+            (),
+            "host",
+        )
+        self.assertIn("--network host", host_text)
+        self.assertNotIn("NET_RAW", host_text)
+        self.assertNotIn("-p ", f"{host_text} ")
+        self.assertNotIn("--sysctl", host_text)
+        self.assertEqual(parse_run(host_text)[8], "host")
 
     def test_tailscale_run_switches_the_firewall_command_once(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -989,7 +1027,7 @@ class PolicyTest(unittest.TestCase):
             guard = Guard(folder, docker="docker")
             seen = []
 
-            def capture(args, timeout=8):
+            def capture(args, timeout=8, sock=None):
                 seen.append((list(args), timeout))
                 return "Serve is not enabled\nhttps://login.tailscale.com/f/serve?node=example\n", 124
 
@@ -1001,7 +1039,7 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual(seen[0][0][-2:], ["--https=8101", "http://host.docker.internal:8101"])
             seen.clear()
 
-            def capture_jellyfin(args, timeout=8):
+            def capture_jellyfin(args, timeout=8, sock=None):
                 seen.append(list(args))
                 return "ok", 0
 
@@ -1334,7 +1372,10 @@ class JellyfinGpuTest(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("ready", payload["error"].lower())
             self.assertFalse(guard.gpu_enabled())
-            self.assertFalse(any(item[0] in {"run", "run_on"} for item in calls))
+            def mutated(item):
+                args = item[1] if item[0] in {"run", "run_on"} and len(item) > 1 else None
+                return bool(args) and args[0] in {"run", "stop", "rm", "start"}
+            self.assertFalse(any(mutated(item) for item in calls))
 
     def test_enable_recreates_jellyfin_on_engine_with_gpu(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1406,7 +1447,7 @@ class JellyfinGpuTest(unittest.TestCase):
             self.assertIn(f"{JELLYFIN_CACHE_VOLUME}:/cache", volumes)
             self.assertEqual(guard.read_gpu_state()["desktopVolumes"]["config"], "deskcfg")
 
-    def test_disable_returns_jellyfin_to_desktop_volumes(self):
+    def test_disable_keeps_jellyfin_on_engine_without_gpu(self):
         with tempfile.TemporaryDirectory() as folder:
             guard = Guard(folder, docker="docker")
             guard.write_gpu_state(
@@ -1431,7 +1472,7 @@ class JellyfinGpuTest(unittest.TestCase):
             def run_on(args, timeout=8, sock=None):
                 calls.append((list(args), sock))
                 if args and args[0] == "run":
-                    boxes["desktop"] = self._jellyfin_info(config="deskcfg", cache="deskcache")
+                    boxes["engine"] = self._jellyfin_info(config=JELLYFIN_CONFIG_VOLUME, cache=JELLYFIN_CACHE_VOLUME)
                     return subprocess.CompletedProcess(args, 0, "", "")
                 if args[:1] in (["stop"], ["rm"]):
                     if sock is None:
@@ -1454,11 +1495,12 @@ class JellyfinGpuTest(unittest.TestCase):
             self.assertFalse(guard.gpu_enabled())
             created = next(item for item in calls if item[0][:1] == ["run"])
             args, sock = created
-            self.assertIsNone(sock)
+            self.assertTrue(str(sock).endswith("docker.sock") or sock == guard.engine_sock())
             self.assertNotIn("--gpus", args)
             volumes = [args[i + 1] for i, token in enumerate(args) if token == "-v"]
-            self.assertIn("deskcfg:/config", volumes)
-            self.assertIn("deskcache:/cache", volumes)
+            self.assertIn(f"{JELLYFIN_CONFIG_VOLUME}:/config", volumes)
+            self.assertIn(f"{JELLYFIN_CACHE_VOLUME}:/cache", volumes)
+            self.assertEqual(guard.read_runtimes().get("jellyfin"), "engine")
 
     def test_apply_command_adds_named_volumes_without_putting_them_in_the_command(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1971,6 +2013,291 @@ class SelfUpdateTest(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("SHA256SUMS", payload["error"])
             self.assertFalse(calls)
+
+
+
+class RuntimeAndNetworkTest(unittest.TestCase):
+    def test_network_name_cidr_and_builtin_delete_rules(self):
+        self.assertTrue(valid_runtime(RUNTIME_ENGINE))
+        self.assertTrue(valid_runtime(RUNTIME_DESKTOP))
+        self.assertFalse(valid_runtime("podman"))
+        self.assertTrue(valid_network_name("hog-app"))
+        self.assertTrue(valid_network_name("hog.app_1"))
+        self.assertFalse(valid_network_name("bridge"))
+        self.assertFalse(valid_network_name("host"))
+        self.assertFalse(valid_network_name("none"))
+        self.assertTrue(valid_network_name("bridge", allow_builtin=True))
+        self.assertFalse(valid_network_name("../x"))
+        self.assertFalse(valid_network_name("has space"))
+        self.assertTrue(valid_network_driver("bridge"))
+        self.assertTrue(valid_network_driver("macvlan"))
+        self.assertTrue(valid_network_driver("ipvlan"))
+        self.assertFalse(valid_network_driver("overlay"))
+        self.assertTrue(valid_cidr("172.28.0.0/16"))
+        self.assertTrue(valid_cidr("10.0.0.0/8"))
+        self.assertTrue(valid_cidr("fd00:686f:6700:1::/64"))
+        self.assertFalse(valid_cidr("172.28.0.0"))
+        self.assertFalse(valid_cidr("172.28.0.0/99"))
+        self.assertFalse(valid_cidr("999.0.0.0/16"))
+        self.assertFalse(valid_cidr("172.28.0.0/16; rm -rf /"))
+        self.assertTrue(valid_gateway("172.28.0.1"))
+        self.assertFalse(valid_gateway("172.28.0.1/16"))
+        self.assertEqual(network_delete_problem("bridge"), "Built-in Docker networks cannot be deleted.")
+        self.assertEqual(network_delete_problem("host"), "Built-in Docker networks cannot be deleted.")
+        self.assertEqual(network_delete_problem("none"), "Built-in Docker networks cannot be deleted.")
+        self.assertIn("attached", network_delete_problem("hog-app", ["jellyfin"]))
+        self.assertEqual(network_delete_problem("hog-app"), "")
+        self.assertIn("plain", network_delete_problem(".."))
+        self.assertEqual(set(BUILTIN_NETWORKS), {"bridge", "host", "none"})
+
+    def test_tailscale_serve_host_depends_on_runtime(self):
+        self.assertEqual(tailscale_serve_host("desktop"), "host.docker.internal")
+        self.assertEqual(tailscale_serve_host("engine"), "127.0.0.1")
+        self.assertEqual(tailscale_serve_host(""), "host.docker.internal")
+
+    def test_publish_port_uses_loopback_for_engine_tailscale(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.save_runtime("tailscale", "engine")
+            seen = []
+
+            def capture(args, timeout=8, sock=None):
+                seen.append((list(args), sock))
+                return "ok", 0
+
+            guard.capture = capture
+            problem, url = guard.publish_port(8096)
+            self.assertEqual((problem, url), ("", ""))
+            self.assertEqual(seen[1][0][-1], "tcp://127.0.0.1:8096")
+            self.assertEqual(seen[1][1], guard.engine_sock())
+            seen.clear()
+            guard.save_runtime("tailscale", "desktop")
+            problem, url = guard.publish_port(8101)
+            self.assertEqual(problem, "")
+            self.assertEqual(seen[0][0][-1], "http://host.docker.internal:8101")
+            self.assertIsNone(seen[0][1])
+
+    def test_apply_command_uses_host_network_on_engine_tailscale(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+            state = {"exists": False}
+
+            def info(running=True, network="host"):
+                return {
+                    "Name": "/tailscale",
+                    "State": {"Status": "running" if running else "exited", "Running": running},
+                    "Config": {"Image": "tailscale/tailscale:latest"},
+                    "HostConfig": {
+                        "Privileged": False,
+                        "NetworkMode": network,
+                        "PidMode": "",
+                        "IpcMode": "private",
+                        "CapAdd": ["NET_ADMIN", "NET_RAW"],
+                        "Binds": ["hog-tailscale-state:/var/lib/tailscale"],
+                        "Devices": [{"PathOnHost": "/dev/net/tun"}],
+                    },
+                    "Mounts": [
+                        {"Name": "hog-tailscale-state", "Source": "/var/lib/docker/volumes/hog-tailscale-state/_data", "Destination": "/var/lib/tailscale", "Type": "volume"},
+                    ],
+                }
+
+            def inspect(name):
+                if name != "tailscale" or not state["exists"]:
+                    return None, "Docker did not find that container."
+                return info(), ""
+
+            def run_on(args, timeout=8, sock=None):
+                calls.append((list(args), sock, timeout))
+                if args and args[0] == "run":
+                    state["exists"] = True
+                if args[:3] == ["exec", "tailscale", "ls"]:
+                    return subprocess.CompletedProcess(args, 0, "/usr/sbin/iptables -> xtables-nft-multi\n/usr/sbin/ip6tables -> xtables-nft-multi\n", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.inspect = inspect
+            guard.inspect_on = lambda name, sock=None: inspect(name)
+            guard.run_on = run_on
+            guard.run = lambda args, timeout=8: run_on(args, timeout=timeout, sock=None)
+            guard.container_run = lambda name, args, timeout=8: run_on(args, timeout=timeout, sock=guard.container_sock(name))
+            guard.items = lambda: []
+            guard.docker_running = lambda: True
+            guard.runtime_available = lambda side: side == "engine"
+            line = canonical_command(
+                "tailscale",
+                "tailscale/tailscale:latest",
+                (),
+                True,
+                (),
+                ("TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"),
+                (),
+                (),
+                "host",
+            )
+            created = guard.apply_command(line, runtime="engine")
+            self.assertTrue(created["ok"], created.get("error"))
+            run_args, sock, _timeout = next(item for item in calls if item[0][0] == "run")
+            self.assertEqual(sock, guard.engine_sock())
+            self.assertIn("--network", run_args)
+            self.assertIn("host", run_args)
+            self.assertIn("--cap-add=NET_RAW", run_args)
+            self.assertIn("hog-tailscale-state:/var/lib/tailscale", run_args)
+            self.assertNotIn("hog-tailscale-state", created["command"])
+            self.assertEqual(guard.read_runtimes().get("tailscale"), "engine")
+            self.assertFalse(any(item[0][:2] == ["network", "create"] for item in calls))
+
+    def test_create_network_validates_and_uses_argv(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+
+            def run_on(args, timeout=8, sock=None):
+                calls.append(list(args))
+                if args[:2] == ["network", "ls"]:
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 0, "id\n", "")
+
+            guard.run_on = run_on
+            guard.run = lambda args, timeout=8: run_on(args, timeout=timeout, sock=None)
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard._runtime_or_error = lambda side: (guard.engine_sock() if side == "engine" else None, "")
+            refused = guard.create_network({"runtime": "engine", "name": "bridge", "driver": "bridge"})
+            self.assertFalse(refused["ok"])
+            self.assertIn("plain", refused["error"].lower())
+            bad = guard.create_network({"runtime": "engine", "name": "hog-app", "driver": "bridge", "subnet": "172.28.0.0"})
+            self.assertFalse(bad["ok"])
+            self.assertIn("subnet", bad["error"].lower())
+            ok = guard.create_network({
+                "runtime": "engine",
+                "name": "hog-app",
+                "driver": "bridge",
+                "subnet": "172.28.0.0/16",
+                "gateway": "172.28.0.1",
+                "internal": True,
+            })
+            self.assertTrue(ok["ok"], ok)
+            created = next(item for item in calls if item[:2] == ["network", "create"])
+            self.assertEqual(created, [
+                "network", "create", "--driver", "bridge",
+                "--subnet", "172.28.0.0/16",
+                "--gateway", "172.28.0.1",
+                "--internal",
+                "hog-app",
+            ])
+
+    def test_remove_network_refuses_builtins_and_attached(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard._runtime_or_error = lambda side: (None, "")
+            guard.list_networks = lambda side="": {"ok": True, "error": "", "items": [], "networks": []}
+            for name in ("bridge", "host", "none"):
+                result = guard.remove_network(f"desktop:{name}")
+                self.assertFalse(result["ok"])
+                self.assertIn("Built-in", result["error"])
+            inspect_body = [{
+                "Name": "hog-app",
+                "Driver": "bridge",
+                "Containers": {"abc": {"Name": "jellyfin"}},
+            }]
+
+            def run(args, timeout=8):
+                if args[:2] == ["network", "inspect"]:
+                    return subprocess.CompletedProcess(args, 0, json.dumps(inspect_body), "")
+                raise AssertionError(args)
+
+            guard.run = run
+            attached = guard.remove_network("desktop:hog-app")
+            self.assertFalse(attached["ok"])
+            self.assertIn("attached", attached["error"])
+
+    def test_recommended_runtime_keeps_existing_desktop_tailscale(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            boxes = {"desktop": True, "engine": False}
+
+            def inspect_on(name, sock=None):
+                if name != "tailscale":
+                    return None, "missing"
+                if sock is None and boxes["desktop"]:
+                    return {"Name": "/tailscale", "Config": {"Image": "tailscale/tailscale:latest"}}, ""
+                return None, "missing"
+
+            guard.inspect_on = inspect_on
+            guard.runtime_available = lambda side: True
+            self.assertEqual(guard.recommended_runtime("tailscale", "tailscale/tailscale:latest"), "desktop")
+            boxes["desktop"] = False
+            self.assertEqual(guard.recommended_runtime("tailscale", "tailscale/tailscale:latest"), "engine")
+            guard.save_runtime("tailscale", "desktop")
+            self.assertEqual(guard.recommended_runtime("tailscale", "tailscale/tailscale:latest"), "desktop")
+            self.assertEqual(guard.container_runtime("ubuntu"), "desktop")
+
+    def test_set_container_runtime_moves_and_warns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            boxes = {"desktop": {
+                "Name": "/ubuntu",
+                "State": {"Status": "running", "Running": True},
+                "Config": {"Image": "ubuntu:24.04", "Cmd": ["sleep", "infinity"], "Env": []},
+                "HostConfig": {
+                    "Privileged": False,
+                    "NetworkMode": "bridge",
+                    "PidMode": "",
+                    "IpcMode": "private",
+                    "CapAdd": None,
+                    "PortBindings": {},
+                    "Sysctls": {},
+                    "Binds": None,
+                    "Devices": None,
+                },
+                "Mounts": [],
+            }, "engine": None}
+            calls = []
+
+            def inspect_on(name, sock=None):
+                if name != "ubuntu":
+                    return None, "missing"
+                info = boxes["desktop"] if sock is None else boxes["engine"]
+                if info is None:
+                    return None, "missing"
+                return info, ""
+
+            template = dict(boxes["desktop"])
+
+            def run_on(args, timeout=8, sock=None):
+                calls.append((list(args), sock))
+                if args and args[0] == "run":
+                    started = dict(template)
+                    if sock is None:
+                        boxes["desktop"] = started
+                    else:
+                        boxes["engine"] = started
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                if args[:1] in (["stop"], ["rm"]):
+                    if sock is None:
+                        boxes["desktop"] = None
+                    else:
+                        boxes["engine"] = None
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.inspect_on = inspect_on
+            guard.run_on = run_on
+            guard.run = lambda args, timeout=8: run_on(args, timeout=timeout, sock=None)
+            guard.docker_running = lambda: True
+            guard.items = lambda: []
+            guard.runtime_fields = lambda: {"dockerRuntimes": {"engine": {"ok": True, "detail": ""}, "desktop": {"ok": True, "detail": ""}}, "runtimeDefaults": {}}
+            guard.tailscale_dns = lambda: ("", False)
+            guard.media_view = lambda: ("", [])
+            payload = guard.set_container_runtime("ubuntu", "engine")
+            self.assertTrue(payload["ok"], payload)
+            self.assertIn("do not carry over", payload["notice"].lower())
+            self.assertEqual(guard.read_runtimes()["ubuntu"], "engine")
+            self.assertTrue(any(item[0][:1] == ["stop"] and item[1] is None for item in calls))
+            created = next(item for item in calls if item[0][:1] == ["run"])
+            self.assertEqual(created[1], guard.engine_sock())
 
 
 if __name__ == "__main__":

@@ -418,6 +418,7 @@ function showBrowserSettings() {
   $("settings-btn").classList.add("is-open");
   reportView(false);
   desktopCommand("containers:list");
+  requestNetworks(networkRuntime);
   requestAnimationFrame(reportShareDrop);
 }
 
@@ -437,6 +438,7 @@ function showSettingsPage(page) {
   });
   if (!wasHidden) {
     desktopCommand("containers:list");
+    if (next === "docker") requestNetworks(networkRuntime);
     requestAnimationFrame(reportShareDrop);
   }
   if (next === "files") {
@@ -1927,8 +1929,8 @@ function readLaunch(text) {
     }
     if (token === "--network" || token === "--net" || token.startsWith("--network=") || token.startsWith("--net=")) {
       const value = token === "--network" || token === "--net" ? tokens[index + 1] : token.slice(token.indexOf("=") + 1);
-      if (value !== "hog-tailscale" || network) return null;
-      network = "hog-tailscale";
+      if ((value !== "hog-tailscale" && value !== "host") || network) return null;
+      network = value;
       index += token === "--network" || token === "--net" ? 2 : 1;
       continue;
     }
@@ -1945,7 +1947,7 @@ function readLaunch(text) {
   if (command.some((part) => !/^[A-Za-z0-9_./:-]+$/.test(part))) return null;
   if (tun && !vpn) return null;
   if (ports.length > 8 || env.length > 16) return null;
-  if (network && (name !== "tailscale" || !String(image).toLowerCase().includes("tailscale") || network !== "hog-tailscale")) return null;
+  if (network && (name !== "tailscale" || !String(image).toLowerCase().includes("tailscale") || (network !== "hog-tailscale" && network !== "host"))) return null;
   return { name, image, ports, vpn, command, env, sysctls, network };
 }
 
@@ -1969,9 +1971,206 @@ function fillLaunch(name, image, status, extra = {}) {
     sysctls: extra.sysctls || [],
     network: extra.network || "",
   }, status);
+  if (extra.runtime) setLaunchRuntime(extra.runtime, { silent: true });
 }
 
 let wireguardModule = null;
+let dockerRuntimeState = { engine: { ok: false, detail: "" }, desktop: { ok: false, detail: "" } };
+let launchRuntime = "desktop";
+let networkRuntime = "desktop";
+let lastNetworkItems = [];
+let lastContainerItems = [];
+
+function runtimeDetail(side) {
+  const item = dockerRuntimeState[side] || {};
+  return item.detail || (side === "engine"
+    ? "Docker Engine is not available."
+    : "Docker Desktop is not available.");
+}
+
+function runtimeOk(side) {
+  return Boolean((dockerRuntimeState[side] || {}).ok);
+}
+
+function paintRuntimeButtons(engineId, desktopId, selected) {
+  const engine = $(engineId);
+  const desktop = $(desktopId);
+  if (!engine || !desktop) return;
+  const engineReady = runtimeOk("engine");
+  const desktopReady = runtimeOk("desktop");
+  engine.disabled = !engineReady;
+  desktop.disabled = !desktopReady;
+  engine.title = engineReady ? "Run this container on native Docker Engine." : runtimeDetail("engine");
+  desktop.title = desktopReady ? "Run this container on Docker Desktop." : runtimeDetail("desktop");
+  engine.classList.toggle("is-on", selected === "engine");
+  desktop.classList.toggle("is-on", selected === "desktop");
+  engine.setAttribute("aria-pressed", selected === "engine" ? "true" : "false");
+  desktop.setAttribute("aria-pressed", selected === "desktop" ? "true" : "false");
+}
+
+function applyTailscaleNetwork(runtime) {
+  const box = $("container-command");
+  if (!box) return;
+  const spec = readLaunch(box.value);
+  if (!spec || spec.name !== "tailscale" || !String(spec.image || "").toLowerCase().includes("tailscale")) return;
+  if (runtime === "engine") {
+    spec.network = "host";
+    spec.sysctls = [];
+  } else {
+    spec.network = "hog-tailscale";
+    const needed = ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"];
+    const have = new Set(spec.sysctls || []);
+    spec.sysctls = [...(spec.sysctls || []), ...needed.filter((item) => !have.has(item))];
+  }
+  box.value = composeCommand(spec);
+  syncLaunchButtons();
+}
+
+function setLaunchRuntime(side, options = {}) {
+  if (side !== "engine" && side !== "desktop") return;
+  if (!runtimeOk(side) && !options.silent) return;
+  launchRuntime = side;
+  paintRuntimeButtons("runtime-engine", "runtime-desktop", launchRuntime);
+  const status = $("container-runtime-status");
+  if (status) {
+    if (!runtimeOk("engine") && !runtimeOk("desktop")) {
+      status.textContent = `${runtimeDetail("engine")} ${runtimeDetail("desktop")}`;
+    } else if (side === "engine" && !runtimeOk("engine")) {
+      status.textContent = runtimeDetail("engine");
+    } else if (side === "desktop" && !runtimeOk("desktop")) {
+      status.textContent = runtimeDetail("desktop");
+    } else if (side === "engine") {
+      status.textContent = "Docker Engine runs containers directly on this computer. Tailscale can use the host network so your phone can usually connect directly.";
+    } else {
+      status.textContent = "Docker Desktop runs containers in its own virtual machine. GPU passthrough is not available there.";
+    }
+  }
+  applyTailscaleNetwork(side);
+}
+
+function rememberRuntimes(payload) {
+  if (!payload || !payload.dockerRuntimes) return;
+  const engine = payload.dockerRuntimes.engine || {};
+  const desktop = payload.dockerRuntimes.desktop || {};
+  dockerRuntimeState = {
+    engine: { ok: Boolean(engine.ok), detail: engine.detail || "" },
+    desktop: { ok: Boolean(desktop.ok), detail: desktop.detail || "" },
+  };
+  if (!runtimeOk(launchRuntime)) {
+    if (runtimeOk("engine")) launchRuntime = "engine";
+    else if (runtimeOk("desktop")) launchRuntime = "desktop";
+  }
+  paintRuntimeButtons("runtime-engine", "runtime-desktop", launchRuntime);
+  const status = $("container-runtime-status");
+  if (status && !status.dataset.locked) {
+    if (launchRuntime === "engine") {
+      status.textContent = "Docker Engine runs containers directly on this computer. Tailscale can use the host network so your phone can usually connect directly.";
+    } else {
+      status.textContent = "Docker Desktop runs containers in its own virtual machine. GPU passthrough is not available there.";
+    }
+  }
+}
+
+function requestNetworks(side) {
+  const runtime = side === "engine" || side === "desktop" ? side : networkRuntime;
+  networkRuntime = runtime;
+  paintRuntimeButtons("network-runtime-engine", "network-runtime-desktop", networkRuntime);
+  desktopCommand(`containers:network-list:${runtime}`);
+}
+
+function paintNetworks(payload) {
+  const list = $("network-list");
+  const status = $("network-status");
+  const error = $("network-error");
+  if (!list) return;
+  if (payload && Object.prototype.hasOwnProperty.call(payload, "networkRuntime") && payload.networkRuntime) {
+    networkRuntime = payload.networkRuntime;
+  }
+  paintRuntimeButtons("network-runtime-engine", "network-runtime-desktop", networkRuntime);
+  if (payload && Object.prototype.hasOwnProperty.call(payload, "networks")) {
+    lastNetworkItems = Array.isArray(payload.networks) ? payload.networks : [];
+  } else if (!Array.isArray(lastNetworkItems)) {
+    lastNetworkItems = [];
+  } else {
+    return;
+  }
+  if (error && Object.prototype.hasOwnProperty.call(payload, "networks")) {
+    error.textContent = payload.ok === false ? (payload.error || "") : "";
+  }
+  if (status && Object.prototype.hasOwnProperty.call(payload, "networks")) {
+    status.textContent = payload.notice || "Create a network on Docker Engine or Docker Desktop, then attach a Hog container to it.";
+  }
+  list.replaceChildren();
+  const rows = lastNetworkItems.filter((item) => !item.runtime || item.runtime === networkRuntime);
+  if (!rows.length) {
+    const empty = document.createElement("li");
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = runtimeOk(networkRuntime)
+      ? "No networks on this runtime yet."
+      : runtimeDetail(networkRuntime);
+    empty.append(note);
+    list.append(empty);
+  } else {
+    for (const item of rows) {
+      const li = document.createElement("li");
+      const line = document.createElement("div");
+      line.className = "menu-row";
+      const title = document.createElement("span");
+      title.textContent = item.name;
+      const small = document.createElement("small");
+      const bits = [item.driver, item.subnet, (item.containers || []).join(", ")].filter(Boolean);
+      small.textContent = bits.join(" · ") || "no subnet";
+      if (item.internal) small.textContent += " · internal";
+      if (item.builtin) small.textContent += " · built-in";
+      line.append(title, small);
+      li.append(line);
+      const actions = document.createElement("div");
+      actions.className = "menu-actions";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "tiny";
+      remove.textContent = "Delete";
+      const busy = Boolean((item.containers || []).length) || Boolean(item.builtin);
+      remove.disabled = busy;
+      remove.title = item.builtin
+        ? "Built-in Docker networks cannot be deleted."
+        : (item.containers || []).length
+          ? "Disconnect every container before deleting this network."
+          : "Delete this unused network.";
+      remove.addEventListener("click", () => {
+        if (item.builtin || (item.containers || []).length) return;
+        if (!window.confirm(`Delete network ${item.name}? This only works when nothing is attached.`)) return;
+        desktopCommand(`containers:network-remove:${networkRuntime}:${item.name}`);
+      });
+      actions.append(remove);
+      li.append(actions);
+      list.append(li);
+    }
+  }
+  const attach = $("network-attach");
+  const containerSelect = $("network-container");
+  const networkSelect = $("network-attach-name");
+  if (attach && containerSelect && networkSelect) {
+    const containers = (lastContainerItems || []).filter((item) => (item.runtime || "desktop") === networkRuntime && item.name);
+    const userNets = rows.filter((item) => item.name && !item.builtin && item.name !== "host" && item.name !== "none");
+    containerSelect.replaceChildren();
+    networkSelect.replaceChildren();
+    for (const item of containers) {
+      const option = document.createElement("option");
+      option.value = item.name;
+      option.textContent = item.name;
+      containerSelect.append(option);
+    }
+    for (const item of userNets) {
+      const option = document.createElement("option");
+      option.value = item.name;
+      option.textContent = item.name;
+      networkSelect.append(option);
+    }
+    attach.hidden = !(containers.length && userNets.length);
+  }
+}
 
 function paintWireguardSetup() {
   const row = $("wireguard-setup");
@@ -2022,7 +2221,8 @@ function sendLaunch(replace) {
   $("container-error").textContent = "";
   $("container-status").textContent = replace ? `Recreating ${name}…` : `Starting ${name}…`;
   launchBusy(true);
-  desktopCommand(`containers:${replace ? "recreate" : "run"}:${command}`);
+  const runtime = launchRuntime === "engine" || launchRuntime === "desktop" ? launchRuntime : "desktop";
+  desktopCommand(`containers:${replace ? "recreate" : "run"}:${runtime}:${command}`);
 }
 
 function noteCommit(commit) {
@@ -2537,9 +2737,9 @@ function paintJellyfinGpu(payload) {
   button.setAttribute("aria-pressed", on ? "true" : "false");
   button.textContent = on ? "Using NVIDIA GPU" : "Use NVIDIA GPU";
   if (on) {
-    status.textContent = "Jellyfin runs on Docker Engine with the NVIDIA GPU. Turn this off to go back to Docker Desktop (CPU). Login and libraries do not carry over between engines; ~/hog-shares stays the same.";
+    status.textContent = "Jellyfin runs on Docker Engine with the NVIDIA GPU. Turn this off to keep it on Docker Engine without the GPU. Login and libraries do not carry over from Docker Desktop; ~/hog-shares stays the same. Use the runtime control to move it to Docker Desktop.";
   } else if (ready) {
-    status.textContent = "This computer is ready. Turn this on to recreate Jellyfin on Docker Engine with --gpus all. Docker Desktop settings will not carry over. Tailscale stays on Docker Desktop.";
+    status.textContent = "This computer is ready. Turn this on to recreate Jellyfin on Docker Engine with --gpus all. Docker Desktop settings will not carry over.";
   } else if (payload.jellyfinGpuCanInstall) {
     status.textContent = "GPU transcoding needs the three checks below. If the NVIDIA toolkit is missing, press Install NVIDIA toolkit. Ubuntu will ask for your password. Hog never stores that password.";
   } else {
@@ -2641,12 +2841,19 @@ function paintDocker(payload) {
   const state = $("docker-state");
   const button = $("start-docker");
   if (!state || !button || typeof payload.docker !== "boolean") return;
-  button.hidden = payload.docker;
+  rememberRuntimes(payload);
+  const engine = dockerRuntimeState.engine || {};
+  const desktop = dockerRuntimeState.desktop || {};
+  const desktopOn = Boolean(desktop.ok) || payload.docker;
+  button.hidden = desktopOn;
   button.disabled = false;
   button.textContent = "Start Docker";
-  state.textContent = payload.docker
-    ? "Docker is running."
-    : "Docker is not running. Start it here, then open Ubuntu or Fedora.";
+  const parts = [];
+  if (engine.ok) parts.push("Docker Engine is running.");
+  else if (engine.detail) parts.push(engine.detail);
+  if (desktop.ok || payload.docker) parts.push("Docker Desktop is running.");
+  else parts.push("Docker Desktop is not running. Start it here if you want Desktop containers.");
+  state.textContent = parts.join(" ");
 }
 
 function paintUpdate(payload) {
@@ -2740,6 +2947,8 @@ function renderContainers(payload) {
   paintDocker(payload);
   paintDefaultBrowser(payload);
   paintJellyfinGpu(payload);
+  if (Array.isArray(payload.items)) lastContainerItems = payload.items;
+  paintNetworks(payload);
   launchBusy(false);
   error.textContent = payload.error || "";
   if (typeof payload.wireguard === "boolean") wireguardModule = payload.wireguard;
@@ -2790,7 +2999,8 @@ function renderContainers(payload) {
     const title = document.createElement("span");
     title.textContent = item.name;
     const small = document.createElement("small");
-    small.textContent = `${item.state || "unknown"}${item.image ? ` · ${item.image}` : ""}`;
+    const runtimeLabel = item.runtime === "engine" ? "Docker Engine" : "Docker Desktop";
+    small.textContent = `${item.state || "unknown"} · ${runtimeLabel}${item.image ? ` · ${item.image}` : ""}`;
     line.append(title, small);
     li.append(line);
     if (item.reason) {
@@ -2829,6 +3039,9 @@ function renderContainers(payload) {
       });
     }
     const actions = [["Command", "command"]];
+    const other = item.runtime === "engine" ? "desktop" : "engine";
+    const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
+    if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
     if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"]);
     actions.push(...(running
       ? [["Stop", "stop"], ["Logs", "logs"]]
@@ -2843,8 +3056,30 @@ function renderContainers(payload) {
           const image = item.image && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,200}$/.test(item.image) && !item.image.includes("..")
             ? item.image
             : "ubuntu:24.04";
-          fillLaunch(item.name, image, `Command for ${item.name}. Add a port, then Recreate. Docker cannot add a port in place.`);
+          const extra = {};
+          if (item.name === "tailscale") {
+            extra.vpn = true;
+            extra.command = [];
+            extra.runtime = item.runtime === "engine" ? "engine" : "desktop";
+            extra.network = extra.runtime === "engine" ? "host" : "hog-tailscale";
+            extra.env = ["TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"];
+            if (extra.runtime !== "engine") {
+              extra.sysctls = ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"];
+            }
+          } else if (item.runtime) {
+            extra.runtime = item.runtime;
+          }
+          fillLaunch(item.name, image, `Command for ${item.name}. Add a port, then Recreate. Docker cannot add a port in place.`, extra);
           $("container-command").focus();
+          return;
+        }
+        if (action === "runtime") {
+          const target = item.runtime === "engine" ? "desktop" : "engine";
+          const label = target === "engine" ? "Docker Engine" : "Docker Desktop";
+          const ok = window.confirm(`Move ${item.name} to ${label}? Hog stops and removes it on the current runtime, then starts it again on ${label}. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over.`);
+          if (!ok) return;
+          $("container-status").textContent = `Moving ${item.name} to ${label}…`;
+          desktopCommand(`containers:runtime-set:${item.name}:${target}`);
           return;
         }
         if (action === "shell") beginShell(item.name);
@@ -4706,13 +4941,19 @@ function bind() {
         return;
       }
       if (kind === "tailscale") {
-        fillLaunch(kind, button.dataset.image, "In Docker, click Tailscale, then Run. Open the running tailscale container, press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. State stays in a Docker volume so login survives a recreate.", {
+        const existing = (lastContainerItems || []).find((item) => item && item.name === "tailscale");
+        const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
+        const runtime = preferEngine ? "engine" : "desktop";
+        fillLaunch(kind, button.dataset.image, preferEngine
+          ? "In Docker, click Tailscale, then Run. Docker Engine is selected so Tailscale can use this computer's network and your phone can usually connect directly. Open the running tailscale container, press Sign in, and approve hog as an exit node. State stays in a Docker volume so login survives a recreate on the same runtime."
+          : "In Docker, click Tailscale, then Run. Open the running tailscale container, press Sign in, open the link, and finish login. Approve hog as an exit node in the Tailscale admin page. State stays in a Docker volume so login survives a recreate on the same runtime.", {
           vpn: true,
           ports: [],
           command: [],
           env: ["TS_HOSTNAME=hog", "TS_USERSPACE=false", "TS_AUTH_ONCE=true", "TS_STATE_DIR=/var/lib/tailscale", "TS_EXTRA_ARGS=--advertise-exit-node", "TS_BOOT_TIMEOUT=10m", "TS_DEBUG_FIREWALL_MODE=nftables"],
-          sysctls: ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"],
-          network: "hog-tailscale",
+          sysctls: preferEngine ? [] : ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"],
+          network: preferEngine ? "host" : "hog-tailscale",
+          runtime,
         });
         return;
       }
@@ -4862,8 +5103,8 @@ function bind() {
     if (!button || button.dataset.busy === "1") return;
     const on = button.getAttribute("aria-pressed") === "true";
     const message = on
-      ? "Move Jellyfin back to Docker Desktop (CPU)? Settings from Docker Engine stay on that engine. Docker Desktop settings are restored if those volumes were kept."
-      : "Move Jellyfin onto Docker Engine with the NVIDIA GPU? Login and libraries from Docker Desktop do not carry over; this engine has its own config volume. ~/hog-shares stays the same, and Tailscale stays on Docker Desktop.";
+      ? "Turn off GPU acceleration? Jellyfin stays on Docker Engine, but without the NVIDIA GPU. Use the runtime control if you want to move it to Docker Desktop. Desktop settings stay on Docker Desktop's volumes."
+      : "Move Jellyfin onto Docker Engine with the NVIDIA GPU? Login and libraries from Docker Desktop do not carry over; this engine has its own config volume. ~/hog-shares stays the same.";
     if (!window.confirm(message)) return;
     button.dataset.busy = "1";
     button.disabled = true;
@@ -4872,7 +5113,7 @@ function bind() {
     if (error) error.textContent = "";
     if (status) {
       status.textContent = on
-        ? "Moving Jellyfin back to Docker Desktop…"
+        ? "Turning off GPU acceleration…"
         : "Starting Jellyfin with the NVIDIA GPU…";
     }
     desktopCommand(on ? "containers:jellyfin-gpu-clear" : "containers:jellyfin-gpu-set");
@@ -4897,6 +5138,84 @@ function bind() {
     }
     desktopCommand("containers:jellyfin-gpu-install");
   });
+
+  const bindRuntime = (id, side, kind) => {
+    const button = $(id);
+    if (!button) return;
+    button.addEventListener("click", () => {
+      if (kind === "launch") {
+        if (!runtimeOk(side)) return;
+        const spec = readLaunch($("container-command")?.value || "");
+        if (spec && spec.name && lastContainerItems.some((item) => item && item.name === spec.name)) {
+          const label = side === "engine" ? "Docker Engine" : "Docker Desktop";
+          const ok = window.confirm(`Move ${spec.name} to ${label}? Hog stops and removes it on the current runtime, then starts it again on ${label}. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over.`);
+          if (!ok) return;
+          $("container-status").textContent = `Moving ${spec.name} to ${label}…`;
+          desktopCommand(`containers:runtime-set:${spec.name}:${side}`);
+        }
+        setLaunchRuntime(side);
+      } else {
+        if (!runtimeOk(side)) return;
+        requestNetworks(side);
+      }
+    });
+  };
+  bindRuntime("runtime-engine", "engine", "launch");
+  bindRuntime("runtime-desktop", "desktop", "launch");
+  bindRuntime("network-runtime-engine", "engine", "networks");
+  bindRuntime("network-runtime-desktop", "desktop", "networks");
+  const driver = $("network-driver");
+  if (driver) {
+    driver.addEventListener("change", () => {
+      const row = $("network-parent-row");
+      if (row) row.hidden = driver.value === "bridge";
+    });
+  }
+  const form = $("network-create-form");
+  if (form) {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const body = {
+        runtime: networkRuntime,
+        name: ($("network-name")?.value || "").trim(),
+        driver: $("network-driver")?.value || "bridge",
+        subnet: ($("network-subnet")?.value || "").trim(),
+        gateway: ($("network-gateway")?.value || "").trim(),
+        parent: ($("network-parent")?.value || "").trim(),
+        internal: Boolean($("network-internal")?.checked),
+      };
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(body.name) || ["bridge", "host", "none"].includes(body.name)) {
+        const error = $("network-error");
+        if (error) error.textContent = "Use a plain network name. Built-in names such as bridge, host, and none cannot be created.";
+        return;
+      }
+      if (!["bridge", "macvlan", "ipvlan"].includes(body.driver)) {
+        const error = $("network-error");
+        if (error) error.textContent = "Use the bridge, macvlan, or ipvlan driver.";
+        return;
+      }
+      if (body.subnet && !/^((?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]+)\/\d{1,3}$/.test(body.subnet)) {
+        const error = $("network-error");
+        if (error) error.textContent = "Use a subnet like 172.28.0.0/16.";
+        return;
+      }
+      desktopCommand(`containers:network-create:${JSON.stringify(body)}`);
+    });
+  }
+  const sendNetworkMembership = (action) => {
+    const container = $("network-container")?.value || "";
+    const network = $("network-attach-name")?.value || "";
+    if (!container || !network) return;
+    if (action === "connect") {
+      desktopCommand(`containers:network-connect:${networkRuntime}:${network}:${container}`);
+    } else {
+      desktopCommand(`containers:network-disconnect:${networkRuntime}:${network}:${container}`);
+    }
+  };
+  const connectBtn = $("network-connect");
+  if (connectBtn) connectBtn.addEventListener("click", () => sendNetworkMembership("connect"));
+  const disconnectBtn = $("network-disconnect");
+  if (disconnectBtn) disconnectBtn.addEventListener("click", () => sendNetworkMembership("disconnect"));
 
   $("share-computer").addEventListener("click", () => {
     const form = $("share-name-form");

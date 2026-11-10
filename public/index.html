@@ -85,7 +85,7 @@
           <div id="settings-docker">
           <p class="eyebrow">Docker</p>
           <h1>Containers</h1>
-          <p class="lede">Containers run from Hog, not from a web page. Each new one drops extra privileges, stays off the host network, and cannot see the wallet.</p>
+          <p class="lede">Containers run from Hog, not from a web page. Each new one drops extra privileges and cannot see the wallet. Pick Docker Engine or Docker Desktop for each container. Tailscale on Docker Engine uses this computer's network so your phone can usually connect directly.</p>
           <div class="engine-row">
             <p id="docker-state" class="note">Checking whether Docker is running…</p>
             <button type="button" id="start-docker">Start Docker</button>
@@ -96,7 +96,7 @@
               <li><button type="button" data-launch="ubuntu" data-image="ubuntu:24.04"><span>Flat Ubuntu</span><small>ubuntu:24.04 · name ubuntu</small></button></li>
               <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Flat Fedora</span><small>fedora:latest · name fedora</small></button></li>
               <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
-              <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>In Docker, click Tailscale, then Run.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>In Docker, click Tailscale, then Run. On Linux, Docker Engine is recommended so your phone can connect directly.</small></button></li>
               <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media. Use GPU acceleration (NVIDIA) below if you want NVENC transcoding.</small></button></li>
               <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
               <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
@@ -128,6 +128,16 @@
               <button type="button" id="run-command" class="primary">Run</button>
               <button type="button" id="recreate-command">Recreate</button>
             </div>
+            <div id="container-runtime-card" class="engine-row runtime-row">
+              <div class="default-browser-copy">
+                <strong>Docker runtime</strong>
+                <p id="container-runtime-status" class="note" role="status">Choose Docker Engine or Docker Desktop for the command above.</p>
+              </div>
+              <div class="runtime-actions">
+                <button type="button" id="runtime-engine" aria-pressed="false">Docker Engine</button>
+                <button type="button" id="runtime-desktop" aria-pressed="true">Docker Desktop</button>
+              </div>
+            </div>
           </div>
           <div id="wireguard-setup" class="engine-row" hidden>
             <p class="note">This computer needs the WireGuard kernel module before the tunnel can start. The button runs sudo modprobe wireguard. Ubuntu asks for your password.</p>
@@ -156,6 +166,56 @@
             <div class="popover-head"><strong>Containers</strong></div>
             <ul id="container-list" class="menu-list"></ul>
           </div>
+          <section id="docker-networks-card" class="connect-card" aria-label="Docker networks">
+            <p class="eyebrow">Networks</p>
+            <div class="engine-row default-browser-row">
+              <div class="default-browser-copy">
+                <strong>Docker networks</strong>
+                <p id="network-status" class="note" role="status">Create a network on Docker Engine or Docker Desktop, then attach a Hog container to it.</p>
+                <p id="network-error" class="error" role="status"></p>
+              </div>
+              <div class="runtime-actions">
+                <button type="button" id="network-runtime-engine" aria-pressed="false">Docker Engine</button>
+                <button type="button" id="network-runtime-desktop" aria-pressed="true">Docker Desktop</button>
+              </div>
+            </div>
+            <ul id="network-list" class="menu-list"></ul>
+            <form id="network-create-form" class="network-create">
+              <label>Name
+                <input id="network-name" maxlength="63" autocomplete="off" spellcheck="false" placeholder="hog-app">
+              </label>
+              <label>Driver
+                <select id="network-driver">
+                  <option value="bridge">bridge</option>
+                  <option value="macvlan">macvlan</option>
+                  <option value="ipvlan">ipvlan</option>
+                </select>
+              </label>
+              <label>Subnet
+                <input id="network-subnet" placeholder="172.28.0.0/16" autocomplete="off" spellcheck="false">
+              </label>
+              <label>Gateway
+                <input id="network-gateway" placeholder="172.28.0.1" autocomplete="off" spellcheck="false">
+              </label>
+              <label id="network-parent-row" hidden>Parent interface
+                <input id="network-parent" placeholder="eth0" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="network-internal"><input type="checkbox" id="network-internal"> Internal (no outbound internet)</label>
+              <button type="submit" id="network-create">Create network</button>
+            </form>
+            <div id="network-attach" class="network-attach">
+              <label>Container
+                <select id="network-container"></select>
+              </label>
+              <label>Network
+                <select id="network-attach-name"></select>
+              </label>
+              <div class="row">
+                <button type="button" id="network-connect">Connect</button>
+                <button type="button" id="network-disconnect">Disconnect</button>
+              </div>
+            </div>
+          </section>
           <div id="wireguard-endpoint" class="endpoint-row" hidden>
             <p class="note">The phone keeps the address from the square it already scanned. Remove that tunnel, then scan the new square. This Wi-Fi is for this network. Public address is for mobile data.</p>
             <div class="row">
@@ -218,7 +278,7 @@
             <details id="exit-node-guide" class="connect-card exit-node-guide">
               <summary>Setting up your exit node</summary>
               <ol class="share-steps">
-                <li>In Docker, click Tailscale, then Run. Open the running tailscale container, press Sign in, open the link, and log in. Hog appears in your tailnet as &quot;hog&quot;.</li>
+                <li>In Docker, click Tailscale, choose Docker Engine if it is available, then Run. Open the running tailscale container, press Sign in, open the link, and log in. Hog appears in your tailnet as &quot;hog&quot;. If you move Tailscale from Docker Desktop, delete the old hog or hog-1 machine in the admin console before signing in again, then approve the new one as an exit node.</li>
                 <li>In the <button type="button" id="exit-node-admin" class="inline-link">Tailscale admin console</button>, open hog's menu, choose Edit route settings, and turn on Use as exit node.</li>
                 <li>On your phone, install the Tailscale app, sign in to the same account, tap Exit node, and pick hog.</li>
                 <li>Check: browse a site such as youtube.com. Hog's container has IPv4 and IPv6 forwarding, so Private DNS such as one.one.one.one works too. If pages hang, set Private DNS to Automatic and try again, and make sure the container is running.</li>

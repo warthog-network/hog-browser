@@ -337,6 +337,42 @@ class JellyfinGpuToggleTest(unittest.TestCase):
 
 
 
+
+class DockerRuntimeUiTest(unittest.TestCase):
+    def test_ui_exposes_runtime_and_network_controls(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        hog = (root / "hog").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        docker = html.split('id="settings-docker"', 1)[1].split('id="settings-files"', 1)[0]
+        self.assertIn('id="container-runtime-card"', docker)
+        self.assertIn('id="runtime-engine"', docker)
+        self.assertIn('id="runtime-desktop"', docker)
+        self.assertIn('id="docker-networks-card"', docker)
+        self.assertIn('id="network-list"', docker)
+        self.assertIn('id="network-create"', docker)
+        self.assertIn("macvlan", docker)
+        self.assertIn("ipvlan", docker)
+        self.assertLess(docker.find('id="container-runtime-card"'), docker.find('id="container-list"'))
+        self.assertLess(docker.find('id="container-list"'), docker.find('id="docker-networks-card"'))
+        self.assertIn("containers:runtime-set", app)
+        self.assertIn("containers:network-list", app)
+        self.assertIn("containers:network-create", app)
+        self.assertIn("containers:network-remove", app)
+        self.assertIn("containers:network-connect", app)
+        self.assertIn("containers:network-disconnect", app)
+        self.assertIn("runtime-set", hog)
+        self.assertIn("network-create", hog)
+        self.assertIn("network-remove", hog)
+        self.assertIn("Docker Engine or Docker Desktop", readme)
+        self.assertIn("127.0.0.1:8096", readme)
+        self.assertIn("host.docker.internal", readme)
+        self.assertIn("Networks", readme)
+        self.assertIn("direct", readme.lower())
+
+
+
 class SelfUpdateUiTest(unittest.TestCase):
     def test_ui_exposes_update_controls(self):
         root = Path(__file__).resolve().parents[1]

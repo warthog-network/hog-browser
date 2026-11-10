@@ -54,9 +54,19 @@ xdg-settings set default-web-browser org.hog.Browser.desktop
 Or use **Settings → Default Apps** (sometimes labeled Default Applications) and choose **Hog Browser** for Web. Hog only accepts `http` and `https` URLs from the desktop; `file:`, `javascript:`, and other schemes are ignored. Opening a link while Hog is already running sends it to that window as a new tab.
 
 
+## Docker Engine or Docker Desktop
+
+Each container in Hog can run on **Docker Engine** (native docker-ce, `/var/run/docker.sock`) or **Docker Desktop** (the LinuxKit VM). The Docker page has a runtime control above the command box, and each container in the list shows which runtime it is on, with a button to move it. Moving a container stops and removes it on the old runtime, then starts it on the new one. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over. Hog does not move an existing container until you click.
+
+If Docker Engine's socket is missing or this user cannot use it, the Engine button is disabled and the reason is shown. If Docker Desktop's socket is missing, the Desktop button is disabled.
+
+On Linux, new Tailscale installs default to Docker Engine when it is available. Engine Tailscale uses `--network host`, `/dev/net/tun`, and `NET_ADMIN`/`NET_RAW`, with `TS_USERSPACE=false` and a persistent `hog-tailscale-state` volume, so it can usually open a direct connection to your phone instead of a DERP relay. It publishes Jellyfin at `127.0.0.1:8096`. Tailscale that stays on Docker Desktop still uses the `hog-tailscale` network and `host.docker.internal:8096`, because `127.0.0.1` inside Desktop is the VM, not this computer. After you move Tailscale to Engine, sign in again, delete the old `hog` or `hog-1` machine in the Tailscale admin console, and approve the new one as an exit node. Confirm a direct path with `docker exec tailscale tailscale status` — peers should say `direct`, not `relay`.
+
+The same Docker page has a **Networks** card. It lists networks for the selected runtime (name, driver, subnet, attached containers), creates a bridge, macvlan, or ipvlan network, deletes unused user-defined networks, and can connect or disconnect a Hog-managed container. Built-in networks (`bridge`, `host`, `none`) and networks that still have containers cannot be deleted. A container that already uses the host network, such as Engine Tailscale, cannot join another network.
+
 ## Jellyfin GPU acceleration (NVIDIA)
 
-Docker Desktop on Linux runs containers inside a small virtual machine, so it cannot pass through an NVIDIA GPU. Hog can instead run Jellyfin on native Docker Engine (`/var/run/docker.sock`, docker-ce) with `--gpus all`, while the Tailscale container stays on Docker Desktop and still publishes port 8096 to `host.docker.internal:8096`. That hostname already reaches this computer's loopback, which is how folder shares work today, so Jellyfin bound to `127.0.0.1:8096` on the host stays reachable from the phone.
+Docker Desktop on Linux runs containers inside a small virtual machine, so it cannot pass through an NVIDIA GPU. Hog can instead run Jellyfin on native Docker Engine (`/var/run/docker.sock`, docker-ce) with `--gpus all`. GPU acceleration requires Docker Engine and turns that runtime on for Jellyfin. Turning the GPU off leaves Jellyfin on Engine without the GPU; use the runtime control if you want it back on Docker Desktop. Tailscale can run on either runtime. If Tailscale is on Docker Engine it reaches Jellyfin at `127.0.0.1:8096`; on Docker Desktop it still uses `host.docker.internal:8096`.
 
 On the Docker page, the **GPU acceleration (NVIDIA)** card checks three things and shows copyable install commands when something is missing:
 
@@ -66,7 +76,7 @@ On the Docker page, the **GPU acceleration (NVIDIA)** card checks three things a
 
 If check 3 is missing and you installed the hog-browser `.deb`, press **Install NVIDIA toolkit**. That runs a packaged root helper at `/opt/hog-browser/libexec/hog-nvidia-toolkit-install` through `pkexec`, so Ubuntu can ask for your password in a system prompt. Hog never stores or types that password, and the helper takes no arguments. It installs the toolkit, configures Docker Engine, and restarts `docker.service` only — Docker Desktop is not changed. The same helper is safe to run more than once. If you are running Hog from source, or `pkexec` is missing, the button is hidden and you can copy the commands instead. Installing Docker Engine itself still uses those copyable commands.
 
-When all three are ready, turn the toggle on to recreate Jellyfin on Docker Engine. Named volumes `hog-jellyfin-config` and `hog-jellyfin-cache` hold that engine's login and libraries. Docker Desktop volumes do not carry over. `~/hog-shares` is still mounted at `/media`. After it starts, in Jellyfin go to **Dashboard → Playback → Transcoding** and pick **NVIDIA NVENC**. Turn the toggle off to return Jellyfin to Docker Desktop (CPU) and reuse the Desktop volumes if they were kept.
+When all three are ready, turn the toggle on to recreate Jellyfin on Docker Engine. Named volumes `hog-jellyfin-config` and `hog-jellyfin-cache` hold that engine's login and libraries. Docker Desktop volumes do not carry over. `~/hog-shares` is still mounted at `/media`. After it starts, in Jellyfin go to **Dashboard → Playback → Transcoding** and pick **NVIDIA NVENC**. Turn the toggle off to keep Jellyfin on Docker Engine without the GPU. Use the runtime control to move it back to Docker Desktop and reuse the Desktop volumes if they were kept.
 
 ## Run from source
 
