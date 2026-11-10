@@ -1678,7 +1678,8 @@ class SelfUpdateTest(unittest.TestCase):
         self.assertFalse(version_newer("0.1.9", "0.1.10"))
         self.assertFalse(version_newer("0.1.10", "0.1.10"))
         self.assertTrue(version_newer("1.0.0", "0.9.10"))
-        self.assertEqual(hog_version(Path(__file__).resolve().parents[1]), "0.1.11")
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(hog_version(root), json.loads((root / "package.json").read_text())["version"])
         self.assertEqual(
             allowed_update_url("https://api.github.com/repos/warthog-network/hog-browser/releases/latest"),
             "https://api.github.com/repos/warthog-network/hog-browser/releases/latest",
