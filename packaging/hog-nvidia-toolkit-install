@@ -22,14 +22,15 @@ apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg2
 
 echo "Adding the NVIDIA Container Toolkit apt repository…"
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o "$tmp"
-install -m 644 "$tmp" /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-chmod 644 /etc/apt/sources.list.d/nvidia-container-toolkit.list
+# No terminal under pkexec: gpg must run in batch mode and may overwrite.
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+curl -fsSL -o "$work/gpgkey" https://nvidia.github.io/libnvidia-container/gpgkey
+gpg --batch --yes --no-tty --dearmor -o "$work/keyring.gpg" "$work/gpgkey"
+install -m 644 "$work/keyring.gpg" /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL -o "$work/list" https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list
+sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' "$work/list" > "$work/list.signed"
+install -m 644 "$work/list.signed" /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
 echo "Installing nvidia-container-toolkit…"
 apt-get update
