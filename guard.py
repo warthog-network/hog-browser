@@ -404,6 +404,33 @@ def allowed_update_url(url):
     ))
 
 
+UPDATE_SIGNED_HOSTS = {
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+}
+
+
+def allowed_update_redirect_url(url):
+    """GitHub sends release downloads to its CDN with a long signed query.
+
+    Only those CDN hosts may carry a query (it is the signature); everything
+    else goes through allowed_update_url. The download is still checked
+    against the release sha256 afterwards."""
+    text = str(url or "").strip()
+    if not text or len(text) > 8192 or any(ch.isspace() for ch in text):
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    host = (parsed.hostname or "").lower()
+    if host not in UPDATE_SIGNED_HOSTS or not parsed.query:
+        return allowed_update_url(text)
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.params or parsed.port:
+        return ""
+    if ".." in parsed.path or "//" in parsed.path or not parsed.path.startswith("/"):
+        return ""
+    return urllib.parse.urlunparse(("https", host, parsed.path, "", parsed.query, ""))
+
+
 def parse_sha256_digest(value):
     text = str(value or "").strip()
     if text.lower().startswith("sha256:"):
@@ -523,7 +550,7 @@ def parse_latest_release(payload, current):
 
 class SafeUpdateRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not allowed_update_url(newurl):
+        if not allowed_update_redirect_url(newurl):
             raise urllib.error.URLError("Unexpected redirect host for a Hog update.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -542,7 +569,7 @@ def update_http_get(url, timeout=20, dest=None, limit=UPDATE_MAX_BYTES):
     )
     opener = urllib.request.build_opener(SafeUpdateRedirect)
     with opener.open(request, timeout=timeout) as response:
-        final = allowed_update_url(response.geturl())
+        final = allowed_update_redirect_url(response.geturl())
         if not final:
             raise ValueError("Unexpected redirect host for a Hog update.")
         if dest is None:

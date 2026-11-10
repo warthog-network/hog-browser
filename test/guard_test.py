@@ -49,6 +49,7 @@ from guard import (
     BUILTIN_NETWORKS,
     SELF_UPDATE_HELPER,
     allowed_update_url,
+    allowed_update_redirect_url,
     canonical_update_path,
     deb_field,
     file_sha256,
@@ -1734,6 +1735,21 @@ class SelfUpdateTest(unittest.TestCase):
         self.assertEqual(allowed_update_url("https://evil.example/hog-browser_0.1.11_amd64.deb"), "")
         self.assertEqual(allowed_update_url("https://api.github.com/../evil"), "")
         self.assertEqual(allowed_update_url("https://user@api.github.com/repos/warthog-network/hog-browser/releases/latest"), "")
+        signed = (
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1451429308/"
+            "7108586b-a9b3-4439-8e2a-3b14b8817625?sp=r&sv=2018-11-09&sr=b&se=2026-11-10T22%3A55%3A26Z"
+            "&rscd=attachment%3B+filename%3Dhog-browser_0.1.13_amd64.deb&jwt=" + "a" * 600
+            + "&response-content-type=application%2Foctet-stream"
+        )
+        self.assertEqual(allowed_update_redirect_url(signed), signed)
+        self.assertEqual(allowed_update_redirect_url("https://evil.example/x?sig=1"), "")
+        self.assertEqual(allowed_update_redirect_url("https://api.github.com/repos/x?sig=1"), "")
+        self.assertEqual(allowed_update_redirect_url("http://release-assets.githubusercontent.com/a?sig=1"), "")
+        self.assertEqual(allowed_update_redirect_url("https://u@release-assets.githubusercontent.com/a?sig=1"), "")
+        self.assertEqual(
+            allowed_update_redirect_url("https://github.com/warthog-network/hog-browser/releases/download/0.1.14/SHA256SUMS"),
+            "https://github.com/warthog-network/hog-browser/releases/download/0.1.14/SHA256SUMS",
+        )
         self.assertEqual(
             parse_sha256_digest("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
