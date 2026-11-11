@@ -137,6 +137,18 @@ FLATPAK_EDITOR_IDS = {
     "com.vscodium.codium": "VSCodium",
 }
 
+CODE_CHAT_NAME = "hog-aider"
+CODE_CHAT_IMAGE = "paulgauthier/aider-full:latest"
+CODE_CHAT_CONTAINER_PORT = "8501"
+CODE_CHAT_HOST_PORTS = (8501, 8502, 8503, 8504)
+CODE_CHAT_DEFAULT_MODEL = "qwen2.5-coder:14b"
+CODE_CHAT_MEMORY = "6g"
+CODE_CHAT_MOUNT_TARGET = "/app"
+CODE_CHAT_HOME = "/tmp/hog-home"
+CODE_CHAT_PULL_TIMEOUT = 3600
+CODE_CHAT_PATH_MAX = 1024
+GIT_IDENTITY_MAX = 120
+
 
 def _model_is_installed(name, installed_names):
     """True when Ollama already has this suggested tag (or a default latest)."""
@@ -1108,6 +1120,164 @@ def write_continue_config_file(home=None, api_base="http://127.0.0.1:11434"):
     except OSError:
         pass
     return path, backup
+
+
+def code_chat_model_name(model):
+    """Return a validated Ollama model tag for Code chat, else empty."""
+    text = str(model or "").strip().lower()
+    if not valid_model_name(text) or "embed" in text:
+        return ""
+    return text
+
+
+def code_chat_folder(path, home=None, data=None):
+    """Validate a project folder for Code chat.
+
+    Returns (resolved Path or None, error, git) where git is "repo", "none",
+    or "" when the folder is unusable. The folder must be a directory inside
+    the home folder (not the home folder itself), outside hidden folders, and
+    must not hold or sit inside Hog's wallet data.
+    """
+    original = str(path or "")
+    raw = original.strip()
+    if not raw:
+        return None, "Pick a project folder.", ""
+    if len(raw) > CODE_CHAT_PATH_MAX or any(ch in original for ch in ("\n", "\r", "\x00")):
+        return None, "That folder path is not allowed.", ""
+    home_root = Path(home or Path.home())
+    if raw == "~" or raw.startswith("~/"):
+        raw = str(home_root) + raw[1:]
+    if not raw.startswith("/"):
+        return None, "Use a full folder path, like ~/webdev/project.", ""
+    try:
+        home_root = home_root.resolve()
+        folder = Path(raw).resolve()
+    except (OSError, RuntimeError):
+        return None, "Hog could not read that folder.", ""
+    if ":" in str(folder) or "," in str(folder):
+        return None, "Folder paths with : or , cannot be mounted. Rename the folder first.", ""
+    if folder == home_root:
+        return None, "Pick a project folder inside your home folder, not the home folder itself.", ""
+    if home_root not in folder.parents:
+        return None, "Pick a folder inside your home folder.", ""
+    relative = folder.relative_to(home_root)
+    if any(part.startswith(".") for part in relative.parts):
+        return None, "Hidden folders like ~/.ssh or ~/.config cannot be used.", ""
+    if not folder.is_dir():
+        return None, "That folder does not exist.", ""
+    if data is not None:
+        try:
+            wallet = Path(data).resolve()
+        except (OSError, RuntimeError):
+            wallet = None
+        if wallet is not None and (wallet == folder or folder in wallet.parents or wallet in folder.parents):
+            return None, "That folder holds Hog's wallet files and cannot be used.", ""
+    marker = folder / ".git"
+    if marker.is_symlink() or (marker.exists() and not marker.is_dir()):
+        return None, "Git worktrees and submodules are not supported. Pick the main checkout.", ""
+    if marker.is_dir():
+        return folder, "", "repo"
+    for parent in folder.parents:
+        if parent == home_root:
+            break
+        if (parent / ".git").exists():
+            return None, f"This folder is inside the git repo at {parent}. Pick the repo's top folder.", ""
+    return folder, "", "none"
+
+
+def clean_git_identity(value):
+    text = str(value or "").strip()
+    if not text or len(text) > GIT_IDENTITY_MAX:
+        return ""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        return ""
+    return text
+
+
+def code_chat_run_args(folder, model, host_port, uid, gid, network=AI_NETWORK, identity=None):
+    """Build the docker run argv for Aider's browser mode.
+
+    The project folder is the only bind mount, the port is bound to
+    127.0.0.1, the container runs as the user's uid:gid with every
+    capability dropped, and Ollama is reached by name on hog-ai.
+    """
+    model_name = code_chat_model_name(model)
+    if not model_name:
+        raise ValueError("Pick an installed Ollama model.")
+    port = int(host_port)
+    if port not in CODE_CHAT_HOST_PORTS:
+        raise ValueError("That port is not available for Code chat.")
+    uid = int(uid)
+    gid = int(gid)
+    if uid < 0 or gid < 0:
+        raise ValueError("Unknown user.")
+    source = str(folder)
+    if not source.startswith("/") or ":" in source or "," in source or "\n" in source:
+        raise ValueError("That folder path is not allowed.")
+    mem = _memory_limit(CODE_CHAT_MEMORY)
+    args = [
+        "run", "-d", "--name", CODE_CHAT_NAME,
+        "--user", f"{uid}:{gid}",
+        "--cap-drop=ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "1024", "--memory", mem, "--memory-swap", mem,
+        "--network", network,
+        "-p", f"127.0.0.1:{port}:{CODE_CHAT_CONTAINER_PORT}",
+        "--label", "hog.role=code-chat",
+        "--label", f"hog.model={model_name}",
+        "-e", f"HOME={CODE_CHAT_HOME}",
+        "-e", f"OLLAMA_API_BASE=http://{OLLAMA_NAME}:{OLLAMA_CONTAINER_PORT}",
+        "-e", "STREAMLIT_SERVER_HEADLESS=true",
+        "-e", f"STREAMLIT_SERVER_PORT={CODE_CHAT_CONTAINER_PORT}",
+        "-e", "STREAMLIT_SERVER_ADDRESS=0.0.0.0",
+        "-e", "STREAMLIT_BROWSER_GATHER_USAGE_STATS=false",
+    ]
+    ident = identity or {}
+    name = clean_git_identity(ident.get("name"))
+    email = clean_git_identity(ident.get("email"))
+    pairs = [(key, value) for key, value in (("user.name", name), ("user.email", email)) if value]
+    if pairs:
+        args.extend(["-e", f"GIT_CONFIG_COUNT={len(pairs)}"])
+        for index, (key, value) in enumerate(pairs):
+            args.extend(["-e", f"GIT_CONFIG_KEY_{index}={key}", "-e", f"GIT_CONFIG_VALUE_{index}={value}"])
+    args.extend([
+        "-v", f"{source}:{CODE_CHAT_MOUNT_TARGET}",
+        "-w", CODE_CHAT_MOUNT_TARGET,
+        CODE_CHAT_IMAGE,
+        "--browser",
+        "--model", f"ollama_chat/{model_name}",
+        "--analytics-disable",
+        "--no-check-update",
+        "--no-show-release-notes",
+        "--no-show-model-warnings",
+    ])
+    return args
+
+
+PULL_LAYER_RE = re.compile(r"^([0-9a-f]{12}): (.+)$")
+
+
+def pull_layer_progress(layers, line):
+    """Track docker pull layer lines; return (percent or None, status)."""
+    match = PULL_LAYER_RE.match(str(line or "").strip())
+    if not match:
+        return None, ""
+    layer, status = match.group(1), match.group(2).strip()
+    lowered = status.lower()
+    if lowered.startswith(("pull complete", "already exists")):
+        layers[layer] = 2
+    elif lowered.startswith("download complete") or lowered.startswith("extracting") or lowered.startswith("verifying"):
+        layers[layer] = max(layers.get(layer, 0), 1)
+    else:
+        layers.setdefault(layer, 0)
+    total = len(layers)
+    if not total:
+        return None, ""
+    score = sum(layers.values())
+    percent = int(score * 100 / (total * 2))
+    done = sum(1 for value in layers.values() if value == 2)
+    return max(0, min(99, percent)), f"Downloading layers ({done}/{total})"
+
 
 def shares_root():
     return Path.home() / "hog-shares"
@@ -4837,6 +5007,12 @@ class Guard:
                     installed_names if models else None,
                     ollama.get("state") or "missing",
                 ),
+                "code": self.code_chat_fields(
+                    rows,
+                    ollama.get("state") or "missing",
+                    installed if models and ollama.get("state") == "running" and not model_error else None,
+                    check_image=models,
+                ),
             }
         }
 
@@ -5063,6 +5239,299 @@ class Guard:
         last["notice"] = "Downloaded " + ", ".join(downloaded) + "."
         return last
 
+
+    def code_state_path(self):
+        return self.data / "ai-code.json"
+
+    def read_code_state(self):
+        try:
+            raw = json.loads(self.code_state_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        folder = str(raw.get("folder") or "")
+        if len(folder) > CODE_CHAT_PATH_MAX or any(ch in folder for ch in ("\n", "\r", "\x00")):
+            folder = ""
+        running_folder = str(raw.get("runningFolder") or "")
+        if len(running_folder) > CODE_CHAT_PATH_MAX or any(ch in running_folder for ch in ("\n", "\r", "\x00")):
+            running_folder = ""
+        try:
+            port = int(raw.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return {
+            "folder": folder,
+            "model": code_chat_model_name(raw.get("model")),
+            "port": port if port in CODE_CHAT_HOST_PORTS else 0,
+            "runningFolder": running_folder,
+            "runningModel": code_chat_model_name(raw.get("runningModel")),
+        }
+
+    def write_code_state(self, **changes):
+        state = self.read_code_state()
+        for key, value in changes.items():
+            if key in state:
+                state[key] = value
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.code_state_path()
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        return self.read_code_state()
+
+    def _code_uid_gid(self):
+        return os.getuid(), os.getgid()
+
+    def code_git_identity(self, folder):
+        git = self._which("git")
+        if not git:
+            return {}
+        found = {}
+        for key in ("name", "email"):
+            try:
+                result = self.run_argv([str(git), "-C", str(folder), "config", "--get", f"user.{key}"], timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if getattr(result, "returncode", 1) == 0:
+                value = clean_git_identity((result.stdout or "").strip())
+                if value:
+                    found[key] = value
+        return found
+
+    def _code_chat_side(self):
+        side = self.container_runtime(OLLAMA_NAME)
+        return side if valid_runtime(side) else RUNTIME_ENGINE
+
+    def code_chat_fields(self, rows=None, ollama_state="", installed=None, check_image=False):
+        state = self.read_code_state()
+        item = self._item_state(CODE_CHAT_NAME, rows if rows is not None else [])
+        container_state = item.get("state") or "missing"
+        running = container_state == "running"
+        port = state.get("port") or 0
+        folder = state.get("folder") or ""
+        folder_error = ""
+        git = ""
+        if folder:
+            _resolved, folder_error, git = code_chat_folder(folder, home=self._user_home(), data=self.data)
+        models = []
+        if installed is not None:
+            for row in installed:
+                name = code_chat_model_name((row or {}).get("name") if isinstance(row, dict) else row)
+                if name and name not in models:
+                    models.append(name)
+        selected = state.get("model") or ""
+        if not selected:
+            selected = CODE_CHAT_DEFAULT_MODEL
+        image_present = None
+        if check_image:
+            try:
+                image_present = self.image_exists(CODE_CHAT_IMAGE, sock=self.runtime_sock(self._code_chat_side()))
+            except Exception:
+                image_present = None
+        return {
+            "name": CODE_CHAT_NAME,
+            "image": CODE_CHAT_IMAGE,
+            "imagePresent": image_present,
+            "state": container_state,
+            "reason": item.get("reason") or "",
+            "running": running,
+            "port": port,
+            "localUrl": f"http://127.0.0.1:{port}" if running and port else "",
+            "folder": folder,
+            "folderError": folder_error,
+            "git": git,
+            "model": selected,
+            "defaultModel": CODE_CHAT_DEFAULT_MODEL,
+            "runningModel": (state.get("runningModel") or "") if running else "",
+            "runningFolder": (state.get("runningFolder") or "") if running else "",
+            "models": models,
+            "modelsKnown": installed is not None,
+            "ollamaRunning": ollama_state == "running",
+        }
+
+    def _code_payload(self, ok=True, error="", notice=""):
+        payload = self.ai_status(models=True)
+        if not ok:
+            payload["ok"] = False
+            payload["error"] = error
+        elif notice:
+            payload["notice"] = notice
+        return payload
+
+    def set_code_folder(self, path):
+        folder, error, _git = code_chat_folder(path, home=self._user_home(), data=self.data)
+        if folder is None:
+            return self._code_payload(False, error)
+        self.write_code_state(folder=str(folder))
+        return self._code_payload(True)
+
+    def _parse_code_request(self, raw):
+        try:
+            request = json.loads(str(raw or "") or "{}")
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(request, dict):
+            return None
+        return {
+            "model": str(request.get("model") or ""),
+            "folder": str(request.get("folder") or ""),
+        }
+
+    def _stream_pull(self, image, sock=None, progress=None, timeout=CODE_CHAT_PULL_TIMEOUT):
+        if not valid_image(image):
+            return "That image name is not allowed."
+        last = {"name": image, "status": "Starting download…", "percent": None}
+
+        def send(force=False):
+            if not callable(progress):
+                return
+            now = time.monotonic()
+            if not force and now - send.at < 1.5:
+                return
+            send.at = now
+            try:
+                progress({"ok": True, "error": "", "codePull": dict(last), **self.ai_status_fields(models=False)})
+            except Exception:
+                pass
+
+        send.at = 0.0
+        send(force=True)
+        try:
+            proc = subprocess.Popen(
+                [self.docker, "pull", image],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                env=docker_host_env(sock) if sock else None,
+            )
+        except (OSError, FileNotFoundError):
+            return "Docker is not installed."
+        layers = {}
+        tail = []
+        started = time.monotonic()
+        try:
+            for line in proc.stdout:
+                text = line.strip()
+                if not text:
+                    continue
+                tail = (tail + [text])[-6:]
+                percent, status = pull_layer_progress(layers, text)
+                if status:
+                    last = {"name": image, "status": status, "percent": percent}
+                    send()
+                if time.monotonic() - started > timeout:
+                    raise subprocess.TimeoutExpired(proc.args, timeout)
+            code = proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            return "Docker did not finish downloading the Code chat image."
+        if code != 0:
+            blob = "\n".join(tail)
+            if docker_offline(blob):
+                return "Docker is not running."
+            return (tail[-1][:180] if tail else "Docker did not download the Code chat image.")
+        last = {"name": image, "status": "Downloaded", "percent": 100}
+        send(force=True)
+        return ""
+
+    def start_code_chat(self, raw="", progress=None):
+        request = self._parse_code_request(raw)
+        if request is None:
+            return self._code_payload(False, "Pick a model and a project folder.")
+        model = code_chat_model_name(request["model"])
+        if not model:
+            return self._code_payload(False, "Pick an installed Ollama chat model.")
+        folder, error, git = code_chat_folder(request["folder"], home=self._user_home(), data=self.data)
+        if folder is None:
+            return self._code_payload(False, error)
+        self.write_code_state(folder=str(folder), model=model)
+        rows = self.items() if self.docker_running() else self._offline_items()
+        ollama = self._item_state(OLLAMA_NAME, rows)
+        if ollama.get("state") != "running":
+            return self._code_payload(False, "Start Ollama first. Press Run Ollama on this page.")
+        installed, model_error = self.list_ai_models()
+        if model_error:
+            return self._code_payload(False, model_error)
+        names = {str(row.get("name") or "") for row in installed}
+        if not _model_is_installed(model, names):
+            return self._code_payload(False, f"{model} is not installed in Ollama. Pull it from the library first.")
+        side = self._code_chat_side()
+        if side == RUNTIME_ENGINE and not self.runtime_available(RUNTIME_ENGINE):
+            return self._code_payload(False, "Docker Engine is not available.")
+        sock = self.runtime_sock(side)
+        problem = self.ensure_ai_network(sock=sock)
+        if problem:
+            return self._code_payload(False, problem)
+        if not self.image_exists(CODE_CHAT_IMAGE, sock=sock):
+            problem = self._stream_pull(CODE_CHAT_IMAGE, sock=sock, progress=progress)
+            if problem:
+                payload = self._code_payload(False, problem)
+                payload["codePull"] = {"name": CODE_CHAT_IMAGE, "status": "", "percent": None}
+                return payload
+        self.save_runtime(CODE_CHAT_NAME, side)
+        runner = self._docker_runner(sock)
+        info, _error = self.inspect_on(CODE_CHAT_NAME, sock=sock)
+        state = self.read_code_state()
+        if info is not None:
+            labels = ((info.get("Config") or {}).get("Labels") or {}) if isinstance(info.get("Config"), dict) else {}
+            if not isinstance(labels, dict) or labels.get("hog.role") != "code-chat":
+                return self._code_payload(False, f"A container named {CODE_CHAT_NAME} already exists and was not made by Hog.")
+            removed = runner(["rm", "-f", CODE_CHAT_NAME], timeout=40)
+            if removed.returncode != 0:
+                detail = f"{removed.stderr or ''}\n{removed.stdout or ''}".strip().splitlines()
+                return self._code_payload(False, detail[-1][:180] if detail else "Docker did not stop the old Code chat.")
+        port = self._pick_loopback_port(state.get("port") or 0, CODE_CHAT_HOST_PORTS)
+        uid, gid = self._code_uid_gid()
+        identity = self.code_git_identity(folder) if git == "repo" else self.code_git_identity(self._user_home())
+        try:
+            args = code_chat_run_args(folder, model, port, uid, gid, identity=identity)
+        except ValueError as exc:
+            return self._code_payload(False, str(exc))
+        result = runner(args, timeout=120)
+        blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+        if result.returncode != 0:
+            if docker_offline(blob):
+                return self._code_payload(False, "Docker is not running.")
+            detail = [line.strip() for line in blob.splitlines() if line.strip()]
+            return self._code_payload(False, detail[-1][:180] if detail else "Docker did not start Code chat.")
+        info, error = self.inspect_on(CODE_CHAT_NAME, sock=sock)
+        reason = assess(info, CODE_CHAT_NAME, self.data) if info else (error or "Docker did not describe Code chat.")
+        if reason:
+            runner(["rm", "-f", CODE_CHAT_NAME], timeout=20)
+            return self._code_payload(False, reason)
+        self.write_code_state(port=port, runningFolder=str(folder), runningModel=model)
+        notice = f"Code chat is starting with {model} on {folder.name}. Press Open in a few seconds."
+        if git != "repo":
+            notice += " This folder was not a git repo, so Aider will create one and commit each edit."
+        payload = self._code_payload(True, notice=notice)
+        payload["codePull"] = {"name": CODE_CHAT_IMAGE, "status": "", "percent": None}
+        return payload
+
+    def stop_code_chat(self):
+        side = self.container_runtime(CODE_CHAT_NAME)
+        sock = self.runtime_sock(side if valid_runtime(side) else self._code_chat_side())
+        info, error = self.inspect_on(CODE_CHAT_NAME, sock=sock)
+        if info is None:
+            self.write_code_state(runningFolder="", runningModel="")
+            if error == "Docker is not running.":
+                return self._code_payload(False, error)
+            return self._code_payload(True, notice="Code chat is not running.")
+        labels = ((info.get("Config") or {}).get("Labels") or {}) if isinstance(info.get("Config"), dict) else {}
+        if not isinstance(labels, dict) or labels.get("hog.role") != "code-chat":
+            return self._code_payload(False, f"{CODE_CHAT_NAME} was not made by Hog, so Hog left it alone.")
+        result = self._docker_runner(sock)(["rm", "-f", CODE_CHAT_NAME], timeout=40)
+        if result.returncode != 0:
+            detail = f"{result.stderr or ''}\n{result.stdout or ''}".strip().splitlines()
+            return self._code_payload(False, detail[-1][:180] if detail else "Docker did not stop Code chat.")
+        self.write_code_state(runningFolder="", runningModel="")
+        return self._code_payload(True, notice="Stopped Code chat. Your files and Aider's commits stay in the project folder.")
+
     def handle(self, action, name="", image="", progress=None):
         if action == "update-status":
             return self.update_status()
@@ -5146,6 +5615,12 @@ class Guard:
             return self._mark_docker(self.write_continue_config())
         if action == "ai-editor-pull":
             return self._mark_docker(self.pull_continue_models(progress=progress))
+        if action == "ai-code-folder":
+            return self._mark_docker(self.set_code_folder(name))
+        if action == "ai-code-start":
+            return self._mark_docker(self.start_code_chat(name, progress=progress))
+        if action == "ai-code-stop":
+            return self._mark_docker(self.stop_code_chat())
         if action in {"run", "recreate"}:
             return self._mark_docker(self.apply_command(name, replace=action == "recreate", runtime=image, progress=progress))
         return self._mark_docker(self._act(action, name, image))

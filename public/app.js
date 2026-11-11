@@ -3308,6 +3308,125 @@ function paintAiEditor(ai) {
   });
 }
 
+const CODE_CHAT_DEFAULT_MODEL = "qwen2.5-coder:14b";
+const CODE_CHAT_PORTS = ["8501", "8502", "8503", "8504"];
+const CODE_CHAT_MODEL_RE = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;
+let codeChatBusy = false;
+let codeChatImage = null;
+
+function codeChatUrl(raw) {
+  let parsed;
+  try {
+    parsed = new URL(String(raw || ""));
+  } catch {
+    return "";
+  }
+  if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") return "";
+  if (!CODE_CHAT_PORTS.includes(parsed.port)) return "";
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) return "";
+  if (parsed.pathname && parsed.pathname !== "/") return "";
+  return `http://127.0.0.1:${parsed.port}/`;
+}
+
+function codeChatModelOptions(code) {
+  const info = code || {};
+  const names = [];
+  const add = (value) => {
+    const name = String(value || "").trim().toLowerCase();
+    if (!name || name.length > 80 || name.includes("embed") || !CODE_CHAT_MODEL_RE.test(name)) return;
+    if (!names.includes(name)) names.push(name);
+  };
+  (Array.isArray(info.models) ? info.models : []).forEach(add);
+  if (!names.length) add(info.model || info.defaultModel || CODE_CHAT_DEFAULT_MODEL);
+  const preferred = String(info.model || info.defaultModel || CODE_CHAT_DEFAULT_MODEL).toLowerCase();
+  const selected = names.includes(preferred) ? preferred : (names.includes(CODE_CHAT_DEFAULT_MODEL) ? CODE_CHAT_DEFAULT_MODEL : (names[0] || ""));
+  return { names, selected };
+}
+
+function codeChatStartCommand(model, folder) {
+  const name = String(model || "").trim().toLowerCase();
+  const path = String(folder || "").trim();
+  if (!name || name.length > 80 || name.includes("embed") || !CODE_CHAT_MODEL_RE.test(name)) return "";
+  if (!path || path.length > 1024 || /[\n\r\0]/.test(path)) return "";
+  if (!path.startsWith("/") && !path.startsWith("~/")) return "";
+  return `containers:ai-code-start:${JSON.stringify({ model: name, folder: path })}`;
+}
+
+function paintAiCode(ai, payload) {
+  const code = (ai && ai.code) || null;
+  if (!code) return;
+  const running = Boolean(code.running);
+  const pills = $("ai-code-pills");
+  if (pills) {
+    pills.replaceChildren();
+    if (code.imagePresent === true || code.imagePresent === false) codeChatImage = code.imagePresent;
+    if (running) codeChatImage = true;
+    if (codeChatImage === true) pills.append(statusPill("Image ready", "running"));
+    else if (codeChatImage === false) pills.append(statusPill("Image not downloaded", "stopped"));
+    else pills.append(statusPill("Image", "stopped"));
+    pills.append(statusPill(running ? "Running" : (code.state && code.state !== "missing" ? code.state : "Stopped"), running ? "running" : "stopped"));
+    const shownModel = running ? (code.runningModel || code.model) : code.model;
+    if (shownModel) pills.append(statusPill(`Model: ${shownModel}`, "engine"));
+  }
+  const select = $("ai-code-model");
+  const keepOptions = !code.modelsKnown && select && select.options.length > 1;
+  if (select && !keepOptions && select.dataset.dirty !== "1" && document.activeElement !== select) {
+    const { names, selected } = codeChatModelOptions(code);
+    select.replaceChildren();
+    for (const name of names) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      select.append(option);
+    }
+    if (selected) select.value = selected;
+  }
+  const input = $("ai-code-folder");
+  if (input && input.dataset.dirty !== "1" && document.activeElement !== input && code.folder) {
+    input.value = code.folder;
+  }
+  const gitNote = $("ai-code-git-note");
+  if (gitNote) {
+    let text = "";
+    if (code.folderError) text = code.folderError;
+    else if (code.folder && code.git === "none") text = "This folder is not a git repo. Aider will run git init and commit each edit, which is how you undo changes. Run git init yourself first if you prefer.";
+    gitNote.hidden = !text;
+    gitNote.textContent = text;
+  }
+  const note = $("ai-code-note");
+  if (note) {
+    let text = "";
+    if (running && code.runningFolder) text = `Chatting about ${code.runningFolder}${code.localUrl ? ` at ${code.localUrl}` : ""}.`;
+    else if (!code.ollamaRunning) text = "Start Ollama first. Code chat uses its models.";
+    else if (code.modelsKnown && !(code.models || []).length) text = "No chat models are installed yet. Pull qwen2.5-coder:14b from the library below.";
+    note.hidden = !text;
+    note.textContent = text;
+  }
+  const pull = payload && payload.codePull;
+  const pulling = Boolean(pull && pull.status && pull.percent !== 100);
+  if (pull) setProgress("ai-code-bar", "ai-code-bar-fill", "ai-code-progress", pull.status ? pull : null);
+  if (pull && !pull.status) codeChatBusy = false;
+  if (payload && payload.ok === false) codeChatBusy = false;
+  const start = $("ai-code-start");
+  if (start) {
+    start.disabled = codeChatBusy;
+    start.textContent = codeChatBusy ? (pulling ? "Downloading…" : "Starting…") : (running ? "Restart" : "Start");
+  }
+  const open = $("ai-code-open");
+  if (open) {
+    const url = codeChatUrl(code.localUrl);
+    open.hidden = !(running && url);
+    open.dataset.url = url;
+  }
+  const stop = $("ai-code-stop");
+  if (stop) {
+    stop.hidden = !running;
+    stop.disabled = false;
+  }
+  const browse = $("ai-code-browse");
+  if (browse) browse.disabled = false;
+}
+
 function paintAi(payload) {
   if (!payload || !payload.ai) return;
   const ai = payload.ai;
@@ -3343,6 +3462,7 @@ function paintAi(payload) {
   if (ai.openWebui && ai.openWebui.phoneUrl) webuiExtra.push(statusPill("Tailnet", "tailnet"));
   paintService("ai-webui-pills", ai.openWebui, webuiExtra);
   paintAiEditor(ai);
+  paintAiCode(ai, payload);
   const urlLine = $("ai-webui-url");
   const openBtn = $("ai-open-webui");
   const copyBtn = $("ai-copy-webui");
@@ -5611,6 +5731,70 @@ function bind() {
     editorPull.addEventListener("click", () => {
       editorPull.disabled = true;
       desktopCommand("containers:ai-editor-pull");
+    });
+  }
+
+  const codeModel = $("ai-code-model");
+  if (codeModel) codeModel.addEventListener("change", () => { codeModel.dataset.dirty = "1"; });
+  const codeFolder = $("ai-code-folder");
+  const sendCodeFolder = () => {
+    if (!codeFolder) return;
+    const value = codeFolder.value.trim();
+    if (!value || /[\n\r\0]/.test(value)) return;
+    codeFolder.dataset.dirty = "";
+    desktopCommand(`containers:ai-code-folder:${value}`);
+  };
+  if (codeFolder) {
+    codeFolder.addEventListener("input", () => { codeFolder.dataset.dirty = "1"; });
+    codeFolder.addEventListener("change", sendCodeFolder);
+    codeFolder.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        sendCodeFolder();
+      }
+    });
+  }
+  const codeBrowse = $("ai-code-browse");
+  if (codeBrowse) {
+    codeBrowse.addEventListener("click", () => {
+      const current = (codeFolder && codeFolder.value.trim()) || "";
+      if (codeFolder) codeFolder.dataset.dirty = "";
+      desktopCommand(`containers:ai-code-pick:${/[\n\r\0]/.test(current) ? "" : current}`);
+    });
+  }
+  const codeStart = $("ai-code-start");
+  if (codeStart) {
+    codeStart.addEventListener("click", () => {
+      const command = codeChatStartCommand(codeModel ? codeModel.value : "", codeFolder ? codeFolder.value : "");
+      const error = $("ai-error");
+      if (!command) {
+        if (error) error.textContent = "Pick a model and a project folder inside your home folder first.";
+        return;
+      }
+      codeChatBusy = true;
+      codeStart.disabled = true;
+      codeStart.textContent = "Starting…";
+      if (codeModel) codeModel.dataset.dirty = "";
+      if (codeFolder) codeFolder.dataset.dirty = "";
+      const status = $("ai-status");
+      if (status) status.textContent = "Starting Code chat. The first start downloads the Aider image, which takes a while.";
+      desktopCommand(command);
+    });
+  }
+  const codeStop = $("ai-code-stop");
+  if (codeStop) {
+    codeStop.addEventListener("click", () => {
+      codeStop.disabled = true;
+      desktopCommand("containers:ai-code-stop");
+    });
+  }
+  const codeOpen = $("ai-code-open");
+  if (codeOpen) {
+    codeOpen.addEventListener("click", () => {
+      const url = codeChatUrl(codeOpen.dataset.url || "");
+      if (!url) return;
+      if (typeof createTab === "function") createTab();
+      if (typeof openUrl === "function") openUrl(url);
     });
   }
   restoreAccordions();

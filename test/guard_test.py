@@ -2922,3 +2922,261 @@ class AiEditorTest(unittest.TestCase):
             guard.ai_status = lambda models=False: {"ai": {"editor": {"ollamaRunning": False, "missingModels": [CONTINUE_CHAT_MODEL]}}}
             blocked = guard.handle("ai-editor-pull")
             self.assertEqual(blocked.get("error"), "Start Ollama first.")
+
+
+class CodeChatTest(unittest.TestCase):
+    def _home(self, folder):
+        home = Path(folder) / "home"
+        (home / "proj" / ".git").mkdir(parents=True)
+        (home / "proj" / "sub").mkdir()
+        (home / "plain").mkdir()
+        (home / ".ssh").mkdir()
+        (home / "worktree").mkdir()
+        (home / "worktree" / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+        (home / "odd:name").mkdir()
+        return home
+
+    def test_code_chat_folder_rules(self):
+        from guard import code_chat_folder
+        with tempfile.TemporaryDirectory() as folder:
+            home = self._home(folder)
+            data = home / "wallet" / "hog-browser"
+            data.mkdir(parents=True)
+            folder_path, error, git = code_chat_folder("~/proj", home=home, data=data)
+            self.assertEqual((folder_path, error, git), ((home / "proj").resolve(), "", "repo"))
+            folder_path, error, git = code_chat_folder(str(home / "plain"), home=home, data=data)
+            self.assertEqual(git, "none")
+            self.assertEqual(error, "")
+            for bad, words in (
+                ("", "Pick a project folder"),
+                ("~", "not the home folder itself"),
+                ("/etc", "inside your home folder"),
+                ("relative/path", "full folder path"),
+                ("~/missing", "does not exist"),
+                ("~/.ssh", "Hidden folders"),
+                ("~/proj/sub", "Pick the repo's top folder"),
+                ("~/worktree", "worktrees and submodules"),
+                ("~/odd:name", "cannot be mounted"),
+                ("~/wallet", "wallet files"),
+                ("~/wallet/hog-browser", "wallet files"),
+                ("~/proj\n", "not allowed"),
+            ):
+                folder_path, error, git = code_chat_folder(bad, home=home, data=data)
+                self.assertIsNone(folder_path, bad)
+                self.assertIn(words, error, bad)
+                self.assertEqual(git, "")
+            link = home / "escape"
+            link.symlink_to("/etc")
+            self.assertIsNone(code_chat_folder("~/escape", home=home, data=data)[0])
+
+    def test_code_chat_run_args_are_locked_down(self):
+        from guard import CODE_CHAT_IMAGE, CODE_CHAT_NAME, code_chat_model_name, code_chat_run_args
+        args = code_chat_run_args(
+            "/home/me/proj", "qwen2.5-coder:14b", 8502, 1000, 1001,
+            identity={"name": "Jax W", "email": "jax@example.com"},
+        )
+        self.assertEqual(args[:4], ["run", "-d", "--name", CODE_CHAT_NAME])
+        self.assertIn("--cap-drop=ALL", args)
+        self.assertFalse(any(item.startswith("--cap-add") for item in args))
+        self.assertNotIn("--privileged", args)
+        self.assertEqual(args[args.index("--user") + 1], "1000:1001")
+        self.assertEqual(args[args.index("--network") + 1], "hog-ai")
+        self.assertEqual(args[args.index("-p") + 1], "127.0.0.1:8502:8501")
+        self.assertEqual(args.count("-p"), 1)
+        self.assertEqual(args.count("-v"), 1)
+        self.assertEqual(args[args.index("-v") + 1], "/home/me/proj:/app")
+        self.assertNotIn("docker.sock", " ".join(args))
+        self.assertIn("OLLAMA_API_BASE=http://hog-ollama:11434", args)
+        self.assertIn("GIT_CONFIG_VALUE_0=Jax W", args)
+        self.assertIn("GIT_CONFIG_VALUE_1=jax@example.com", args)
+        image_at = args.index(CODE_CHAT_IMAGE)
+        tail = args[image_at + 1:]
+        self.assertIn("--browser", tail)
+        self.assertEqual(tail[tail.index("--model") + 1], "ollama_chat/qwen2.5-coder:14b")
+        self.assertIn("--analytics-disable", tail)
+        plain = code_chat_run_args("/home/me/proj", "qwen2.5-coder:14b", 8501, 1000, 1000, identity={"name": "bad\nname"})
+        self.assertFalse(any(item.startswith("GIT_CONFIG") for item in plain))
+        for model, port, folder in (
+            ("nomic-embed-text", 8501, "/home/me/proj"),
+            ("bad model", 8501, "/home/me/proj"),
+            ("qwen2.5-coder:14b", 3000, "/home/me/proj"),
+            ("qwen2.5-coder:14b", 8501, "relative"),
+            ("qwen2.5-coder:14b", 8501, "/home/me/a:b"),
+        ):
+            with self.assertRaises(ValueError):
+                code_chat_run_args(folder, model, port, 1000, 1000)
+        self.assertEqual(code_chat_model_name("Qwen2.5-Coder:14B"), "qwen2.5-coder:14b")
+        self.assertEqual(code_chat_model_name("nomic-embed-text"), "")
+
+    def test_pull_layer_progress(self):
+        from guard import pull_layer_progress
+        layers = {}
+        self.assertEqual(pull_layer_progress(layers, "latest: Pulling from paulgauthier/aider-full"), (None, ""))
+        pull_layer_progress(layers, "aaaaaaaaaaaa: Pulling fs layer")
+        pull_layer_progress(layers, "bbbbbbbbbbbb: Pulling fs layer")
+        percent, status = pull_layer_progress(layers, "aaaaaaaaaaaa: Download complete")
+        self.assertEqual(percent, 25)
+        percent, status = pull_layer_progress(layers, "aaaaaaaaaaaa: Pull complete")
+        self.assertEqual(percent, 50)
+        self.assertEqual(status, "Downloading layers (1/2)")
+        percent, _status = pull_layer_progress(layers, "bbbbbbbbbbbb: Already exists")
+        self.assertEqual(percent, 99)
+
+    def _guard(self, folder, home):
+        guard = Guard(str(Path(folder) / "data"), docker="docker")
+        guard._user_home = lambda: home
+        guard._which = lambda name: None
+        guard.docker_running = lambda: True
+        guard.items = lambda: [{"name": "hog-ollama", "state": "running", "runtime": "engine", "reason": "", "image": "ollama/ollama:latest"}]
+        guard.list_ai_models = lambda: ([{"name": "qwen2.5-coder:14b"}, {"name": "nomic-embed-text:latest"}], "")
+        guard.container_runtime = lambda name="": "engine"
+        guard.runtime_available = lambda side: True
+        guard.runtime_sock = lambda side: None
+        guard.ensure_ai_network = lambda sock=None: ""
+        guard.port_open = lambda port: False
+        guard._code_uid_gid = lambda: (1000, 1000)
+        guard.ai_status = lambda models=False: {"ok": True, "error": "", "items": []}
+        guard._mark_docker = lambda payload: payload
+        return guard
+
+    def test_start_and_stop_code_chat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = self._home(folder)
+            guard = self._guard(folder, home)
+            seen = []
+            pulls = []
+            state = {"info": None}
+            made = {
+                "Name": "/hog-aider",
+                "HostConfig": {},
+                "Config": {"Image": "paulgauthier/aider-full:latest", "Labels": {"hog.role": "code-chat"}},
+                "Mounts": [{"Source": str((home / "proj").resolve()), "Destination": "/app"}],
+            }
+
+            def run(args, timeout=8):
+                seen.append(list(args))
+                if args[:1] == ["run"]:
+                    state["info"] = made
+                if args[:2] == ["rm", "-f"]:
+                    state["info"] = None
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.run = run
+            guard.inspect_on = lambda name, sock=None: (state["info"], "" if state["info"] else "No such container")
+            guard.image_exists = lambda image, sock=None: bool(pulls)
+
+            def fake_pull(image, sock=None, progress=None, timeout=0):
+                pulls.append(image)
+                return ""
+
+            guard._stream_pull = fake_pull
+            request = json.dumps({"model": "qwen2.5-coder:14b", "folder": "~/proj"})
+            started = guard.handle("ai-code-start", request)
+            self.assertNotEqual(started.get("ok"), False, started.get("error"))
+            self.assertEqual(pulls, ["paulgauthier/aider-full:latest"])
+            runs = [item for item in seen if item[:1] == ["run"]]
+            self.assertEqual(len(runs), 1)
+            self.assertIn("127.0.0.1:8501:8501", runs[0])
+            self.assertIn("Code chat is starting", started.get("notice") or "")
+            saved = guard.read_code_state()
+            self.assertEqual(saved["folder"], str((home / "proj").resolve()))
+            self.assertEqual(saved["model"], "qwen2.5-coder:14b")
+            self.assertEqual(saved["runningModel"], "qwen2.5-coder:14b")
+            self.assertEqual(saved["port"], 8501)
+
+            # restart replaces the Hog-made container and does not pull again
+            seen.clear()
+            again = guard.handle("ai-code-start", request)
+            self.assertNotEqual(again.get("ok"), False, again.get("error"))
+            self.assertEqual(len(pulls), 1)
+            self.assertEqual(seen[0], ["rm", "-f", "hog-aider"])
+
+            stopped = guard.handle("ai-code-stop")
+            self.assertIn("Stopped Code chat", stopped.get("notice") or "")
+            self.assertEqual(guard.read_code_state()["runningModel"], "")
+
+            # a foreign container with the same name is left alone
+            state["info"] = {"Name": "/hog-aider", "HostConfig": {}, "Config": {"Image": "other", "Labels": {}}}
+            seen.clear()
+            refused = guard.handle("ai-code-start", request)
+            self.assertIs(refused.get("ok"), False)
+            self.assertIn("not made by Hog", refused["error"])
+            self.assertFalse(any(item[:1] in (["rm"], ["run"]) for item in seen))
+            refused = guard.handle("ai-code-stop")
+            self.assertIs(refused.get("ok"), False)
+
+    def test_start_code_chat_refusals(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = self._home(folder)
+            guard = self._guard(folder, home)
+            guard.run = lambda args, timeout=8: self.fail(f"docker should not run: {args}")
+            guard.image_exists = lambda image, sock=None: self.fail("no image check expected")
+            guard._stream_pull = lambda *a, **k: self.fail("no pull expected")
+            bad = guard.handle("ai-code-start", "not json")
+            self.assertIs(bad.get("ok"), False)
+            embed = guard.handle("ai-code-start", json.dumps({"model": "nomic-embed-text", "folder": "~/proj"}))
+            self.assertIn("chat model", embed["error"])
+            missing = guard.handle("ai-code-start", json.dumps({"model": "llama3.1:8b", "folder": "~/proj"}))
+            self.assertIn("not installed", missing["error"])
+            outside = guard.handle("ai-code-start", json.dumps({"model": "qwen2.5-coder:14b", "folder": "/etc"}))
+            self.assertIn("inside your home folder", outside["error"])
+            guard.items = lambda: []
+            off = guard.handle("ai-code-start", json.dumps({"model": "qwen2.5-coder:14b", "folder": "~/proj"}))
+            self.assertIn("Start Ollama first", off["error"])
+
+    def test_code_folder_and_status_fields(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = self._home(folder)
+            guard = self._guard(folder, home)
+            ok = guard.handle("ai-code-folder", "~/plain")
+            self.assertNotEqual(ok.get("ok"), False)
+            self.assertEqual(guard.read_code_state()["folder"], str((home / "plain").resolve()))
+            bad = guard.handle("ai-code-folder", "~/.ssh")
+            self.assertIs(bad.get("ok"), False)
+            self.assertEqual(guard.read_code_state()["folder"], str((home / "plain").resolve()))
+            guard.image_exists = lambda image, sock=None: False
+            fields = guard.code_chat_fields(
+                [{"name": "hog-aider", "state": "running", "reason": ""}],
+                "running",
+                [{"name": "qwen2.5-coder:14b"}, {"name": "nomic-embed-text:latest"}, {"name": "qwen2.5-coder:1.5b"}],
+                check_image=True,
+            )
+            self.assertEqual(fields["models"], ["qwen2.5-coder:14b", "qwen2.5-coder:1.5b"])
+            self.assertEqual(fields["model"], "qwen2.5-coder:14b")
+            self.assertEqual(fields["git"], "none")
+            self.assertIs(fields["imagePresent"], False)
+            self.assertTrue(fields["running"])
+            self.assertEqual(fields["localUrl"], "")
+            guard.write_code_state(port=8503)
+            fields = guard.code_chat_fields([{"name": "hog-aider", "state": "running"}], "running")
+            self.assertEqual(fields["localUrl"], "http://127.0.0.1:8503")
+            self.assertIsNone(fields["imagePresent"])
+            self.assertFalse(fields["modelsKnown"])
+            guard.write_code_state(port=9999)
+            self.assertEqual(guard.read_code_state()["port"], 0)
+
+    def test_stream_pull_reports_layer_progress(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = self._home(folder)
+            guard = self._guard(folder, home)
+            guard.ai_status_fields = lambda models=False, items=None: {"ai": {}}
+            script = Path(folder) / "fake-docker"
+            script.write_text(
+                "#!/bin/sh\n"
+                "[ \"$1\" = pull ] || exit 3\n"
+                "echo 'latest: Pulling from paulgauthier/aider-full'\n"
+                "echo 'aaaaaaaaaaaa: Pulling fs layer'\n"
+                "echo 'aaaaaaaaaaaa: Pull complete'\n"
+                "echo 'Status: Downloaded newer image'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            guard.docker = str(script)
+            events = []
+            self.assertEqual(guard._stream_pull("paulgauthier/aider-full:latest", progress=events.append), "")
+            pulls = [item["codePull"] for item in events]
+            self.assertEqual(pulls[0]["status"], "Starting download…")
+            self.assertEqual(pulls[-1], {"name": "paulgauthier/aider-full:latest", "status": "Downloaded", "percent": 100})
+            script.write_text("#!/bin/sh\necho 'Error response from daemon: denied'\nexit 1\n", encoding="utf-8")
+            self.assertIn("denied", guard._stream_pull("paulgauthier/aider-full:latest"))
+            self.assertEqual(guard._stream_pull("bad image name"), "That image name is not allowed.")

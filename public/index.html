@@ -418,6 +418,49 @@
                 <p class="note"><a id="ai-editor-download-link" href="https://code.visualstudio.com/">Get Visual Studio Code</a></p>
               </details>
             </section>
+            <section class="connect-card" aria-label="Code chat">
+              <div class="card-head">
+                <div class="card-label">
+                  <p class="eyebrow">Chat + files</p>
+                  <strong>Code chat</strong>
+                </div>
+              </div>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <p class="note">Chat with a local model in a Hog tab while it edits a project folder. Powered by Aider's browser mode in a container. Each edit becomes a git commit, so you can undo it.</p>
+                  <div id="ai-code-pills" class="status-pills"></div>
+                </div>
+                <div class="hog-update-actions">
+                  <button type="button" id="ai-code-start" class="primary">Start</button>
+                  <button type="button" id="ai-code-open" hidden>Open</button>
+                  <button type="button" id="ai-code-stop" hidden>Stop</button>
+                </div>
+              </div>
+              <div class="code-chat-fields">
+                <label for="ai-code-model">Model
+                  <select id="ai-code-model" aria-label="Code chat model">
+                    <option value="qwen2.5-coder:14b">qwen2.5-coder:14b</option>
+                  </select>
+                </label>
+                <label for="ai-code-folder">Project folder
+                  <span class="code-chat-folder-row">
+                    <input id="ai-code-folder" type="text" autocomplete="off" spellcheck="false" placeholder="~/webdev/my-project" aria-label="Project folder">
+                    <button type="button" id="ai-code-browse">Browse…</button>
+                  </span>
+                </label>
+              </div>
+              <p id="ai-code-git-note" class="note warn" hidden></p>
+              <p id="ai-code-note" class="note" hidden></p>
+              <div id="ai-code-bar" class="hog-progress" hidden>
+                <div class="hog-progress-track"><div id="ai-code-bar-fill" class="hog-progress-fill"></div></div>
+                <p id="ai-code-progress" class="note" role="status"></p>
+              </div>
+              <details class="settings-sub" id="ai-code-advanced">
+                <summary>Advanced</summary>
+                <p class="note">The first Start downloads paulgauthier/aider-full (a few GB). Hog runs it as hog-aider on the hog-ai network with your user id, every capability dropped, and only the project folder mounted at /app. The chat page listens on 127.0.0.1 only and is not shared to your tailnet. Ollama is reached at http://hog-ollama:11434 and the model is used as ollama_chat/&lt;model&gt;.</p>
+                <p class="note">If the folder is not a git repo, Aider runs git init there and commits each edit. Pick the top folder of a repo, not a subfolder. Stop removes the container; your files and commits stay.</p>
+              </details>
+            </section>
             <section class="connect-card" aria-label="Model library">
               <div class="card-head">
                 <div class="card-label">

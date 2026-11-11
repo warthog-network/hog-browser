@@ -573,6 +573,40 @@ class SelfUpdateUiTest(unittest.TestCase):
 
 
 
+class CodeChatUiTest(unittest.TestCase):
+    def test_code_chat_card_and_bridge(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        hog = (root / "hog").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        ai = html.split('id="settings-ai"', 1)[1]
+        card = ai.split('aria-label="Code chat"', 1)[1].split("</section>", 1)[0]
+        for element in (
+            'id="ai-code-pills"', 'id="ai-code-model"', 'id="ai-code-folder"', 'id="ai-code-browse"',
+            'id="ai-code-start"', 'id="ai-code-stop"', 'id="ai-code-open"', 'id="ai-code-git-note"',
+            'id="ai-code-bar"', 'id="ai-code-advanced"',
+        ):
+            self.assertIn(element, card)
+        self.assertIn("paulgauthier/aider-full", card)
+        self.assertIn("127.0.0.1 only", card)
+        self.assertLess(ai.find('aria-label="Code editor"'), ai.find('aria-label="Code chat"'))
+        self.assertLess(ai.find('aria-label="Code chat"'), ai.find('aria-label="Model library"'))
+        for name in ("function paintAiCode", "function codeChatUrl", "function codeChatStartCommand", "function codeChatModelOptions"):
+            self.assertIn(name, app)
+        for command in ("containers:ai-code-start", "containers:ai-code-stop", "containers:ai-code-pick", "containers:ai-code-folder"):
+            self.assertIn(command, app)
+        for action in ('"ai-code-pick"', '"ai-code-folder"', '"ai-code-start"', '"ai-code-stop"'):
+            self.assertIn(action, hog)
+        self.assertIn("def pick_code_folder", hog)
+        self.assertIn('if action in {"ai-pull", "ai-editor-pull", "ai-code-start"}:', hog)
+        picker = hog.split("def pick_code_folder", 1)[1].split("\n    def ", 1)[0]
+        self.assertIn("Gtk.FileChooserAction.SELECT_FOLDER", picker)
+        self.assertIn("containers:ai-code-folder:", picker)
+        self.assertIn("Code chat", readme)
+        self.assertIn("paulgauthier/aider-full", readme)
+
+
 class AiToolboxUiTest(unittest.TestCase):
     def test_ui_exposes_ai_toolbox_and_settings_nav(self):
         root = Path(__file__).resolve().parents[1]
