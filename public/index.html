@@ -179,18 +179,18 @@
             <p id="docker-state" class="note">Checking whether Docker is running…</p>
             <button type="button" id="start-docker">Start Docker</button>
           </div>
-          <details class="settings-block" id="container-images">
+          <details class="settings-block" id="container-images" open>
             <summary>Images</summary>
             <div class="picker">
             <div class="popover-head"><strong>Images</strong></div>
             <ul class="menu-list">
+              <li><button type="button" class="has-step" data-launch="hog-ollama" data-image="ollama/ollama:latest"><span>Ollama</span><small>Local model runner on Docker Engine, with the GPU when it is available. This is the app; models are pulled on the AI page.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="hog-open-webui" data-image="ghcr.io/open-webui/open-webui:main"><span>Open WebUI</span><small>Chat page for Ollama. It stays on 127.0.0.1 and is served to your phone over Tailscale only.</small></button></li>
               <li><button type="button" data-launch="ubuntu" data-image="ubuntu:24.04"><span>Flat Ubuntu</span><small>ubuntu:24.04 · name ubuntu</small></button></li>
               <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Fedora</span><small>fedora:latest · name fedora</small></button></li>
               <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
               <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>Click Tailscale, then Run. Docker Engine is recommended so your phone can connect directly.</small></button></li>
               <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>Click Jellyfin, then Run. That creates ~/hog-shares and attaches it at /media. Use GPU acceleration if you want NVENC transcoding.</small></button></li>
-              <li><button type="button" class="has-step" data-launch="hog-ollama" data-image="ollama/ollama:latest"><span>Ollama</span><small>Local models on Docker Engine, with the GPU when it is available. Opens from the AI page.</small></button></li>
-              <li><button type="button" class="has-step" data-launch="hog-open-webui" data-image="ghcr.io/open-webui/open-webui:main"><span>Open WebUI</span><small>Chat page for Ollama. It stays on 127.0.0.1 and is served to your phone over Tailscale only.</small></button></li>
               <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
               <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
             </ul>
@@ -206,6 +206,10 @@
               <button type="button" id="runtime-engine" aria-pressed="false">Engine</button>
               <button type="button" id="runtime-desktop" aria-pressed="true">Desktop</button>
             </div>
+          </div>
+          <div id="image-pull-bar" class="hog-progress" hidden>
+            <div class="hog-progress-track"><div id="image-pull-bar-fill" class="hog-progress-fill"></div></div>
+            <p id="image-pull-progress" class="note" role="status"></p>
           </div>
           <p id="container-status" class="note" role="status"></p>
           <p id="container-error" class="error" role="status"></p>
@@ -346,21 +350,29 @@
             <p id="ai-status" class="note" role="status"></p>
             <p id="ai-error" class="error" role="status"></p>
             <section class="connect-card" aria-label="Ollama">
-              <p class="eyebrow">Models</p>
+              <div class="card-head">
+                <div class="card-label">
+                  <p class="eyebrow">App</p>
+                  <strong>Ollama</strong>
+                </div>
+              </div>
               <div class="engine-row default-browser-row">
                 <div class="default-browser-copy">
-                  <strong>Ollama</strong>
-                  <p class="note">Runs models on Docker Engine, with the NVIDIA GPU when it is ready. The API is only on 127.0.0.1, and Open WebUI reaches it by name on the hog-ai network.</p>
+                  <p class="note">This is the model runner, not a model. It runs on Docker Engine, with the NVIDIA GPU when it is ready. The API is only on 127.0.0.1, and Open WebUI reaches it by name on the hog-ai network.</p>
                   <div id="ai-ollama-pills" class="status-pills"></div>
                 </div>
                 <button type="button" id="ai-run-ollama" class="primary">Run Ollama</button>
               </div>
             </section>
             <section class="connect-card" aria-label="Open WebUI">
-              <p class="eyebrow">Chat</p>
+              <div class="card-head">
+                <div class="card-label">
+                  <p class="eyebrow">Chat</p>
+                  <strong>Open WebUI</strong>
+                </div>
+              </div>
               <div class="engine-row default-browser-row">
                 <div class="default-browser-copy">
-                  <strong>Open WebUI</strong>
                   <p class="note">A ChatGPT-style page for the models on Ollama. The first account you create becomes the admin.</p>
                   <div id="ai-webui-pills" class="status-pills"></div>
                   <p id="ai-webui-url" class="note" hidden></p>
@@ -373,18 +385,26 @@
               </div>
             </section>
             <section class="connect-card" aria-label="Model library">
-              <p class="eyebrow">Library</p>
-              <strong>Models</strong>
-              <p class="note">Names on the short list are a good fit for 12 GB of video memory. You can also type another Ollama model name.</p>
-              <ul id="ai-suggestions" class="menu-list ai-suggestions"></ul>
+              <div class="card-head">
+                <div class="card-label">
+                  <p class="eyebrow">Model library</p>
+                  <strong>Models for Ollama</strong>
+                </div>
+              </div>
+              <p class="note">These are downloadable models, not the Ollama app itself. Run Ollama above first. The 9–10 GB options are a good fit for 12 GB of video memory. You can also type another Ollama model name.</p>
+              <div id="ai-catalog" class="ai-catalog"></div>
+              <p class="note"><a id="ai-library-link" href="https://ollama.com/library">Browse more models on ollama.com/library</a></p>
               <form id="ai-pull-form" class="ai-pull-form">
                 <label>Model name
-                  <input id="ai-pull-name" autocomplete="off" spellcheck="false" placeholder="llama3.1:8b" maxlength="80">
+                  <input id="ai-pull-name" autocomplete="off" spellcheck="false" placeholder="qwen2.5:14b" maxlength="80">
                 </label>
                 <button type="submit" id="ai-pull">Pull model</button>
               </form>
-              <p id="ai-pull-progress" class="note" role="status" hidden></p>
-              <p id="ai-models-empty" class="note">No models yet. Pull one from the list above.</p>
+              <div id="ai-pull-bar" class="hog-progress" hidden>
+                <div class="hog-progress-track"><div id="ai-pull-bar-fill" class="hog-progress-fill"></div></div>
+                <p id="ai-pull-progress" class="note" role="status"></p>
+              </div>
+              <p id="ai-models-empty" class="empty-state">No models yet. Pull one from the list above.</p>
               <ul id="ai-model-list" class="media-list"></ul>
             </section>
           </div>
@@ -978,6 +998,7 @@
     <div data-edge="west"></div>
     <div data-edge="east"></div>
   </div>
+  <div id="hog-toasts" class="hog-toasts" aria-live="polite" aria-relevant="additions"></div>
   <script type="module" src="app.js"></script>
 </body>
 </html>

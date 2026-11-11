@@ -20,7 +20,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from guard import Guard, allowed_browser_open_url, allowed_tailscale_open_url
+from guard import Guard, allowed_browser_open_url, allowed_ollama_library_url, allowed_tailscale_open_url
 
 import gi
 
@@ -1893,6 +1893,8 @@ class Hog(Gtk.Application):
             try:
                 if action == "ai-pull":
                     payload = guard.pull_ai_model(name, progress=emit)
+                elif action in {"run", "recreate"}:
+                    payload = guard.handle(action, name, image, progress=emit)
                 else:
                     payload = guard.handle(action, name, image)
             except RuntimeError as exc:

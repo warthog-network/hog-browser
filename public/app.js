@@ -456,7 +456,16 @@ function showSettingsPage(page) {
     desktopCommand("containers:browser-default");
     desktopCommand("containers:update-status");
   }
-  if (next === "ai") desktopCommand("containers:ai-models");
+  if (next === "ai") {
+    const empty = $("ai-models-empty");
+    if (empty && !($("ai-model-list")?.children.length)) {
+      empty.hidden = false;
+      empty.classList.add("is-loading");
+      empty.classList.remove("is-error");
+      empty.textContent = "Loading models…";
+    }
+    desktopCommand("containers:ai-models");
+  }
 }
 
 function showHome() {
@@ -2960,6 +2969,236 @@ function openHogRelease(url) {
   if (typeof openUrl === "function") openUrl(allowed);
 }
 
+function openOllamaLibrary(url) {
+  let allowed = "";
+  try {
+    const parsed = new URL(String(url || "https://ollama.com/library"));
+    if (parsed.protocol !== "https:") return;
+    if (parsed.hostname !== "ollama.com" && parsed.hostname !== "www.ollama.com") return;
+    if (parsed.pathname !== "/library" && !parsed.pathname.startsWith("/library/")) return;
+    if (parsed.search || parsed.hash || parsed.port) return;
+    if (parsed.username || parsed.password) return;
+    allowed = `https://${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return;
+  }
+  if (typeof createTab === "function") createTab();
+  if (typeof openUrl === "function") openUrl(allowed);
+}
+
+const ACCORDION_KEY = "hog-settings-accordions";
+const ACCORDION_DEFAULTS = {
+  "container-images": true,
+  "container-advanced": false,
+  "network-create-wrap": false,
+  "network-attach-wrap": false,
+  "exit-node-guide": false,
+  "ai-group-large": false,
+};
+
+function accordionOpen(id, fallback) {
+  if (!id) return fallback;
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACCORDION_KEY) || "{}");
+    if (saved && typeof saved === "object" && Object.prototype.hasOwnProperty.call(saved, id)) {
+      return Boolean(saved[id]);
+    }
+  } catch {}
+  if (Object.prototype.hasOwnProperty.call(ACCORDION_DEFAULTS, id)) return ACCORDION_DEFAULTS[id];
+  return fallback;
+}
+
+function rememberAccordion(el) {
+  if (!el || !el.id || el.dataset.accordionBound === "1") return;
+  el.dataset.accordionBound = "1";
+  el.addEventListener("toggle", () => {
+    let saved = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(ACCORDION_KEY) || "{}") || {};
+    } catch {
+      saved = {};
+    }
+    saved[el.id] = el.open;
+    localStorage.setItem(ACCORDION_KEY, JSON.stringify(saved));
+  });
+}
+
+function restoreAccordions() {
+  document.querySelectorAll("#browser-settings details[id]").forEach((el) => {
+    el.open = accordionOpen(el.id, el.open);
+    rememberAccordion(el);
+  });
+}
+
+function showToast(message, kind) {
+  const host = $("hog-toasts");
+  const text = String(message || "").trim();
+  if (!host || !text) return;
+  const item = document.createElement("div");
+  item.className = `hog-toast is-${kind === "error" ? "error" : "ok"}`;
+  item.setAttribute("role", "status");
+  item.textContent = text;
+  host.append(item);
+  setTimeout(() => item.classList.add("is-out"), 3600);
+  setTimeout(() => item.remove(), 4200);
+}
+
+let lastToastKey = "";
+function maybeToast(payload) {
+  if (!payload) return;
+  const failed = payload.ok === false;
+  const message = failed ? (payload.error || "") : (payload.notice || "");
+  if (!message) return;
+  if (!Object.prototype.hasOwnProperty.call(payload, "notice") && !failed) return;
+  const key = `${failed ? "error" : "ok"}:${message}`;
+  if (key === lastToastKey) return;
+  lastToastKey = key;
+  showToast(message, failed ? "error" : "ok");
+}
+
+function setProgress(barId, fillId, textId, info) {
+  const bar = $(barId);
+  const fill = $(fillId);
+  const text = $(textId);
+  if (!bar) return;
+  if (!info || !info.status) {
+    bar.hidden = true;
+    bar.classList.remove("is-indeterminate");
+    if (fill) fill.style.width = "0%";
+    return;
+  }
+  bar.hidden = false;
+  const pct = Number.isInteger(info.percent) ? info.percent : null;
+  if (pct == null) {
+    bar.classList.add("is-indeterminate");
+    if (fill) fill.style.width = "";
+  } else {
+    bar.classList.remove("is-indeterminate");
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  }
+  if (text) {
+    const label = [info.name || info.image || "", info.status, pct != null ? `${pct}%` : ""].filter(Boolean).join(" · ");
+    text.textContent = label;
+  }
+}
+
+const MODEL_NAME_RE = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;
+
+function startAiPull(name) {
+  const model = String(name || "").trim().toLowerCase();
+  if (!MODEL_NAME_RE.test(model) || model.length > 80 || model.includes("..")) {
+    showToast("Use a model name like qwen2.5:14b.", "error");
+    const error = $("ai-error");
+    if (error) error.textContent = "Use a model name like qwen2.5:14b.";
+    return;
+  }
+  const warning = $("ai-disk-warning");
+  if (warning && !warning.hidden && !window.confirm(`${warning.textContent} Pull ${model} anyway?`)) return;
+  const input = $("ai-pull-name");
+  if (input) input.value = model;
+  const error = $("ai-error");
+  if (error) error.textContent = "";
+  setProgress("ai-pull-bar", "ai-pull-bar-fill", "ai-pull-progress", { name: model, status: "Starting download…", percent: null });
+  desktopCommand(`containers:ai-pull:${model}`);
+}
+
+function mergeManagedContainers(items, ai) {
+  const rows = Array.isArray(items) ? items.slice() : [];
+  const have = new Set(rows.map((item) => item && item.name).filter(Boolean));
+  const presets = [
+    { name: "hog-ollama", image: "ollama/ollama:latest", from: "ollama" },
+    { name: "hog-open-webui", image: "ghcr.io/open-webui/open-webui:main", from: "openWebui" },
+  ];
+  const extras = [];
+  for (const preset of presets) {
+    if (have.has(preset.name)) continue;
+    const live = ai && ai[preset.from];
+    extras.push({
+      name: preset.name,
+      image: (live && live.image) || preset.image,
+      state: (live && live.state) || "missing",
+      runtime: (live && live.runtime) || "engine",
+      reason: (live && live.reason) || "Not created yet. Press Run to start it from the AI page or Images.",
+      placeholder: true,
+    });
+  }
+  return extras.concat(rows);
+}
+
+function fitPill(fit) {
+  if (fit === "fits") return statusPill("Fits GPU", "fits");
+  if (fit === "tight") return statusPill("Tight", "tight");
+  if (fit === "over") return statusPill("Needs more VRAM", "over");
+  return statusPill("CPU", "cpu");
+}
+
+function paintAiCatalog(ai) {
+  const host = $("ai-catalog");
+  if (!host) return;
+  host.replaceChildren();
+  const groups = Array.isArray(ai.groups) && ai.groups.length
+    ? ai.groups
+    : [
+        { id: "mid", title: "Around 9–10 GB", blurb: "A good fit for 12 GB of video memory." },
+        { id: "small", title: "Smaller and faster", blurb: "Lighter models that leave more room for context." },
+        { id: "large", title: "Larger (partly CPU, slow)", blurb: "These usually spill into system RAM on a 12 GB card and run slowly." },
+      ];
+  const suggestions = Array.isArray(ai.suggestions) ? ai.suggestions : [];
+  for (const group of groups) {
+    const rows = suggestions.filter((item) => item && item.group === group.id);
+    if (!rows.length) continue;
+    const isLarge = group.id === "large";
+    const wrap = document.createElement(isLarge ? "details" : "section");
+    wrap.className = "ai-group";
+    wrap.dataset.group = group.id;
+    if (isLarge) {
+      wrap.id = "ai-group-large";
+      wrap.open = accordionOpen("ai-group-large", false);
+      const summary = document.createElement("summary");
+      summary.textContent = group.title;
+      wrap.append(summary);
+      rememberAccordion(wrap);
+    } else {
+      const title = document.createElement("h3");
+      title.textContent = group.title;
+      wrap.append(title);
+    }
+    if (group.blurb) {
+      const blurb = document.createElement("p");
+      blurb.className = "note";
+      blurb.textContent = group.blurb;
+      wrap.append(blurb);
+    }
+    const list = document.createElement("ul");
+    list.className = "ai-model-list";
+    for (const item of rows) {
+      const li = document.createElement("li");
+      li.className = "ai-model";
+      const copy = document.createElement("div");
+      copy.className = "ai-model-copy";
+      const title = document.createElement("strong");
+      title.textContent = item.label || item.name;
+      const meta = document.createElement("small");
+      meta.textContent = [item.blurb, item.name, item.disk ? `~${item.disk} download` : "", item.category].filter(Boolean).join(" · ");
+      copy.append(title, meta);
+      const actions = document.createElement("div");
+      actions.className = "ai-model-actions";
+      if (item.installed) actions.append(statusPill("Installed", "running"));
+      actions.append(fitPill(item.fit));
+      const pull = document.createElement("button");
+      pull.type = "button";
+      pull.className = "tiny";
+      pull.textContent = item.installed ? "Pull again" : "Pull";
+      pull.addEventListener("click", () => startAiPull(item.name));
+      actions.append(pull);
+      li.append(copy, actions);
+      list.append(li);
+    }
+    wrap.append(list);
+    host.append(wrap);
+  }
+}
+
 
 function closeKebabs(except) {
   document.querySelectorAll(".kebab-menu").forEach((menu) => {
@@ -3056,46 +3295,35 @@ function paintAi(payload) {
   if (runOllama) runOllama.textContent = ai.ollama && ai.ollama.state === "running" ? "Ollama is running" : "Run Ollama";
   const runWebui = $("ai-run-webui");
   if (runWebui) runWebui.textContent = ai.openWebui && ai.openWebui.state === "running" ? "Open WebUI is running" : "Run Open WebUI";
-  const suggestions = $("ai-suggestions");
-  if (suggestions && Array.isArray(ai.suggestions)) {
-    suggestions.replaceChildren();
-    for (const item of ai.suggestions) {
-      if (!item || !item.name) continue;
-      const li = document.createElement("li");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.dataset.model = item.name;
-      const title = document.createElement("span");
-      title.textContent = item.label || item.name;
-      const meta = document.createElement("small");
-      meta.textContent = `${item.name} · ${item.disk || ""}`;
-      button.append(title, meta, statusPill(item.fit === "fits" ? "Fits 12 GB" : item.fit === "tight" ? "Tight" : item.fit === "over" ? "Too large" : "CPU", item.fit || "cpu"));
-      button.addEventListener("click", () => {
-        const input = $("ai-pull-name");
-        if (input) input.value = item.name;
-        if (input) input.focus();
-      });
-      li.append(button);
-      suggestions.append(li);
-    }
+  paintAiCatalog(ai);
+  const library = $("ai-library-link");
+  if (library) {
+    const href = (ai.libraryUrl || "https://ollama.com/library").trim();
+    library.setAttribute("href", href);
+  }
+  maybeToast(payload);
+  if (payload.ok !== false) {
+    const status = $("ai-status");
+    if (status && payload.notice) status.textContent = "";
+    const error = $("ai-error");
+    if (error && !ai.modelsError) error.textContent = "";
   }
   const pull = payload.aiPull;
-  const progress = $("ai-pull-progress");
-  if (progress) {
-    if (pull && pull.status) {
-      progress.hidden = false;
-      const pct = Number.isInteger(pull.percent) ? ` ${pull.percent}%` : "";
-      progress.textContent = `${pull.name || ""}: ${pull.status}${pct}`;
-    } else if (payload.ok !== false) {
-      progress.hidden = true;
-    }
-  }
+  if (pull && pull.status) setProgress("ai-pull-bar", "ai-pull-bar-fill", "ai-pull-progress", pull);
+  else if (payload.ok !== false) setProgress("ai-pull-bar", "ai-pull-bar-fill", "ai-pull-progress", null);
   const models = Array.isArray(ai.models) ? ai.models : [];
   const empty = $("ai-models-empty");
   const list = $("ai-model-list");
-  if (empty) empty.hidden = models.length > 0 || (ai.ollama && ai.ollama.state !== "running");
-  if (empty && ai.ollama && ai.ollama.state !== "running") empty.textContent = "Start Ollama to list and pull models.";
-  else if (empty) empty.textContent = "No models yet. Pull one from the list above.";
+  if (empty) {
+    const ollamaState = ai.ollama && ai.ollama.state;
+    const waiting = ollamaState !== "running";
+    empty.hidden = models.length > 0 && !waiting && !ai.modelsError;
+    empty.classList.remove("is-loading");
+    empty.classList.toggle("is-error", Boolean(ai.modelsError) && waiting === false);
+    if (waiting) empty.textContent = "Ollama is not running yet, so installed models cannot be listed. Press Run Ollama above. It will also appear in Containers and Images.";
+    else if (ai.modelsError) empty.textContent = ai.modelsError;
+    else empty.textContent = "No models installed yet. Press Pull on a model in the library, or type a name from ollama.com/library.";
+  }
   if (list) {
     list.replaceChildren();
     for (const item of models) {
@@ -3146,7 +3374,17 @@ function renderContainers(payload) {
   if (Array.isArray(payload.items)) lastContainerItems = payload.items;
   paintNetworks(payload);
   launchBusy(false);
-  error.textContent = payload.error || "";
+  maybeToast(payload);
+  if (payload.imagePull && payload.imagePull.status) {
+    setProgress("image-pull-bar", "image-pull-bar-fill", "image-pull-progress", payload.imagePull);
+  } else if (payload.ok === true || !payload.imagePull) {
+    setProgress("image-pull-bar", "image-pull-bar-fill", "image-pull-progress", null);
+  }
+  error.textContent = payload.ok === false ? (payload.error || "") : "";
+  if (payload.notice && payload.ok !== false) {
+    const status = $("container-status");
+    if (status) status.textContent = payload.notice;
+  }
   if (typeof payload.wireguard === "boolean") wireguardModule = payload.wireguard;
   const loadModule = $("load-wireguard");
   if (loadModule) delete loadModule.dataset.busy;
@@ -3179,17 +3417,18 @@ function renderContainers(payload) {
     button.disabled = false;
   });
   if (!Array.isArray(payload.items)) return;
+  const items = mergeManagedContainers(payload.items, payload.ai);
   list.replaceChildren();
-  if (!payload.items.length) {
+  if (!items.length) {
     const empty = document.createElement("li");
     const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = "No containers yet.";
+    note.className = "empty-state";
+    note.textContent = "No containers yet. Open Images to run Ollama, Open WebUI, or another image.";
     empty.append(note);
     list.append(empty);
     return;
   }
-  for (const item of payload.items) {
+  for (const item of items) {
     const li = document.createElement("li");
     const wrap = document.createElement("div");
     wrap.className = "container-row";
@@ -3200,7 +3439,9 @@ function renderContainers(payload) {
     const pills = document.createElement("div");
     pills.className = "status-pills";
     const running = item.state === "running";
-    pills.append(statusPill(running ? "Running" : (item.state || "unknown"), running ? "running" : "stopped"));
+    const missing = item.placeholder || item.state === "missing";
+    if (item.placeholder) li.classList.add("is-placeholder");
+    pills.append(statusPill(running ? "Running" : (missing ? "Not created" : (item.state || "unknown")), running ? "running" : (missing ? "missing" : "stopped")));
     const runtimeLabel = item.runtime === "engine" ? "Engine" : "Desktop";
     pills.append(statusPill(runtimeLabel, item.runtime === "engine" ? "engine" : "desktop"));
     if (item.name === "jellyfin" && running) pills.append(statusPill("Tailnet", "tailnet"));
@@ -3241,7 +3482,7 @@ function renderContainers(payload) {
         openTailscaleShares();
       });
     }
-    if ((item.name === "hog-ollama" || item.name === "hog-open-webui") && running && !item.reason) {
+    if (item.name === "hog-ollama" || item.name === "hog-open-webui") {
       line.classList.add("is-share");
       line.tabIndex = 0;
       line.setAttribute("role", "button");
@@ -3272,14 +3513,18 @@ function renderContainers(payload) {
       kebab.setAttribute("aria-expanded", willOpen ? "true" : "false");
     });
     const actions = [["Command", "command"]];
-    const other = item.runtime === "engine" ? "desktop" : "engine";
-    const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
-    if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
-    if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
-    actions.push(...(running
-      ? [["Stop", "stop"], ["Logs", "logs"]]
-      : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
-    if (running) actions.push(["Recreate", "recreate-prompt"]);
+    if (missing && (item.name === "hog-ollama" || item.name === "hog-open-webui")) {
+      actions.unshift(["Run", "ai-run"]);
+    } else {
+      const other = item.runtime === "engine" ? "desktop" : "engine";
+      const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
+      if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
+      if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
+      actions.push(...(running
+        ? [["Stop", "stop"], ["Logs", "logs"]]
+        : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
+      if (running) actions.push(["Recreate", "recreate-prompt"]);
+    }
     for (const [label, action] of actions) {
       const button = document.createElement("button");
       button.type = "button";
@@ -3289,6 +3534,13 @@ function renderContainers(payload) {
       button.addEventListener("click", (event) => {
         event.stopPropagation();
         closeKebabs();
+        if (action === "ai-run") {
+          const status = $("container-status");
+          if (status) status.textContent = item.name === "hog-open-webui" ? "Starting Open WebUI…" : "Starting Ollama…";
+          showSettingsPage("ai");
+          runAiPreset(item.name);
+          return;
+        }
         if (action === "command") {
           const image = item.image && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,200}$/.test(item.image) && !item.image.includes("..")
             ? item.image
@@ -5222,22 +5474,17 @@ function bind() {
   if (pullForm) {
     pullForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      const name = ($("ai-pull-name")?.value || "").trim().toLowerCase();
-      if (!/^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/.test(name) || name.length > 80 || name.includes("..")) {
-        const error = $("ai-error");
-        if (error) error.textContent = "Use a model name like llama3.1:8b.";
-        return;
-      }
-      const warning = $("ai-disk-warning");
-      if (warning && !warning.hidden && !window.confirm(`${warning.textContent} Pull ${name} anyway?`)) return;
-      const progress = $("ai-pull-progress");
-      if (progress) {
-        progress.hidden = false;
-        progress.textContent = `Pulling ${name}…`;
-      }
-      desktopCommand(`containers:ai-pull:${name}`);
+      startAiPull(($("ai-pull-name")?.value || "").trim().toLowerCase());
     });
   }
+  const libraryLink = $("ai-library-link");
+  if (libraryLink) {
+    libraryLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      openOllamaLibrary(libraryLink.getAttribute("href") || "https://ollama.com/library");
+    });
+  }
+  restoreAccordions();
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.addEventListener("click", () => {
       const kind = button.dataset.launch;

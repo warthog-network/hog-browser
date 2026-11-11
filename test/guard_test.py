@@ -395,10 +395,10 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual(created["notice"], "Recreated ubuntu.")
             self.assertEqual(calls[0][0], "stop")
             self.assertEqual(calls[1][:2], ["rm", "ubuntu"])
-            self.assertEqual(calls[2][0], "run")
-            self.assertIn("51820:51820/udp", calls[2])
-            self.assertIn("--cap-add=SETUID", calls[2])
-            self.assertNotIn("--cap-add=NET_ADMIN", calls[2])
+            run_args = next(item for item in calls if item and item[0] == "run")
+            self.assertIn("51820:51820/udp", run_args)
+            self.assertIn("--cap-add=SETUID", run_args)
+            self.assertNotIn("--cap-add=NET_ADMIN", run_args)
             self.assertEqual(json.loads(Path(folder, "containers.json").read_text())["names"], ["ubuntu"])
 
     def test_wireguard_image_keeps_tunnel_port_and_image_command(self):
@@ -1124,7 +1124,7 @@ class PolicyTest(unittest.TestCase):
             self.assertTrue(result["ok"], result.get("error"))
             self.assertNotIn("-v", result["command"])
             self.assertIn("/media", result["notice"])
-            run_args = calls[0]
+            run_args = next(item for item in calls if item and item[0] == "run")
             self.assertLess(run_args.index("-v"), run_args.index("jellyfin/jellyfin:latest"))
             self.assertTrue(run_args[run_args.index("-v") + 1].endswith(":/media:ro"))
             self.assertNotIn("rm", [item[0] for item in calls])
@@ -1543,7 +1543,7 @@ class JellyfinGpuTest(unittest.TestCase):
             self.assertTrue(result["ok"], result.get("error"))
             self.assertNotIn("-v", result["command"])
             self.assertNotIn("--gpus", result["command"])
-            run_args = calls[0]
+            run_args = next(item for item in calls if item and item[0] == "run")
             volumes = [run_args[i + 1] for i, token in enumerate(run_args) if token == "-v"]
             self.assertTrue(volumes[0].endswith(":/media:ro"))
             self.assertIn(f"{JELLYFIN_CONFIG_VOLUME}:/config", volumes)
@@ -2321,10 +2321,160 @@ if __name__ == "__main__":
 
 
 class AiToolboxTest(unittest.TestCase):
+    def test_model_catalog_lists_mid_size_and_large_groups(self):
+        from guard import (
+            AI_MODEL_GROUPS,
+            AI_MODEL_SUGGESTIONS,
+            OLLAMA_LIBRARY_URL,
+            _model_is_installed,
+            allowed_ollama_library_url,
+            valid_model_name,
+        )
+        names = [item["name"] for item in AI_MODEL_SUGGESTIONS]
+        expected = (
+            "qwen2.5:14b",
+            "qwen2.5-coder:14b",
+            "deepseek-r1:14b",
+            "phi4:14b",
+            "gemma2:9b",
+            "llama3.1:8b",
+            "qwen2.5:7b",
+            "mistral",
+            "gemma2:27b",
+            "qwen2.5:32b",
+            "deepseek-r1:32b",
+        )
+        for name in expected:
+            self.assertIn(name, names)
+            self.assertTrue(valid_model_name(name))
+        mid = [item["name"] for item in AI_MODEL_SUGGESTIONS if item["group"] == "mid"]
+        self.assertEqual(mid, ["qwen2.5:14b", "qwen2.5-coder:14b", "deepseek-r1:14b", "phi4:14b"])
+        large = [item["name"] for item in AI_MODEL_SUGGESTIONS if item["group"] == "large"]
+        self.assertEqual(large, ["gemma2:27b", "qwen2.5:32b", "deepseek-r1:32b"])
+        self.assertTrue(all(item.get("blurb") and item.get("disk") and "vramMb" in item for item in AI_MODEL_SUGGESTIONS))
+        self.assertEqual([item[0] for item in AI_MODEL_GROUPS], ["mid", "small", "large"])
+        self.assertEqual(OLLAMA_LIBRARY_URL, "https://ollama.com/library")
+        self.assertTrue(_model_is_installed("mistral", {"mistral:latest"}))
+        self.assertTrue(_model_is_installed("mistral", {"mistral"}))
+        self.assertTrue(_model_is_installed("llama3.1:8b", {"llama3.1:8b"}))
+        self.assertFalse(_model_is_installed("qwen2.5:14b", {"qwen2.5:7b"}))
+        self.assertFalse(_model_is_installed("phi4:14b", {"phi4"}))
+        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library"), "https://ollama.com/library")
+        self.assertEqual(
+            allowed_ollama_library_url("https://www.ollama.com/library/llama3.1"),
+            "https://www.ollama.com/library/llama3.1",
+        )
+        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library?q=1"), "")
+        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library#top"), "")
+        self.assertEqual(allowed_ollama_library_url("https://ollama.com/blog"), "")
+        self.assertEqual(allowed_ollama_library_url("http://ollama.com/library"), "")
+        self.assertEqual(allowed_ollama_library_url("https://evil.example/library"), "")
+        self.assertEqual(allowed_ollama_library_url("https://user@ollama.com/library"), "")
+
+    def test_ai_status_marks_installed_suggestions_and_exposes_library(self):
+        from guard import Guard
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.ai_gpu_fields = lambda: {
+                "ready": True,
+                "name": "NVIDIA GeForce RTX 3060",
+                "memoryMb": 12288,
+                "notice": "ready",
+            }
+            guard.ai_disk_fields = lambda: {"warning": "", "freeBytes": 100 * 1024 * 1024 * 1024}
+            guard.list_ai_models = lambda: (
+                [{"name": "qwen2.5:14b", "sizeLabel": "9.0 GB", "fit": "fits"}],
+                "",
+            )
+            guard.ollama_host_port = lambda: 11434
+            guard.openwebui_host_port = lambda: 3000
+            guard.tailscale_ipv4 = lambda: ""
+            payload = guard.ai_status_fields(
+                models=True,
+                items=[{"name": "hog-ollama", "state": "running", "runtime": "engine", "reason": ""}],
+            )
+            ai = payload["ai"]
+            self.assertEqual(ai["libraryUrl"], "https://ollama.com/library")
+            self.assertEqual([row["id"] for row in ai["groups"]], ["mid", "small", "large"])
+            by_name = {row["name"]: row for row in ai["suggestions"]}
+            self.assertTrue(by_name["qwen2.5:14b"]["installed"])
+            self.assertEqual(by_name["qwen2.5:14b"]["fit"], "fits")
+            self.assertEqual(by_name["qwen2.5:14b"]["blurb"], "Best all-rounder")
+            self.assertFalse(by_name["qwen2.5:32b"]["installed"])
+            self.assertEqual(by_name["qwen2.5:32b"]["fit"], "over")
+            self.assertEqual(by_name["qwen2.5:32b"]["group"], "large")
+
+    def test_apply_command_pulls_missing_image_before_run(self):
+        from guard import AI_NETWORK, OLLAMA_IMAGE, OLLAMA_NAME, RUNTIME_ENGINE
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+            pulled = []
+            state = {"up": False}
+            events = []
+
+            def inspect(name):
+                if name != OLLAMA_NAME or not state["up"]:
+                    return None, "missing"
+                return {
+                    "Name": f"/{OLLAMA_NAME}",
+                    "State": {"Status": "running", "Running": True},
+                    "Config": {"Image": OLLAMA_IMAGE},
+                    "HostConfig": {
+                        "Privileged": False,
+                        "NetworkMode": AI_NETWORK,
+                        "PidMode": "",
+                        "IpcMode": "private",
+                        "CapAdd": None,
+                        "Binds": None,
+                        "Devices": None,
+                    },
+                    "Mounts": [
+                        {"Name": "hog-ollama", "Source": "/var/lib/docker/volumes/hog-ollama/_data", "Destination": "/root/.ollama", "Type": "volume"},
+                    ],
+                }, ""
+
+            def run(args, timeout=8):
+                calls.append(list(args))
+                if args and args[0] == "run":
+                    state["up"] = True
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.inspect = inspect
+            guard.run = run
+            guard.run_on = lambda args, timeout=8, sock=None: run(args, timeout)
+            guard.container_run = lambda name, args, timeout=8: run(args, timeout)
+            guard.items = lambda: []
+            guard.docker_running = lambda: True
+            guard.ensure_ai_network = lambda sock=None: ""
+            guard.port_open = lambda port: False
+            guard.ai_gpu_fields = lambda: {"ready": True, "name": "NVIDIA GeForce RTX 3060", "memoryMb": 12288, "notice": "ready"}
+            guard.container_runtime = lambda name="": RUNTIME_ENGINE
+            guard.container_sock = lambda name="": None
+            guard.prepare_tailscale_firewall = lambda name, info: ""
+            guard._attach_gpu = lambda payload: payload
+            guard.image_exists = lambda image, sock=None: False
+            def pull(image, sock=None, progress=None):
+                pulled.append(image)
+                if progress:
+                    progress({"ok": True, "imagePull": {"image": image, "status": "Downloading image…", "percent": None}})
+                return ""
+            guard.pull_image = pull
+            line = canonical_command(OLLAMA_NAME, OLLAMA_IMAGE, (("127.0.0.1", "11434", "11434", "tcp"),), False, (), (), (), (), AI_NETWORK)
+            result = guard.handle("run", line, "engine", progress=events.append)
+            self.assertTrue(result["ok"], result.get("error"))
+            self.assertEqual(pulled, [OLLAMA_IMAGE])
+            self.assertTrue(any(item and item.get("imagePull") for item in events))
+            self.assertTrue(any(item and item[0] == "run" for item in calls))
+            self.assertFalse(any(item and item[0] == "pull" for item in calls))
+
     def test_model_name_validation(self):
         from guard import valid_model_name
         self.assertTrue(valid_model_name("llama3.1:8b"))
         self.assertTrue(valid_model_name("qwen2.5:14b"))
+        self.assertTrue(valid_model_name("qwen2.5-coder:14b"))
+        self.assertTrue(valid_model_name("deepseek-r1:32b"))
+        self.assertTrue(valid_model_name("phi4:14b"))
         self.assertTrue(valid_model_name("mistral"))
         self.assertTrue(valid_model_name("gemma2:9b"))
         self.assertTrue(valid_model_name("library/llama3.1:8b-instruct-q4_k_m"))

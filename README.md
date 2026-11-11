@@ -69,12 +69,12 @@ On Linux, new Tailscale installs default to Docker Engine when it is available. 
 
 **Settings → AI** (also on the home Toolbox) runs a local chat stack on Docker Engine:
 
-1. Press **Run Ollama**. Hog creates the `hog-ai` network if needed, starts `hog-ollama` with the `hog-ollama` volume at `/root/.ollama`, and uses `--gpus all` when the NVIDIA toolkit is ready. If no GPU is available, Ollama runs on the CPU and the page says so. Its API is published only on `127.0.0.1`, never on `0.0.0.0`.
+1. Press **Run Ollama**. Hog creates the `hog-ai` network if needed, starts `hog-ollama` with the `hog-ollama` volume at `/root/.ollama`, and uses `--gpus all` when the NVIDIA toolkit is ready. If no GPU is available, Ollama runs on the CPU and the page says so. Its API is published only on `127.0.0.1`, never on `0.0.0.0`. Ollama and Open WebUI are listed at the top of **Settings → Containers → Images** and as placeholders in the Containers list until you create them. They are the apps; the model library is separate.
 2. Press **Run Open WebUI**. That starts `hog-open-webui` on the same network with `OLLAMA_BASE_URL=http://hog-ollama:11434`, a `hog-open-webui` volume, and a port bound only to `127.0.0.1`. If Tailscale is signed in, Hog serves that port to your tailnet (HTTPS, no funnel).
-3. Pull a model from the short 12 GB list (for example `llama3.1:8b`) or type another validated name, then chat in Open WebUI on this computer or at the Tailscale address on your phone.
+3. Pull a model from the library. The 9–10 GB group (`qwen2.5:14b`, `qwen2.5-coder:14b`, `deepseek-r1:14b`, `phi4:14b`) is a good fit for 12 GB of video memory. Smaller options include `gemma2:9b`, `llama3.1:8b`, `qwen2.5:7b`, and `mistral`. A collapsed **Larger (partly CPU, slow)** group lists `gemma2:27b`, `qwen2.5:32b`, and `deepseek-r1:32b`. Each row shows a short description, approximate download size, a VRAM fit badge, whether it is already installed, and a one-click **Pull**. You can also type another validated name, or open [ollama.com/library](https://ollama.com/library) in a Hog tab.
 4. The first account you create in Open WebUI becomes the admin.
 
-Models stay in the Ollama volume. Hog estimates whether a model fits the detected GPU memory and warns when disk space is low before a pull.
+Models stay in the Ollama volume. Hog estimates whether a model fits the detected GPU memory and warns when disk space is low before a pull. Progress bars cover model pulls and image downloads, and success or failure is shown as a toast.
 
 ## Jellyfin GPU acceleration (NVIDIA)
 

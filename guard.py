@@ -92,13 +92,39 @@ MODEL_NAME_RE = re.compile(
 )
 MODEL_NAME_MAX = 80
 AI_DISK_WARN_BYTES = 15 * 1024 * 1024 * 1024
-AI_MODEL_SUGGESTIONS = (
-    {"name": "llama3.1:8b", "label": "Llama 3.1 8B", "disk": "4.9 GB", "vramMb": 6500},
-    {"name": "qwen2.5:7b", "label": "Qwen 2.5 7B", "disk": "4.7 GB", "vramMb": 6200},
-    {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B", "disk": "9.0 GB", "vramMb": 11000},
-    {"name": "mistral", "label": "Mistral 7B", "disk": "4.1 GB", "vramMb": 5800},
-    {"name": "gemma2:9b", "label": "Gemma 2 9B", "disk": "5.4 GB", "vramMb": 7500},
+AI_MODEL_GROUPS = (
+    ("mid", "Around 9–10 GB", "A good fit for 12 GB of video memory."),
+    ("small", "Smaller and faster", "Lighter models that leave more room for context."),
+    ("large", "Larger (partly CPU, slow)", "These usually spill into system RAM on a 12 GB card and run slowly."),
 )
+AI_MODEL_SUGGESTIONS = (
+    {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B", "blurb": "Best all-rounder", "disk": "9.0 GB", "vramMb": 11000, "group": "mid", "category": "General"},
+    {"name": "qwen2.5-coder:14b", "label": "Qwen 2.5 Coder 14B", "blurb": "Coding", "disk": "9.0 GB", "vramMb": 11000, "group": "mid", "category": "Coding"},
+    {"name": "deepseek-r1:14b", "label": "DeepSeek R1 14B", "blurb": "Step-by-step reasoning, slower", "disk": "9.0 GB", "vramMb": 11000, "group": "mid", "category": "Reasoning"},
+    {"name": "phi4:14b", "label": "Phi-4 14B", "blurb": "Reasoning", "disk": "9.1 GB", "vramMb": 11000, "group": "mid", "category": "Reasoning"},
+    {"name": "gemma2:9b", "label": "Gemma 2 9B", "blurb": "Fast middle option", "disk": "5.4 GB", "vramMb": 7500, "group": "small", "category": "General"},
+    {"name": "llama3.1:8b", "label": "Llama 3.1 8B", "blurb": "Fast and capable", "disk": "4.9 GB", "vramMb": 6500, "group": "small", "category": "General"},
+    {"name": "qwen2.5:7b", "label": "Qwen 2.5 7B", "blurb": "Small and quick", "disk": "4.7 GB", "vramMb": 6200, "group": "small", "category": "General"},
+    {"name": "mistral", "label": "Mistral 7B", "blurb": "Small and quick", "disk": "4.1 GB", "vramMb": 5800, "group": "small", "category": "General"},
+    {"name": "gemma2:27b", "label": "Gemma 2 27B", "blurb": "Higher quality, mostly off the GPU", "disk": "16 GB", "vramMb": 20000, "group": "large", "category": "General"},
+    {"name": "qwen2.5:32b", "label": "Qwen 2.5 32B", "blurb": "Higher quality, mostly off the GPU", "disk": "20 GB", "vramMb": 24000, "group": "large", "category": "General"},
+    {"name": "deepseek-r1:32b", "label": "DeepSeek R1 32B", "blurb": "Heavy reasoning, slow on 12 GB", "disk": "20 GB", "vramMb": 24000, "group": "large", "category": "Reasoning"},
+)
+OLLAMA_LIBRARY_URL = "https://ollama.com/library"
+OLLAMA_LIBRARY_HOSTS = frozenset({"ollama.com", "www.ollama.com"})
+
+
+def _model_is_installed(name, installed_names):
+    """True when Ollama already has this suggested tag (or a default latest)."""
+    if name in installed_names:
+        return True
+    if ":" not in name:
+        return any(existing == name or existing.startswith(f"{name}:") for existing in installed_names)
+    if name.endswith(":latest"):
+        bare = name.rsplit(":", 1)[0]
+        return bare in installed_names
+    return False
+
 
 ENGINE_DOCKER_SOCK = Path("/var/run/docker.sock")
 DESKTOP_DOCKER_SOCK = Path.home() / ".docker" / "desktop" / "docker.sock"
@@ -810,6 +836,23 @@ def allowed_browser_open_url(url):
     if parsed.username or parsed.password:
         return ""
     if host in ("metadata.google.internal", "169.254.169.254"):
+        return ""
+    return text
+
+
+def allowed_ollama_library_url(url):
+    """Return an https://ollama.com/library URL Hog may open, else empty."""
+    text = allowed_browser_open_url(url)
+    if not text:
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    host = (parsed.hostname or "").strip("[]").lower()
+    if parsed.scheme != "https" or host not in OLLAMA_LIBRARY_HOSTS:
+        return ""
+    path = parsed.path or "/"
+    if path != "/library" and not path.startswith("/library/"):
+        return ""
+    if parsed.params or parsed.query or parsed.fragment or parsed.port:
         return ""
     return text
 
@@ -2691,6 +2734,11 @@ class Guard:
                 payload["docker"] = True
             else:
                 payload["docker"] = self.docker_running()
+        if "items" in payload and "ai" not in payload:
+            try:
+                payload.update(self.ai_status_fields(models=False, items=payload.get("items")))
+            except Exception:
+                pass
         return self._attach_gpu(payload)
 
     def inspect(self, name):
@@ -3689,6 +3737,9 @@ class Guard:
                 if problem:
                     return None, problem
         sock = self.runtime_sock(side)
+        problem = self.ensure_image(image, sock=sock)
+        if problem:
+            return None, problem
         run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus, memory=memory)
         if tailscale and network == "host":
             if "--cap-add=NET_ADMIN" in run_args and "--cap-add=NET_RAW" not in run_args:
@@ -4488,6 +4539,10 @@ class Guard:
         except (RuntimeError, OSError):
             ts_ip = ""
         phone = self.openwebui_phone_url(ts_ip, webui_port) if webui.get("state") == "running" and ts_ip and webui_port else ""
+        installed, model_error = ([], "")
+        if models and ollama.get("state") == "running":
+            installed, model_error = self.list_ai_models()
+        installed_names = {str(row.get("name") or "") for row in installed}
         suggestions = []
         for item in AI_MODEL_SUGGESTIONS:
             vram = int(item["vramMb"])
@@ -4495,10 +4550,7 @@ class Guard:
             if gpu.get("memoryMb"):
                 memory = int(gpu["memoryMb"])
                 fit = "fits" if vram <= memory else "tight" if vram <= memory + 1024 else "over"
-            suggestions.append({**item, "fit": fit})
-        installed, model_error = ([], "")
-        if models and ollama.get("state") == "running":
-            installed, model_error = self.list_ai_models()
+            suggestions.append({**item, "fit": fit, "installed": _model_is_installed(item["name"], installed_names)})
         return {
             "ai": {
                 "network": AI_NETWORK,
@@ -4527,6 +4579,8 @@ class Guard:
                 "models": installed,
                 "modelsError": model_error,
                 "suggestions": suggestions,
+                "groups": [{"id": item[0], "title": item[1], "blurb": item[2]} for item in AI_MODEL_GROUPS],
+                "libraryUrl": OLLAMA_LIBRARY_URL,
             }
         }
 
@@ -4630,7 +4684,7 @@ class Guard:
         payload["notice"] = f"Deleted {model}."
         return payload
 
-    def handle(self, action, name="", image=""):
+    def handle(self, action, name="", image="", progress=None):
         if action == "update-status":
             return self.update_status()
         if action == "update-check":
@@ -4704,11 +4758,11 @@ class Guard:
         if action == "ai-models":
             return self._mark_docker(self.ai_status(models=True))
         if action == "ai-pull":
-            return self._mark_docker(self.pull_ai_model(name))
+            return self._mark_docker(self.pull_ai_model(name, progress=progress))
         if action == "ai-delete":
             return self._mark_docker(self.delete_ai_model(name))
         if action in {"run", "recreate"}:
-            return self._mark_docker(self.apply_command(name, replace=action == "recreate", runtime=image))
+            return self._mark_docker(self.apply_command(name, replace=action == "recreate", runtime=image, progress=progress))
         return self._mark_docker(self._act(action, name, image))
 
     def _act(self, action, name="", image=""):
@@ -4802,7 +4856,61 @@ class Guard:
         self.remember(name)
         return {"ok": True, "error": "", "items": self.items()}
 
-    def apply_command(self, cmdline, replace=False, runtime=""):
+    def _docker_runner(self, sock=None):
+        if sock is not None:
+            return lambda args, timeout=10: self.run_on(args, timeout=timeout, sock=sock)
+        return lambda args, timeout=10: self.run(args, timeout=timeout)
+
+    def image_exists(self, image, sock=None):
+        if not valid_image(image):
+            return False
+        try:
+            result = self._docker_runner(sock)(["image", "inspect", "--format", "{{.Id}}", image], timeout=20)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    def pull_image(self, image, sock=None, progress=None):
+        if not valid_image(image):
+            return "That image name is not allowed."
+        if callable(progress):
+            try:
+                progress({
+                    "ok": True,
+                    "error": "",
+                    "notice": f"Downloading {image}…",
+                    "imagePull": {"image": image, "status": "Downloading image…", "percent": None},
+                })
+            except Exception:
+                pass
+        try:
+            result = self._docker_runner(sock)(["pull", image], timeout=600)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            return "Docker did not finish downloading that image."
+        if result.returncode != 0:
+            blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+            if docker_offline(blob):
+                return "Docker is not running."
+            detail = [line.strip() for line in blob.splitlines() if line.strip()]
+            return detail[-1][:180] if detail else "Docker did not download that image."
+        if callable(progress):
+            try:
+                progress({
+                    "ok": True,
+                    "error": "",
+                    "notice": f"Downloaded {image}.",
+                    "imagePull": {"image": image, "status": "Downloaded", "percent": 100},
+                })
+            except Exception:
+                pass
+        return ""
+
+    def ensure_image(self, image, sock=None, progress=None):
+        if self.image_exists(image, sock=sock):
+            return ""
+        return self.pull_image(image, sock=sock, progress=progress)
+
+    def apply_command(self, cmdline, replace=False, runtime="", progress=None):
         try:
             name, image, ports, vpn, command, env, sysctls, _mounts, network = parse_run(cmdline)
         except CommandError as exc:
@@ -4891,6 +4999,9 @@ class Guard:
                 problem = self.ensure_tailscale_network(sock=self.container_sock(name))
                 if problem:
                     return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
+        problem = self.ensure_image(image, sock=self.container_sock(name), progress=progress)
+        if problem:
+            return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
         run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus, memory=memory)
         if ("tailscale" in image.lower() or name == "tailscale") and network == "host":
             if "--cap-add=NET_ADMIN" in run_args and "--cap-add=NET_RAW" not in run_args:
