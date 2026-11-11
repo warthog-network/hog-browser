@@ -2969,6 +2969,24 @@ function openHogRelease(url) {
   if (typeof openUrl === "function") openUrl(allowed);
 }
 
+
+function openVscodeDownload(url) {
+  let allowed = "";
+  try {
+    const parsed = new URL(String(url || "https://code.visualstudio.com/"));
+    if (parsed.protocol !== "https:") return;
+    if (parsed.hostname !== "code.visualstudio.com" && parsed.hostname !== "www.code.visualstudio.com") return;
+    if (parsed.pathname && parsed.pathname !== "/") return;
+    if (parsed.search || parsed.hash || parsed.port) return;
+    if (parsed.username || parsed.password) return;
+    allowed = `https://${parsed.hostname}/`;
+  } catch {
+    return;
+  }
+  if (typeof createTab === "function") createTab();
+  if (typeof openUrl === "function") openUrl(allowed);
+}
+
 function openOllamaLibrary(url) {
   let allowed = "";
   try {
@@ -2994,6 +3012,7 @@ const ACCORDION_DEFAULTS = {
   "network-attach-wrap": false,
   "exit-node-guide": false,
   "ai-group-large": false,
+  "ai-editor-advanced": false,
 };
 
 function accordionOpen(id, fallback) {
@@ -3240,6 +3259,55 @@ function runAiPreset(kind) {
   sendLaunch(false);
 }
 
+
+function paintAiEditor(ai) {
+  const editor = (ai && ai.editor) || {};
+  const host = $("ai-editor-pills");
+  if (host) {
+    host.replaceChildren();
+    host.append(statusPill(editor.found ? "Editor found" : "Editor missing", editor.found ? "running" : "stopped"));
+    host.append(statusPill(editor.continueInstalled ? "Continue installed" : "Continue not installed", editor.continueInstalled ? "running" : "stopped"));
+    host.append(statusPill(editor.ollamaRunning ? "Ollama running" : "Ollama not running", editor.ollamaRunning ? "running" : "stopped"));
+  }
+  const missing = Array.isArray(editor.missingModels) ? editor.missingModels.filter(Boolean) : [];
+  const note = $("ai-editor-note");
+  if (note) {
+    let text = "";
+    if (editor.found && editor.label) text = editor.label;
+    if (editor.modelsKnown && missing.length) {
+      const list = missing.join(", ");
+      text = text ? `${text}. Missing models: ${list}.` : `Missing models: ${list}.`;
+    }
+    note.hidden = !text;
+    note.textContent = text;
+  }
+  const missingWrap = $("ai-editor-missing");
+  if (missingWrap) missingWrap.hidden = Boolean(editor.found);
+  const install = $("ai-editor-install");
+  if (install) {
+    install.hidden = !editor.found;
+    install.disabled = false;
+    install.textContent = editor.continueInstalled ? "Continue is installed" : "Install Continue";
+    if (editor.continueInstalled) install.disabled = true;
+  }
+  const reinstall = $("ai-editor-reinstall");
+  if (reinstall) reinstall.hidden = !(editor.found);
+  const connect = $("ai-editor-connect");
+  if (connect) connect.disabled = false;
+  const pull = $("ai-editor-pull");
+  if (pull) {
+    const show = Boolean(editor.modelsKnown && missing.length);
+    pull.hidden = !show;
+    pull.disabled = false;
+    if (show) pull.textContent = missing.length === 1 ? `Pull ${missing[0]}` : `Pull missing models (${missing.length})`;
+  }
+  const href = (editor.downloadUrl || "https://code.visualstudio.com/").trim();
+  ["ai-editor-get", "ai-editor-download-link"].forEach((id) => {
+    const link = $(id);
+    if (link) link.setAttribute("href", href);
+  });
+}
+
 function paintAi(payload) {
   if (!payload || !payload.ai) return;
   const ai = payload.ai;
@@ -3274,6 +3342,7 @@ function paintAi(payload) {
   const webuiExtra = [];
   if (ai.openWebui && ai.openWebui.phoneUrl) webuiExtra.push(statusPill("Tailnet", "tailnet"));
   paintService("ai-webui-pills", ai.openWebui, webuiExtra);
+  paintAiEditor(ai);
   const urlLine = $("ai-webui-url");
   const openBtn = $("ai-open-webui");
   const copyBtn = $("ai-copy-webui");
@@ -5482,6 +5551,66 @@ function bind() {
     libraryLink.addEventListener("click", (event) => {
       event.preventDefault();
       openOllamaLibrary(libraryLink.getAttribute("href") || "https://ollama.com/library");
+    });
+  }
+
+  const bindEditorDownload = (id) => {
+    const link = $(id);
+    if (!link) return;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      openVscodeDownload(link.getAttribute("href") || "https://code.visualstudio.com/");
+    });
+  };
+  bindEditorDownload("ai-editor-get");
+  bindEditorDownload("ai-editor-download-link");
+  const editorMenuBtn = $("ai-editor-menu-btn");
+  const editorMenu = $("ai-editor-menu");
+  if (editorMenuBtn && editorMenu) {
+    editorMenuBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const willOpen = editorMenu.hidden;
+      closeKebabs();
+      editorMenu.hidden = !willOpen;
+      editorMenuBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    });
+  }
+  const editorDownload = $("ai-editor-download");
+  if (editorDownload) {
+    editorDownload.addEventListener("click", () => {
+      closeKebabs();
+      openVscodeDownload(($("ai-editor-download-link")?.getAttribute("href")) || "https://code.visualstudio.com/");
+    });
+  }
+  const startEditorInstall = () => {
+    const install = $("ai-editor-install");
+    if (install) {
+      install.disabled = true;
+      install.textContent = "Installing Continue…";
+    }
+    desktopCommand("containers:ai-editor-install");
+  };
+  const editorInstall = $("ai-editor-install");
+  if (editorInstall) editorInstall.addEventListener("click", startEditorInstall);
+  const editorReinstall = $("ai-editor-reinstall");
+  if (editorReinstall) {
+    editorReinstall.addEventListener("click", () => {
+      closeKebabs();
+      startEditorInstall();
+    });
+  }
+  const editorConnect = $("ai-editor-connect");
+  if (editorConnect) {
+    editorConnect.addEventListener("click", () => {
+      editorConnect.disabled = true;
+      desktopCommand("containers:ai-editor-connect");
+    });
+  }
+  const editorPull = $("ai-editor-pull");
+  if (editorPull) {
+    editorPull.addEventListener("click", () => {
+      editorPull.disabled = true;
+      desktopCommand("containers:ai-editor-pull");
     });
   }
   restoreAccordions();

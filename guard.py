@@ -113,6 +113,30 @@ AI_MODEL_SUGGESTIONS = (
 OLLAMA_LIBRARY_URL = "https://ollama.com/library"
 OLLAMA_LIBRARY_HOSTS = frozenset({"ollama.com", "www.ollama.com"})
 
+VSCODE_DOWNLOAD_URL = "https://code.visualstudio.com/"
+VSCODE_DOWNLOAD_HOSTS = frozenset({"code.visualstudio.com", "www.code.visualstudio.com"})
+CONTINUE_EXTENSION_ID = "Continue.continue"
+CONTINUE_MARKETPLACE_URI = "vscode:extension/Continue.continue"
+CONTINUE_CONFIG_RELATIVE = Path(".continue") / "config.yaml"
+CONTINUE_CHAT_MODEL = "qwen2.5-coder:14b"
+CONTINUE_AUTOCOMPLETE_MODEL = "qwen2.5-coder:1.5b"
+CONTINUE_EMBED_MODEL = "nomic-embed-text"
+CONTINUE_MODELS = (
+    {"name": CONTINUE_CHAT_MODEL, "role": "chat", "label": "Chat and edit"},
+    {"name": CONTINUE_AUTOCOMPLETE_MODEL, "role": "autocomplete", "label": "Autocomplete"},
+    {"name": CONTINUE_EMBED_MODEL, "role": "embed", "label": "Embeddings"},
+)
+EDITOR_COMMANDS = ("code", "codium")
+EDITOR_LABELS = {
+    "code": "Visual Studio Code",
+    "codium": "VSCodium",
+}
+FLATPAK_EDITOR_IDS = {
+    "com.visualstudio.code": "Visual Studio Code",
+    "com.visualstudio.code-oss": "Code OSS",
+    "com.vscodium.codium": "VSCodium",
+}
+
 
 def _model_is_installed(name, installed_names):
     """True when Ollama already has this suggested tag (or a default latest)."""
@@ -856,6 +880,234 @@ def allowed_ollama_library_url(url):
         return ""
     return text
 
+
+
+
+def allowed_vscode_download_url(url):
+    """Return the Visual Studio Code homepage Hog may open, else empty."""
+    text = allowed_browser_open_url(url)
+    if not text:
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    host = (parsed.hostname or "").strip("[]").lower()
+    if parsed.scheme != "https" or host not in VSCODE_DOWNLOAD_HOSTS:
+        return ""
+    path = parsed.path or "/"
+    if path not in ("", "/"):
+        return ""
+    if parsed.params or parsed.query or parsed.fragment or parsed.port:
+        return ""
+    return f"https://{host}/"
+
+
+def allowed_continue_marketplace_uri(url):
+    """Return the Continue marketplace URI Hog may open, else empty."""
+    text = str(url or "").strip()
+    if text == CONTINUE_MARKETPLACE_URI:
+        return CONTINUE_MARKETPLACE_URI
+    return ""
+
+
+def continue_extension_roots(home=None):
+    base = Path(home or Path.home())
+    return (
+        base / ".vscode" / "extensions",
+        base / ".vscode-oss" / "extensions",
+        base / ".vscode-insiders" / "extensions",
+        base / ".var" / "app" / "com.visualstudio.code" / "data" / "vscode" / "extensions",
+        base / ".var" / "app" / "com.visualstudio.code-oss" / "data" / "vscode" / "extensions",
+        base / ".var" / "app" / "com.vscodium.codium" / "data" / "vscode" / "extensions",
+    )
+
+
+def continue_extension_installed(home=None):
+    prefix = CONTINUE_EXTENSION_ID.lower()
+    for root in continue_extension_roots(home):
+        try:
+            if not root.is_dir():
+                continue
+            for entry in root.iterdir():
+                name = entry.name.lower()
+                if name == prefix or name.startswith(f"{prefix}-"):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _editor_command_path(name, which=None):
+    if name not in EDITOR_COMMANDS:
+        return ""
+    finder = which or shutil.which
+    found = finder(name)
+    return str(found) if found else ""
+
+
+def _list_flatpak_editors(which=None, runner=None):
+    finder = which or shutil.which
+    flatpak = finder("flatpak")
+    if not flatpak:
+        return ()
+    run = runner or (
+        lambda args, timeout=8: subprocess.run(
+            list(args),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    )
+    try:
+        result = run([flatpak, "list", "--app", "--columns=application"], timeout=8)
+    except (OSError, subprocess.TimeoutExpired, TypeError):
+        return ()
+    if getattr(result, "returncode", 1) != 0:
+        return ()
+    found = []
+    for line in (result.stdout or "").splitlines():
+        app_id = line.strip()
+        if app_id in FLATPAK_EDITOR_IDS:
+            found.append(app_id)
+    return tuple(found)
+
+
+def detect_code_editor(home=None, which=None, runner=None):
+    """Describe a user-level VS Code, VSCodium, or Flatpak editor, if present."""
+    for name in EDITOR_COMMANDS:
+        path = _editor_command_path(name, which=which)
+        if path:
+            return {
+                "found": True,
+                "command": name,
+                "path": path,
+                "appId": "",
+                "label": EDITOR_LABELS[name],
+                "kind": name,
+            }
+    apps = _list_flatpak_editors(which=which, runner=runner)
+    if apps:
+        app_id = apps[0]
+        finder = which or shutil.which
+        flatpak = finder("flatpak")
+        return {
+            "found": True,
+            "command": "flatpak",
+            "path": str(flatpak) if flatpak else "",
+            "appId": app_id,
+            "label": f"{FLATPAK_EDITOR_IDS[app_id]} (Flatpak)",
+            "kind": "flatpak",
+        }
+    return {
+        "found": False,
+        "command": "",
+        "path": "",
+        "appId": "",
+        "label": "",
+        "kind": "",
+    }
+
+
+def continue_install_argv(editor=None, which=None, runner=None, home=None):
+    info = editor if editor is not None else detect_code_editor(home=home, which=which, runner=runner)
+    if not info or not info.get("found"):
+        return ()
+    if info.get("kind") == "flatpak":
+        path = str(info.get("path") or "")
+        app_id = str(info.get("appId") or "")
+        if not path or app_id not in FLATPAK_EDITOR_IDS:
+            return ()
+        return (path, "run", app_id, "--install-extension", CONTINUE_EXTENSION_ID)
+    path = str(info.get("path") or "")
+    if info.get("command") not in EDITOR_COMMANDS or not path:
+        return ()
+    return (path, "--install-extension", CONTINUE_EXTENSION_ID)
+
+
+def continue_marketplace_argv(which=None):
+    opener = (which or shutil.which)("xdg-open")
+    if not opener:
+        return ()
+    return (str(opener), CONTINUE_MARKETPLACE_URI)
+
+
+def continue_config_path(home=None):
+    return Path(home or Path.home()) / CONTINUE_CONFIG_RELATIVE
+
+
+def continue_config_yaml(api_base="http://127.0.0.1:11434"):
+    allowed = {f"http://127.0.0.1:{port}" for port in OLLAMA_HOST_PORTS}
+    if api_base not in allowed:
+        api_base = "http://127.0.0.1:11434"
+    return (
+        "name: Hog local\n"
+        "version: 0.0.1\n"
+        "schema: v1\n"
+        "\n"
+        "models:\n"
+        "  - name: Qwen2.5-Coder 14B\n"
+        "    provider: ollama\n"
+        f"    model: {CONTINUE_CHAT_MODEL}\n"
+        f"    apiBase: {api_base}\n"
+        "    roles:\n"
+        "      - chat\n"
+        "      - edit\n"
+        "      - apply\n"
+        "  - name: Qwen2.5-Coder 1.5B\n"
+        "    provider: ollama\n"
+        f"    model: {CONTINUE_AUTOCOMPLETE_MODEL}\n"
+        f"    apiBase: {api_base}\n"
+        "    roles:\n"
+        "      - autocomplete\n"
+        "  - name: Nomic Embed\n"
+        "    provider: ollama\n"
+        f"    model: {CONTINUE_EMBED_MODEL}\n"
+        f"    apiBase: {api_base}\n"
+        "    roles:\n"
+        "      - embed\n"
+    )
+
+
+def continue_backup_path(path, now=None):
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() if now is None else now))
+    candidate = path.with_name(f"config.yaml.hog-backup-{stamp}")
+    if not candidate.exists():
+        return candidate
+    suffix = 2
+    while suffix <= 99:
+        extra = path.with_name(f"config.yaml.hog-backup-{stamp}-{suffix}")
+        if not extra.exists():
+            return extra
+        suffix += 1
+    raise OSError("Could not choose a backup name for ~/.continue/config.yaml.")
+
+
+def write_continue_config_file(home=None, api_base="http://127.0.0.1:11434"):
+    """Write ~/.continue/config.yaml, backing up an existing file first."""
+    home_root = Path(home or Path.home())
+    path = continue_config_path(home_root)
+    parent = path.parent
+    try:
+        home_root = home_root.resolve()
+        parent.mkdir(mode=0o700, exist_ok=True)
+        resolved_parent = parent.resolve()
+    except OSError as exc:
+        raise OSError("Could not open ~/.continue.") from exc
+    if resolved_parent.name != ".continue" or home_root not in resolved_parent.parents:
+        raise OSError("Refusing to write outside ~/.continue.")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise OSError("Refusing to overwrite a symlink or special file.")
+    backup = None
+    if path.is_file():
+        backup = continue_backup_path(path)
+        if backup.is_symlink() or backup.exists():
+            raise OSError("Could not choose a backup name for ~/.continue/config.yaml.")
+        shutil.copy2(path, backup)
+    path.write_text(continue_config_yaml(api_base), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path, backup
 
 def shares_root():
     return Path.home() / "hog-shares"
@@ -4581,6 +4833,10 @@ class Guard:
                 "suggestions": suggestions,
                 "groups": [{"id": item[0], "title": item[1], "blurb": item[2]} for item in AI_MODEL_GROUPS],
                 "libraryUrl": OLLAMA_LIBRARY_URL,
+                "editor": self.editor_status_fields(
+                    installed_names if models else None,
+                    ollama.get("state") or "missing",
+                ),
             }
         }
 
@@ -4684,6 +4940,129 @@ class Guard:
         payload["notice"] = f"Deleted {model}."
         return payload
 
+
+    def _user_home(self):
+        return Path.home()
+
+    def _which(self, name):
+        return shutil.which(name)
+
+    def editor_status_fields(self, installed_names=None, ollama_state=""):
+        editor = detect_code_editor(home=self._user_home(), which=self._which, runner=self.run_argv)
+        known = installed_names is not None
+        names = set(installed_names or ())
+        running = ollama_state == "running"
+        models = []
+        missing = []
+        for item in CONTINUE_MODELS:
+            installed = bool(known and running and _model_is_installed(item["name"], names))
+            models.append({**item, "installed": installed})
+            if known and running and not installed:
+                missing.append(item["name"])
+        return {
+            "found": bool(editor.get("found")),
+            "command": editor.get("command") or "",
+            "appId": editor.get("appId") or "",
+            "label": editor.get("label") or "",
+            "continueInstalled": continue_extension_installed(self._user_home()),
+            "configExists": continue_config_path(self._user_home()).is_file(),
+            "configPath": "~/.continue/config.yaml",
+            "downloadUrl": VSCODE_DOWNLOAD_URL,
+            "marketplaceUrl": CONTINUE_MARKETPLACE_URI,
+            "models": models,
+            "missingModels": missing,
+            "ollamaRunning": running,
+            "modelsKnown": bool(known and running),
+        }
+
+    def install_continue_extension(self):
+        editor = detect_code_editor(home=self._user_home(), which=self._which, runner=self.run_argv)
+        if not editor.get("found"):
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = "Install Visual Studio Code first. Use the link on this card."
+            return payload
+        argv = continue_install_argv(editor)
+        if not argv or argv[-2:] != ("--install-extension", CONTINUE_EXTENSION_ID):
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = "Could not build the Continue install command."
+            return payload
+        error = ""
+        try:
+            result = self.run_argv(argv, timeout=120)
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            result = None
+            error = str(exc)[:180] or "Could not start the editor."
+        else:
+            if result.returncode != 0:
+                error = ((result.stderr or result.stdout or "The editor did not install Continue.").strip())[:180]
+            else:
+                payload = self.ai_status(models=True)
+                payload["notice"] = f"Installed Continue in {editor.get('label') or 'the editor'}."
+                return payload
+        opened = self.open_continue_marketplace()
+        payload = self.ai_status(models=True)
+        if opened:
+            payload["notice"] = "Could not install from the command line, so Hog opened the Continue extension in your editor."
+            return payload
+        payload["ok"] = False
+        payload["error"] = error or "Could not install Continue."
+        return payload
+
+    def open_continue_marketplace(self):
+        argv = continue_marketplace_argv(which=self._which)
+        if not argv or allowed_continue_marketplace_uri(argv[-1]) != CONTINUE_MARKETPLACE_URI:
+            return False
+        try:
+            result = self.run_argv(argv, timeout=8)
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+        return result.returncode == 0
+
+    def write_continue_config(self):
+        port = self.ollama_host_port() or 11434
+        if port not in OLLAMA_HOST_PORTS:
+            port = 11434
+        api_base = f"http://127.0.0.1:{port}"
+        try:
+            _path, backup = write_continue_config_file(home=self._user_home(), api_base=api_base)
+        except OSError as exc:
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = str(exc)[:180] or "Could not write ~/.continue/config.yaml."
+            return payload
+        payload = self.ai_status(models=True)
+        if backup is not None:
+            payload["notice"] = f"Wrote ~/.continue/config.yaml. Previous file saved as {backup.name}."
+        else:
+            payload["notice"] = "Wrote ~/.continue/config.yaml for local Ollama."
+        return payload
+
+    def pull_continue_models(self, progress=None):
+        status = self.ai_status(models=True)
+        editor = (status.get("ai") or {}).get("editor") or {}
+        if not editor.get("ollamaRunning"):
+            status["ok"] = False
+            status["error"] = "Start Ollama first."
+            return status
+        missing = [name for name in (editor.get("missingModels") or []) if valid_model_name(name)]
+        if not missing:
+            status["notice"] = "The Continue models are already installed."
+            return status
+        downloaded = []
+        last = status
+        for name in missing:
+            last = self.pull_ai_model(name, progress=progress)
+            if last.get("ok") is False or (last.get("aiPull") or {}).get("error"):
+                if downloaded:
+                    detail = last.get("error") or "Ollama did not finish that download."
+                    last["error"] = f"Downloaded {', '.join(downloaded)}, but failed on {name}. {detail}"
+                return last
+            downloaded.append(name)
+        last["notice"] = "Downloaded " + ", ".join(downloaded) + "."
+        return last
+
     def handle(self, action, name="", image="", progress=None):
         if action == "update-status":
             return self.update_status()
@@ -4761,6 +5140,12 @@ class Guard:
             return self._mark_docker(self.pull_ai_model(name, progress=progress))
         if action == "ai-delete":
             return self._mark_docker(self.delete_ai_model(name))
+        if action == "ai-editor-install":
+            return self._mark_docker(self.install_continue_extension())
+        if action == "ai-editor-connect":
+            return self._mark_docker(self.write_continue_config())
+        if action == "ai-editor-pull":
+            return self._mark_docker(self.pull_continue_models(progress=progress))
         if action in {"run", "recreate"}:
             return self._mark_docker(self.apply_command(name, replace=action == "recreate", runtime=image, progress=progress))
         return self._mark_docker(self._act(action, name, image))

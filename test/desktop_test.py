@@ -9,6 +9,7 @@ from guard import (
     allowed_browser_open_url,
     allowed_ollama_library_url,
     allowed_tailscale_open_url,
+    allowed_vscode_download_url,
     launch_args,
     valid_desktop_id,
 )
@@ -176,6 +177,15 @@ class BrowserOpenUrlTest(unittest.TestCase):
         app = (Path(__file__).resolve().parents[1] / "public" / "app.js").read_text(encoding="utf-8")
         self.assertIn("allowed_ollama_library_url", hog)
         self.assertIn("function openOllamaLibrary", app)
+
+    def test_allowed_vscode_download_url_is_strict(self):
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/"), "https://code.visualstudio.com/")
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/download"), "")
+        self.assertEqual(allowed_vscode_download_url("http://code.visualstudio.com/"), "")
+        hog = (Path(__file__).resolve().parents[1] / "hog").read_text(encoding="utf-8")
+        app = (Path(__file__).resolve().parents[1] / "public" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("allowed_vscode_download_url", hog)
+        self.assertIn("function openVscodeDownload", app)
 
     def test_desktop_file_registers_as_browser(self):
         script = (Path(__file__).resolve().parents[1] / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
@@ -463,6 +473,12 @@ class AiToolboxUiTest(unittest.TestCase):
         self.assertIn('id="ai-catalog"', ai)
         self.assertIn('id="ai-library-link"', ai)
         self.assertIn('href="https://ollama.com/library"', ai)
+        self.assertIn('id="ai-editor-install"', ai)
+        self.assertIn('id="ai-editor-connect"', ai)
+        self.assertIn('id="ai-editor-pull"', ai)
+        self.assertIn('id="ai-editor-pills"', ai)
+        self.assertIn('id="ai-editor-advanced"', ai)
+        self.assertIn('href="https://code.visualstudio.com/"', ai)
         self.assertIn('id="ai-pull-bar"', ai)
         self.assertIn("The first account you create becomes the admin", ai)
         self.assertIn("downloadable models, not the Ollama app itself", ai)
@@ -470,18 +486,27 @@ class AiToolboxUiTest(unittest.TestCase):
         self.assertIn("function paintAiCatalog", app)
         self.assertIn("function mergeManagedContainers", app)
         self.assertIn("function openOllamaLibrary", app)
+        self.assertIn("function openVscodeDownload", app)
+        self.assertIn("function paintAiEditor", app)
         self.assertIn("function showToast", app)
         self.assertIn("restoreAccordions", app)
         self.assertIn("containers:ai-models", app)
         self.assertIn("containers:ai-pull", app)
         self.assertIn("containers:ai-delete", app)
+        self.assertIn("containers:ai-editor-install", app)
+        self.assertIn("containers:ai-editor-connect", app)
+        self.assertIn("containers:ai-editor-pull", app)
         self.assertIn("kebab", app)
         self.assertIn("ai-models", hog)
         self.assertIn("ai-pull", hog)
+        self.assertIn("ai-editor-install", hog)
+        self.assertIn("allowed_vscode_download_url", hog)
         self.assertIn("progress=emit", hog)
         self.assertIn("Local AI", readme)
         self.assertIn("qwen2.5:14b", readme)
         self.assertIn("Larger (partly CPU, slow)", readme)
+        self.assertIn("Continue", readme)
+        self.assertIn("qwen2.5-coder:14b", readme)
         html_images = html.split('id="container-images"', 1)[1].split("id=\"container-runtime-card\"", 1)[0]
         self.assertLess(html_images.find('data-launch="hog-ollama"'), html_images.find('data-launch="ubuntu"'))
         self.assertLess(html_images.find('data-launch="hog-open-webui"'), html_images.find('data-launch="ubuntu"'))

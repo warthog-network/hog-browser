@@ -2696,3 +2696,229 @@ class AiToolboxTest(unittest.TestCase):
             self.assertEqual((problem, url), ("", ""))
             self.assertEqual(seen[0][-1], "http://127.0.0.1:3000")
             self.assertNotIn("funnel", seen[0])
+
+
+class AiEditorTest(unittest.TestCase):
+    def test_allowed_vscode_download_url_is_strict(self):
+        from guard import allowed_continue_marketplace_uri, allowed_vscode_download_url
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/"), "https://code.visualstudio.com/")
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com"), "https://code.visualstudio.com/")
+        self.assertEqual(
+            allowed_vscode_download_url("https://www.code.visualstudio.com/"),
+            "https://www.code.visualstudio.com/",
+        )
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/download"), "")
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/?q=1"), "")
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/#top"), "")
+        self.assertEqual(allowed_vscode_download_url("http://code.visualstudio.com/"), "")
+        self.assertEqual(allowed_vscode_download_url("https://evil.example/"), "")
+        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com.evil/"), "")
+        self.assertEqual(allowed_vscode_download_url("https://user@code.visualstudio.com/"), "")
+        self.assertEqual(
+            allowed_continue_marketplace_uri("vscode:extension/Continue.continue"),
+            "vscode:extension/Continue.continue",
+        )
+        self.assertEqual(allowed_continue_marketplace_uri("vscode:extension/Evil.evil"), "")
+        self.assertEqual(allowed_continue_marketplace_uri("https://marketplace.visualstudio.com/items?itemName=Continue.continue"), "")
+        self.assertEqual(allowed_continue_marketplace_uri("vscode:extension/Continue.continue;rm -rf /"), "")
+
+    def test_detects_editor_and_continue_from_home(self):
+        from guard import (
+            CONTINUE_EXTENSION_ID,
+            continue_extension_installed,
+            continue_install_argv,
+            continue_marketplace_argv,
+            detect_code_editor,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            self.assertFalse(continue_extension_installed(home))
+            ext = home / ".vscode" / "extensions" / "continue.continue-1.2.3"
+            ext.mkdir(parents=True)
+            self.assertTrue(continue_extension_installed(home))
+            oss = home / ".vscode-oss" / "extensions" / "Continue.continue-0.9.0"
+            # still true from .vscode
+            self.assertTrue(continue_extension_installed(home))
+
+            def no_bins(name):
+                return None
+
+            self.assertFalse(detect_code_editor(home=home, which=no_bins)["found"])
+
+            def which_code(name):
+                return "/usr/bin/code" if name == "code" else None
+
+            found = detect_code_editor(home=home, which=which_code)
+            self.assertEqual(found["command"], "code")
+            self.assertEqual(found["label"], "Visual Studio Code")
+            argv = continue_install_argv(found)
+            self.assertEqual(argv, ("/usr/bin/code", "--install-extension", CONTINUE_EXTENSION_ID))
+            self.assertNotIn("sudo", argv)
+            self.assertNotIn("apt", argv)
+
+            def which_codium(name):
+                return "/usr/bin/codium" if name == "codium" else None
+
+            codium = detect_code_editor(home=home, which=which_codium)
+            self.assertEqual(codium["command"], "codium")
+            self.assertEqual(
+                continue_install_argv(codium),
+                ("/usr/bin/codium", "--install-extension", CONTINUE_EXTENSION_ID),
+            )
+
+            def which_flatpak(name):
+                return "/usr/bin/flatpak" if name == "flatpak" else None
+
+            def runner(args, timeout=8):
+                self.assertEqual(list(args)[:3], ["/usr/bin/flatpak", "list", "--app"])
+                return subprocess.CompletedProcess(args, 0, "com.visualstudio.code\n", "")
+
+            flatpak = detect_code_editor(home=home, which=which_flatpak, runner=runner)
+            self.assertEqual(flatpak["command"], "flatpak")
+            self.assertEqual(flatpak["appId"], "com.visualstudio.code")
+            self.assertEqual(
+                continue_install_argv(flatpak),
+                ("/usr/bin/flatpak", "run", "com.visualstudio.code", "--install-extension", CONTINUE_EXTENSION_ID),
+            )
+            market = continue_marketplace_argv(which=lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+            self.assertEqual(market, ("/usr/bin/xdg-open", "vscode:extension/Continue.continue"))
+
+    def test_write_continue_config_backs_up_and_rejects_bad_paths(self):
+        from guard import (
+            CONTINUE_AUTOCOMPLETE_MODEL,
+            CONTINUE_CHAT_MODEL,
+            CONTINUE_EMBED_MODEL,
+            continue_config_yaml,
+            write_continue_config_file,
+        )
+        text = continue_config_yaml("http://127.0.0.1:11434")
+        self.assertIn("provider: ollama", text)
+        self.assertIn(f"model: {CONTINUE_CHAT_MODEL}", text)
+        self.assertIn(f"model: {CONTINUE_AUTOCOMPLETE_MODEL}", text)
+        self.assertIn(f"model: {CONTINUE_EMBED_MODEL}", text)
+        self.assertIn("apiBase: http://127.0.0.1:11434", text)
+        self.assertIn("- chat", text)
+        self.assertIn("- autocomplete", text)
+        self.assertIn("- embed", text)
+        self.assertNotIn("apiBase: http://127.0.0.1:9999", continue_config_yaml("http://127.0.0.1:9999"))
+        self.assertIn("apiBase: http://127.0.0.1:11434", continue_config_yaml("http://127.0.0.1:9999"))
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            path, backup = write_continue_config_file(home=home)
+            self.assertIsNone(backup)
+            self.assertEqual(path, home / ".continue" / "config.yaml")
+            self.assertEqual(path.read_text(encoding="utf-8"), text)
+            path.write_text("old: true\n", encoding="utf-8")
+            again, backup = write_continue_config_file(home=home, api_base="http://127.0.0.1:11435")
+            self.assertIsNotNone(backup)
+            self.assertTrue(backup.name.startswith("config.yaml.hog-backup-"))
+            self.assertEqual(backup.read_text(encoding="utf-8"), "old: true\n")
+            self.assertIn("apiBase: http://127.0.0.1:11435", again.read_text(encoding="utf-8"))
+            link = home / ".continue" / "sneaky.yaml"
+            target = home / "elsewhere.yaml"
+            target.write_text("nope\n", encoding="utf-8")
+            # replace config.yaml with a symlink and refuse
+            path.unlink()
+            path.symlink_to(target)
+            with self.assertRaises(OSError):
+                write_continue_config_file(home=home)
+
+    def test_editor_status_and_actions(self):
+        from guard import (
+            CONTINUE_AUTOCOMPLETE_MODEL,
+            CONTINUE_CHAT_MODEL,
+            CONTINUE_EMBED_MODEL,
+            CONTINUE_EXTENSION_ID,
+            Guard,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            guard = Guard(folder, docker="docker")
+            guard._user_home = lambda: home
+            guard._which = lambda name: None
+            guard.docker_running = lambda: False
+            guard.items = lambda: []
+            guard._offline_items = lambda: []
+            guard.container_runtime = lambda name="": ""
+            guard.list_ai_models = lambda: ([], "")
+            guard.ollama_host_port = lambda: 11434
+            guard.openwebui_host_port = lambda: 0
+            guard.tailscale_ipv4 = lambda: ""
+            guard.ai_gpu_fields = lambda: {"ready": False, "name": "", "memoryMb": 0, "notice": ""}
+            guard.ai_disk_fields = lambda: {"warning": "", "freeBytes": 100 * 1024 * 1024 * 1024}
+            fields = guard.editor_status_fields(None, "missing")
+            self.assertFalse(fields["found"])
+            self.assertFalse(fields["continueInstalled"])
+            self.assertFalse(fields["ollamaRunning"])
+            self.assertFalse(fields["modelsKnown"])
+            self.assertEqual(fields["missingModels"], [])
+            self.assertEqual(fields["downloadUrl"], "https://code.visualstudio.com/")
+
+            guard.engine_status = lambda: {"ok": True, "error": "", "items": []}
+            refused = guard.install_continue_extension()
+            self.assertIs(refused.get("ok"), False)
+            self.assertIn("Install Visual Studio Code first", refused["error"])
+
+            guard._which = lambda name: "/usr/bin/code" if name == "code" else None
+            seen = []
+
+            def run_argv(args, timeout=8, env=None):
+                seen.append(list(args))
+                return subprocess.CompletedProcess(args, 0, "installed", "")
+
+            guard.run_argv = run_argv
+            (home / ".vscode" / "extensions").mkdir(parents=True)
+            installed = guard.handle("ai-editor-install")
+            self.assertIn(["/usr/bin/code", "--install-extension", CONTINUE_EXTENSION_ID], seen)
+            self.assertIn("Installed Continue", installed.get("notice") or "")
+
+            connected = guard.handle("ai-editor-connect")
+            self.assertIn("Wrote ~/.continue/config.yaml", connected.get("notice") or "")
+            config = home / ".continue" / "config.yaml"
+            self.assertTrue(config.is_file())
+            self.assertIn(CONTINUE_CHAT_MODEL, config.read_text(encoding="utf-8"))
+            again = guard.handle("ai-editor-connect")
+            self.assertIn("Previous file saved as", again.get("notice") or "")
+            backups = list((home / ".continue").glob("config.yaml.hog-backup-*"))
+            self.assertTrue(backups)
+
+            # fallback opens the marketplace URI with a fixed argv
+            seen.clear()
+
+            def fail_then_open(args, timeout=8, env=None):
+                seen.append(list(args))
+                if args and args[0] == "/usr/bin/code":
+                    return subprocess.CompletedProcess(args, 1, "", "failed")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard._which = lambda name: "/usr/bin/code" if name == "code" else ("/usr/bin/xdg-open" if name == "xdg-open" else None)
+            guard.run_argv = fail_then_open
+            fallback = guard.install_continue_extension()
+            commands = [item for item in seen if item and item[0] != "docker"]
+            self.assertEqual(commands[0], ["/usr/bin/code", "--install-extension", CONTINUE_EXTENSION_ID])
+            self.assertEqual(commands[1], ["/usr/bin/xdg-open", "vscode:extension/Continue.continue"])
+            self.assertIn("opened the Continue extension", fallback.get("notice") or "")
+
+            # pull missing uses existing pull flow
+            pulled = []
+
+            def fake_pull(name, progress=None):
+                pulled.append(name)
+                return {"ok": True, "error": "", "notice": f"Downloaded {name}.", "ai": {"editor": {}}}
+
+            guard.pull_ai_model = fake_pull
+            guard.ai_status = lambda models=False: {
+                "ai": {
+                    "editor": {
+                        "ollamaRunning": True,
+                        "missingModels": [CONTINUE_EMBED_MODEL, CONTINUE_AUTOCOMPLETE_MODEL, CONTINUE_CHAT_MODEL],
+                    }
+                }
+            }
+            pulled_payload = guard.handle("ai-editor-pull")
+            self.assertEqual(pulled, [CONTINUE_EMBED_MODEL, CONTINUE_AUTOCOMPLETE_MODEL, CONTINUE_CHAT_MODEL])
+            self.assertIn("Downloaded", pulled_payload.get("notice") or "")
+
+            guard.ai_status = lambda models=False: {"ai": {"editor": {"ollamaRunning": False, "missingModels": [CONTINUE_CHAT_MODEL]}}}
+            blocked = guard.handle("ai-editor-pull")
+            self.assertEqual(blocked.get("error"), "Start Ollama first.")

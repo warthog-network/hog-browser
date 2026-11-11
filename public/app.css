@@ -1018,7 +1018,7 @@ button { cursor: pointer; }
   border-radius: 8px;
   padding: 8px 10px;
 }
-#ai-pull, #ai-run-ollama, #ai-run-webui, #ai-open-webui, #ai-copy-webui {
+#ai-pull, #ai-run-ollama, #ai-run-webui, #ai-open-webui, #ai-copy-webui, #ai-editor-install, #ai-editor-connect, #ai-editor-pull {
   border: 1px solid rgba(253, 185, 19, 0.55);
   background: #18181b;
   color: var(--gold);
@@ -1026,7 +1026,7 @@ button { cursor: pointer; }
   padding: 8px 14px;
   white-space: nowrap;
 }
-#ai-run-ollama.primary, #ai-run-webui.primary, #run-command.primary {
+#ai-run-ollama.primary, #ai-run-webui.primary, #ai-editor-install.primary, #run-command.primary {
   background: rgba(253, 185, 19, 0.16);
 }
 .ai-suggestions { max-height: none; }
@@ -1049,6 +1049,11 @@ button { cursor: pointer; }
   font-weight: 650;
 }
 .connect-card > .card-head + .engine-row { margin-top: 4px; }
+
+.connect-card > .card-head { position: relative; }
+.connect-card > .card-head .card-menu { position: relative; flex: none; }
+.connect-card > .card-head .kebab-menu { top: 30px; right: 0; }
+#ai-editor-install:disabled, #ai-editor-connect:disabled, #ai-editor-pull:disabled { opacity: 0.6; cursor: wait; }
 .empty-state {
   margin: 10px 0 0;
   padding: 12px 14px;

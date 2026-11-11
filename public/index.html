@@ -384,6 +384,40 @@
                 </div>
               </div>
             </section>
+
+            <section class="connect-card" aria-label="Code editor">
+              <div class="card-head">
+                <div class="card-label">
+                  <p class="eyebrow">Editor</p>
+                  <strong>Code editor</strong>
+                </div>
+                <div class="card-menu">
+                  <button type="button" class="kebab" id="ai-editor-menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Code editor actions">⋯</button>
+                  <div id="ai-editor-menu" class="kebab-menu" hidden role="menu">
+                    <button type="button" id="ai-editor-download" role="menuitem">Get Visual Studio Code</button>
+                    <button type="button" id="ai-editor-reinstall" role="menuitem" hidden>Reinstall Continue</button>
+                  </div>
+                </div>
+              </div>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <p class="note">The Continue extension in Visual Studio Code talks to local Ollama for chat, edits, and autocomplete.</p>
+                  <div id="ai-editor-pills" class="status-pills"></div>
+                  <p id="ai-editor-note" class="note" hidden></p>
+                  <p id="ai-editor-missing" class="note" hidden><a id="ai-editor-get" href="https://code.visualstudio.com/">Get Visual Studio Code</a></p>
+                </div>
+                <div class="hog-update-actions">
+                  <button type="button" id="ai-editor-install" class="primary">Install Continue</button>
+                  <button type="button" id="ai-editor-connect">Connect to Ollama</button>
+                  <button type="button" id="ai-editor-pull" hidden>Pull missing models</button>
+                </div>
+              </div>
+              <details class="settings-sub" id="ai-editor-advanced">
+                <summary>Advanced</summary>
+                <p class="note">Continue uses qwen2.5-coder:14b for chat and edits, qwen2.5-coder:1.5b for autocomplete, and nomic-embed-text for embeddings, all at http://127.0.0.1:11434. Connect to Ollama writes ~/.continue/config.yaml and keeps a backup if that file already exists.</p>
+                <p class="note"><a id="ai-editor-download-link" href="https://code.visualstudio.com/">Get Visual Studio Code</a></p>
+              </details>
+            </section>
             <section class="connect-card" aria-label="Model library">
               <div class="card-head">
                 <div class="card-label">
