@@ -201,6 +201,130 @@ class BrowserOpenUrlTest(unittest.TestCase):
 
 
 
+class OpenHandlerTest(unittest.TestCase):
+    """Exercise Hog.do_open without importing GTK, which CI does not install."""
+
+    def hog_methods(self, *names):
+        import ast
+
+        tree = ast.parse(
+            (Path(__file__).resolve().parents[1] / "hog").read_text(encoding="utf-8")
+        )
+        hog_class = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Hog"
+        )
+        namespace = {"allowed_browser_open_url": allowed_browser_open_url}
+        found = []
+        for item in hog_class.body:
+            if isinstance(item, ast.FunctionDef) and item.name in names:
+                module = ast.Module(body=[item], type_ignores=[])
+                ast.fix_missing_locations(module)
+                exec(compile(module, "hog", "exec"), namespace)
+                found.append(item.name)
+        self.assertEqual(sorted(found), sorted(names))
+        return namespace
+
+    def bind_handler(self, chrome_ready=False, pages=None):
+        import inspect
+        import types
+
+        methods = self.hog_methods("open_external_url", "flush_pending_urls", "do_open")
+        self.assertEqual(
+            list(inspect.signature(methods["do_open"]).parameters),
+            ["self", "files", "n_files", "hint"],
+        )
+
+        class Window:
+            def __init__(self):
+                self.presented = 0
+
+            def present(self):
+                self.presented += 1
+
+        class App:
+            def __init__(self):
+                self.pages = pages
+                self.chrome_ready = chrome_ready
+                self.pending_urls = []
+                self.window = Window()
+                self.ensured = 0
+                self.open_external_url = types.MethodType(methods["open_external_url"], self)
+                self.flush_pending_urls = types.MethodType(methods["flush_pending_urls"], self)
+                self.do_open = types.MethodType(methods["do_open"], self)
+
+            def ensure_window(self):
+                self.ensured += 1
+
+        return App()
+
+    def test_do_open_signature_and_launcher_pass_urls_through(self):
+        hog = (Path(__file__).resolve().parents[1] / "hog").read_text(encoding="utf-8")
+        script = (Path(__file__).resolve().parents[1] / "packaging" / "build-deb.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("flags=Gio.ApplicationFlags.HANDLES_OPEN,", hog)
+        self.assertIn("def do_open(self, files, n_files, hint):", hog)
+        self.assertNotIn("def do_open(self, files, hint):", hog)
+        self.assertIn('exec /opt/hog-browser/hog "$@"', script)
+
+    def test_do_open_queues_until_chrome_is_ready_and_raises_the_window(self):
+        class File:
+            def __init__(self, uri):
+                self._uri = uri
+
+            def get_uri(self):
+                return self._uri
+
+        class Broken:
+            def get_uri(self):
+                raise RuntimeError("no uri")
+
+        class Pages:
+            def __init__(self):
+                self.events = []
+
+            def tell(self, payload):
+                self.events.append(payload)
+
+        app = self.bind_handler()
+        files = [
+            File("https://example.com/a"),
+            File("http://example.com/b"),
+            File("javascript:alert(1)"),
+            File("file:///etc/passwd"),
+            File("https://user:pass@example.com/"),
+            Broken(),
+        ]
+        # PyGObject calls do_open(self, files, n_files, hint).
+        app.do_open(files, len(files), "")
+        self.assertEqual(app.ensured, 1)
+        self.assertEqual(app.window.presented, 1)
+        self.assertEqual(
+            app.pending_urls,
+            ["https://example.com/a", "http://example.com/b"],
+        )
+
+        pages = Pages()
+        app.pages = pages
+        app.chrome_ready = True
+        app.flush_pending_urls()
+        self.assertEqual(app.pending_urls, [])
+        self.assertEqual(
+            pages.events,
+            [
+                {"event": "popup", "url": "https://example.com/a", "isolated": False},
+                {"event": "popup", "url": "http://example.com/b", "isolated": False},
+            ],
+        )
+
+        # A later open, once chrome is ready, goes straight to a new tab.
+        app.do_open([File("https://example.com/c")], 1, "")
+        self.assertEqual(app.ensured, 2)
+        self.assertEqual(app.window.presented, 2)
+        self.assertEqual(app.pending_urls, [])
+        self.assertEqual(pages.events[-1]["url"], "https://example.com/c")
+
+
 class DefaultBrowserToggleTest(unittest.TestCase):
     def test_ui_exposes_default_browser_toggle(self):
         root = Path(__file__).resolve().parents[1]

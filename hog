@@ -2269,7 +2269,7 @@ class Hog(Gtk.Application):
         if self.window is not None:
             self.window.present()
 
-    def do_open(self, files, hint):
+    def do_open(self, files, n_files, hint):
         self.ensure_window()
         for item in files or []:
             try:
