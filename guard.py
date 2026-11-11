@@ -72,6 +72,34 @@ TAILSCALE_NETWORK = "hog-tailscale"
 TAILSCALE_IPV6_SUBNET = "fd00:686f:6700:1::/64"
 TAILSCALE_STATE_MOUNT = "hog-tailscale-state:/var/lib/tailscale"
 
+AI_NETWORK = "hog-ai"
+OLLAMA_NAME = "hog-ollama"
+OLLAMA_IMAGE = "ollama/ollama:latest"
+OLLAMA_VOLUME = "hog-ollama"
+OLLAMA_MOUNT = "hog-ollama:/root/.ollama"
+OLLAMA_CONTAINER_PORT = "11434"
+OLLAMA_HOST_PORTS = (11434, 11435, 11436, 11437)
+OPENWEBUI_NAME = "hog-open-webui"
+OPENWEBUI_IMAGE = "ghcr.io/open-webui/open-webui:main"
+OPENWEBUI_VOLUME = "hog-open-webui"
+OPENWEBUI_MOUNT = "hog-open-webui:/app/backend/data"
+OPENWEBUI_CONTAINER_PORT = "8080"
+OPENWEBUI_HOST_PORTS = (3000, 8080, 3001, 8081, 8082, 8083)
+OLLAMA_BASE_ENV = "OLLAMA_BASE_URL=http://hog-ollama:11434"
+AI_MEMORY = "16g"
+MODEL_NAME_RE = re.compile(
+    r"^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$"
+)
+MODEL_NAME_MAX = 80
+AI_DISK_WARN_BYTES = 15 * 1024 * 1024 * 1024
+AI_MODEL_SUGGESTIONS = (
+    {"name": "llama3.1:8b", "label": "Llama 3.1 8B", "disk": "4.9 GB", "vramMb": 6500},
+    {"name": "qwen2.5:7b", "label": "Qwen 2.5 7B", "disk": "4.7 GB", "vramMb": 6200},
+    {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B", "disk": "9.0 GB", "vramMb": 11000},
+    {"name": "mistral", "label": "Mistral 7B", "disk": "4.1 GB", "vramMb": 5800},
+    {"name": "gemma2:9b", "label": "Gemma 2 9B", "disk": "5.4 GB", "vramMb": 7500},
+)
+
 ENGINE_DOCKER_SOCK = Path("/var/run/docker.sock")
 DESKTOP_DOCKER_SOCK = Path.home() / ".docker" / "desktop" / "docker.sock"
 JELLYFIN_CONFIG_VOLUME = "hog-jellyfin-config"
@@ -201,6 +229,56 @@ def tailscale_serve_host(runtime):
 
 def is_tailscale_image(name, image=""):
     return str(name or "") == "tailscale" and "tailscale" in str(image or "").lower()
+
+
+def is_ollama_image(name, image=""):
+    text = str(image or "").lower()
+    return str(name or "") == OLLAMA_NAME and text.startswith("ollama/ollama")
+
+
+def is_open_webui_image(name, image=""):
+    text = str(image or "").lower()
+    return str(name or "") == OPENWEBUI_NAME and "open-webui/open-webui" in text
+
+
+def is_ai_image(name, image=""):
+    return is_ollama_image(name, image) or is_open_webui_image(name, image)
+
+
+def valid_model_name(name):
+    text = str(name or "").strip().lower()
+    if not text or len(text) > MODEL_NAME_MAX:
+        return False
+    if ".." in text or text.startswith("-") or "//" in text:
+        return False
+    return bool(MODEL_NAME_RE.fullmatch(text))
+
+
+def estimate_model_vram_mb(size_bytes=0, hint_mb=0):
+    try:
+        hint = int(hint_mb or 0)
+    except (TypeError, ValueError):
+        hint = 0
+    if hint > 0:
+        return hint
+    try:
+        size = int(size_bytes or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size <= 0:
+        return 0
+    return int(size / (1024 * 1024) * 1.2) + 512
+
+
+def allowed_run_network(name, image, network):
+    mode = str(network or "")
+    if not mode:
+        return True
+    if mode in {TAILSCALE_NETWORK, "host"}:
+        return is_tailscale_image(name, image)
+    if mode == AI_NETWORK:
+        return is_ai_image(name, image)
+    return False
 
 
 def nvidia_device_path(text):
@@ -659,7 +737,14 @@ def hog_desktop_installed():
 
 def image_brings_command(image):
     text = str(image or "").lower()
-    return "wireguard" in text or "tailscale" in text or "cartesi" in text or "jellyfin" in text
+    return (
+        "wireguard" in text
+        or "tailscale" in text
+        or "cartesi" in text
+        or "jellyfin" in text
+        or "ollama" in text
+        or "open-webui" in text
+    )
 
 
 SHARE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,24}$")
@@ -1118,13 +1203,21 @@ def format_publish(port):
     return spec
 
 
-def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"), env=(), sysctls=(), mounts=(), network="", gpus=False):
+def _memory_limit(value, default="2g"):
+    text = str(value or "").strip().lower()
+    if re.fullmatch(r"[1-9][0-9]{0,2}[gm]", text):
+        return text
+    return default
+
+
+def compose_run(name, image, ports=(), vpn=False, command=("sleep", "infinity"), env=(), sysctls=(), mounts=(), network="", gpus=False, memory="2g"):
     args = ["run", "-d", "--name", name, "--cap-drop=ALL"]
     args.extend(f"--cap-add={cap}" for cap in SSH_CAPS)
     if vpn:
         args.append("--cap-add=NET_ADMIN")
         args.extend(["--device", "/dev/net/tun"])
-    args.extend(["--pids-limit", "1024", "--memory", "2g", "--memory-swap", "2g"])
+    mem = _memory_limit(memory)
+    args.extend(["--pids-limit", "1024", "--memory", mem, "--memory-swap", mem])
     if gpus:
         args.extend(["--gpus", "all"])
     if network:
@@ -1225,7 +1318,7 @@ def parse_run(cmdline):
             else:
                 mode = token.split("=", 1)[1]
                 index += 1
-            if network or mode not in {TAILSCALE_NETWORK, "host"}:
+            if network or mode not in {TAILSCALE_NETWORK, "host", AI_NETWORK}:
                 raise CommandError("That flag is not available.")
             network = mode
             continue
@@ -1351,9 +1444,8 @@ def parse_run(cmdline):
         raise CommandError("The container command can only be plain words.")
     if tun and not vpn:
         raise CommandError("The tun device needs NET_ADMIN.")
-    if network:
-        if name != "tailscale" or "tailscale" not in image.lower() or network not in {TAILSCALE_NETWORK, "host"}:
-            raise CommandError("That flag is not available.")
+    if network and not allowed_run_network(name, image, network):
+        raise CommandError("That flag is not available.")
     return name, image, tuple(ports), vpn, tuple(command), tuple(env), tuple(sysctls), (), network
 
 
@@ -1746,6 +1838,8 @@ class Guard:
             return RUNTIME_ENGINE
         if (name == "tailscale" or "tailscale" in image.lower()) and self.runtime_available(RUNTIME_ENGINE):
             return RUNTIME_ENGINE
+        if (is_ai_image(name, image) or name in {OLLAMA_NAME, OPENWEBUI_NAME}) and self.runtime_available(RUNTIME_ENGINE):
+            return RUNTIME_ENGINE
         return RUNTIME_DESKTOP
 
     def container_sock(self, name=""):
@@ -1992,6 +2086,11 @@ class Guard:
         except Exception:
             payload.setdefault("dockerRuntimes", {})
             payload.setdefault("runtimeDefaults", {})
+        if "ai" not in payload:
+            try:
+                payload.update(self.ai_status_fields(models=False, items=payload.get("items")))
+            except Exception:
+                payload.setdefault("ai", {})
         return payload
 
     def update_cache_path(self):
@@ -2812,17 +2911,24 @@ class Guard:
             return ""
         return text
 
-    def publish_port(self, port):
+    def publish_port(self, port, kind=""):
         # Docker Desktop Tailscale runs in a VM, so 127.0.0.1 is that VM.
         # host.docker.internal reaches this computer, including Jellyfin and
         # share_page.py bound to the host loopback. Engine Tailscale uses
         # host networking, so 127.0.0.1 is this computer.
+        # kind "tcp" is used for Jellyfin so the phone app can keep
+        # http://100.x.x.x:8096. Other services, including Open WebUI and
+        # shared folders, use https serve. One call never turns off the
+        # other services, and funnel stays off.
         port = int(port)
+        mode = str(kind or ("tcp" if port == 8096 else "https"))
+        if mode not in {"tcp", "https"}:
+            mode = "https"
         host = tailscale_serve_host(self.container_runtime("tailscale"))
         sock = self.container_sock("tailscale")
-        if port == 8096:
-            self.capture(["exec", "tailscale", "tailscale", "serve", "--https=8096", "off"], timeout=10, sock=sock)
-            args = ["exec", "tailscale", "tailscale", "serve", "--bg", "--yes", "--tcp=8096", f"tcp://{host}:8096"]
+        if mode == "tcp":
+            self.capture(["exec", "tailscale", "tailscale", "serve", f"--https={port}", "off"], timeout=10, sock=sock)
+            args = ["exec", "tailscale", "tailscale", "serve", "--bg", "--yes", f"--tcp={port}", f"tcp://{host}:{port}"]
         else:
             args = ["exec", "tailscale", "tailscale", "serve", "--bg", f"--https={port}", f"http://{host}:{port}"]
         text, code = self.capture(args, timeout=8, sock=sock)
@@ -2833,6 +2939,26 @@ class Guard:
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             return (lines[-1][:180] if lines else "Tailscale did not publish that folder."), ""
         return "", ""
+
+    def publish_services(self, services):
+        enable = ""
+        problems = []
+        for item in services or ():
+            if isinstance(item, dict):
+                port = item.get("port")
+                kind = item.get("kind") or ""
+            else:
+                port, kind = item, ""
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                continue
+            problem, found = self.publish_port(port, kind=kind)
+            if found and not enable:
+                enable = found
+            elif problem:
+                problems.append(problem)
+        return (problems[0] if problems else ""), enable
 
     def unpublish_port(self, port):
         port = int(port)
@@ -3536,6 +3662,7 @@ class Guard:
         network = ""
         jellyfin = "jellyfin" in image.lower() or name == "jellyfin"
         tailscale = "tailscale" in image.lower() or name == "tailscale"
+        memory = "2g"
         if jellyfin:
             mounts = self.jellyfin_mounts(info, side=side)
             if side == RUNTIME_ENGINE and self.gpu_enabled():
@@ -3546,6 +3673,11 @@ class Guard:
                 if NVIDIA_CAPS_ENV not in env:
                     extra.append(NVIDIA_CAPS_ENV)
                 env = tuple(env) + tuple(extra)
+        if is_ai_image(name, image) or name in {OLLAMA_NAME, OPENWEBUI_NAME}:
+            prepared, problem = self._prepare_ai_container(name, image, ports, env, side)
+            if problem:
+                return None, problem
+            mounts, env, ports, network, gpus, memory = prepared
         if tailscale:
             mounts = (*mounts, TAILSCALE_STATE_MOUNT)
             vpn = True
@@ -3557,7 +3689,7 @@ class Guard:
                 if problem:
                     return None, problem
         sock = self.runtime_sock(side)
-        run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus)
+        run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus, memory=memory)
         if tailscale and network == "host":
             if "--cap-add=NET_ADMIN" in run_args and "--cap-add=NET_RAW" not in run_args:
                 run_args = list(run_args)
@@ -3578,9 +3710,13 @@ class Guard:
                 self.run(["rm", "-f", name], timeout=20)
             return None, reason
         self.remember(name)
+        if is_ai_image(name, image) or name in {OLLAMA_NAME, OPENWEBUI_NAME}:
+            self.save_runtime(name, side)
         problem = self.prepare_tailscale_firewall(name, started)
         if problem:
             return None, problem
+        if is_open_webui_image(name, image) or name == OPENWEBUI_NAME:
+            self._publish_open_webui()
         return started, ""
 
     def set_container_runtime(self, name, side):
@@ -4027,6 +4163,473 @@ class Guard:
     def disconnect_network(self, blob):
         return self._network_membership(blob, "disconnect")
 
+
+    def ai_state_path(self):
+        return self.data / "ai.json"
+
+    def read_ai_state(self):
+        try:
+            raw = json.loads(self.ai_state_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        ollama_port = raw.get("ollamaPort")
+        webui_port = raw.get("openWebuiPort")
+        try:
+            ollama_port = int(ollama_port) if ollama_port else 0
+        except (TypeError, ValueError):
+            ollama_port = 0
+        try:
+            webui_port = int(webui_port) if webui_port else 0
+        except (TypeError, ValueError):
+            webui_port = 0
+        return {
+            "ollamaPort": ollama_port if ollama_port in OLLAMA_HOST_PORTS else 0,
+            "openWebuiPort": webui_port if webui_port in OPENWEBUI_HOST_PORTS else 0,
+        }
+
+    def write_ai_state(self, ollama_port=None, open_webui_port=None):
+        state = self.read_ai_state()
+        if ollama_port is not None:
+            try:
+                value = int(ollama_port)
+            except (TypeError, ValueError):
+                value = 0
+            state["ollamaPort"] = value if value in OLLAMA_HOST_PORTS else 0
+        if open_webui_port is not None:
+            try:
+                value = int(open_webui_port)
+            except (TypeError, ValueError):
+                value = 0
+            state["openWebuiPort"] = value if value in OPENWEBUI_HOST_PORTS else 0
+        path = self.ai_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+        return state
+
+    def _published_loopback_port(self, ports, dest):
+        dest = str(dest)
+        for bind, host, target, proto in ports or ():
+            if str(target) == dest and str(proto or "tcp") == "tcp" and str(bind) == "127.0.0.1":
+                try:
+                    return int(host)
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
+    def _pick_loopback_port(self, preferred, candidates, exclude=()):
+        chosen = []
+        if preferred and preferred in candidates:
+            chosen.append(preferred)
+        for port in candidates:
+            if port not in chosen:
+                chosen.append(port)
+        blocked = {int(item) for item in exclude or () if str(item).isdigit() or isinstance(item, int)}
+        for port in chosen:
+            if port in blocked:
+                continue
+            if not self.port_open(port):
+                return port
+        for port in chosen:
+            if port not in blocked:
+                return port
+        return chosen[0] if chosen else 0
+
+    def ollama_host_port(self, ports=()):
+        found = self._published_loopback_port(ports, OLLAMA_CONTAINER_PORT)
+        if found:
+            return found
+        return self.read_ai_state().get("ollamaPort") or 0
+
+    def openwebui_host_port(self, ports=()):
+        found = self._published_loopback_port(ports, OPENWEBUI_CONTAINER_PORT)
+        if found:
+            return found
+        return self.read_ai_state().get("openWebuiPort") or 0
+
+    def ensure_ai_network(self, sock=None):
+        runner = (lambda args, timeout=20: self.run_on(args, timeout=timeout, sock=sock)) if sock is not None else (
+            lambda args, timeout=20: self.run(args, timeout=timeout)
+        )
+        inspected = runner(["network", "inspect", AI_NETWORK], 10)
+        if inspected.returncode == 0:
+            return ""
+        created = runner(["network", "create", AI_NETWORK], 20)
+        blob = f"{created.stderr or ''}\n{created.stdout or ''}"
+        if created.returncode == 0:
+            return ""
+        inspected = runner(["network", "inspect", AI_NETWORK], 10)
+        if inspected.returncode == 0:
+            return ""
+        detail = [line.strip() for line in blob.splitlines() if line.strip()]
+        return detail[-1][:180] if detail else "Docker could not create the hog-ai network."
+
+    def _gpu_memory_mb(self):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return 0
+        if result.returncode != 0:
+            return 0
+        for line in (result.stdout or "").splitlines():
+            text = line.strip().split(",")[0].strip()
+            if text.replace(".", "", 1).isdigit():
+                try:
+                    return int(float(text))
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
+    def ai_gpu_fields(self):
+        ready = False
+        name = ""
+        try:
+            ok, name = self._nvidia_smi()
+        except (RuntimeError, OSError, TypeError, ValueError):
+            ok, name = False, ""
+        memory = self._gpu_memory_mb() if ok else 0
+        engine_ok = bool(((self.runtime_fields().get("dockerRuntimes") or {}).get(RUNTIME_ENGINE) or {}).get("ok"))
+        toolkit = False
+        try:
+            toolkit = bool(engine_ok and self.gpu_is_ready())
+        except (RuntimeError, OSError, TypeError, ValueError):
+            toolkit = False
+        ready = bool(ok and toolkit)
+        notice = ""
+        if not ok:
+            notice = "No NVIDIA GPU was detected. Ollama will run on the CPU, which is slower."
+        elif not engine_ok:
+            notice = "Docker Engine is not available, so Ollama cannot use the NVIDIA GPU."
+        elif not toolkit:
+            notice = "The NVIDIA Container Toolkit is not ready, so Ollama will run on the CPU. Use the GPU card on Containers to install it."
+        elif memory:
+            notice = f"NVIDIA GPU is ready ({name or 'NVIDIA'}, {memory} MB). Ollama will use it on Docker Engine."
+        else:
+            notice = f"NVIDIA GPU is ready ({name or 'NVIDIA'}). Ollama will use it on Docker Engine."
+        return {
+            "ready": ready,
+            "name": name,
+            "memoryMb": memory,
+            "notice": notice,
+        }
+
+    def ai_disk_fields(self, needed=0):
+        try:
+            usage = shutil.disk_usage(str(self.data))
+            free = int(usage.free)
+        except (OSError, TypeError, ValueError):
+            free = 0
+        warning = ""
+        if free and free < AI_DISK_WARN_BYTES:
+            warning = f"This computer has {format_bytes(free)} free. Model downloads are several gigabytes each."
+        try:
+            need = int(needed or 0)
+        except (TypeError, ValueError):
+            need = 0
+        if free and need and free < need + 2 * 1024 * 1024 * 1024:
+            warning = f"This computer has {format_bytes(free)} free, which may not be enough for that download."
+        return {"freeBytes": free, "warning": warning}
+
+    def _prepare_ai_container(self, name, image, ports, env, side):
+        sock = self.runtime_sock(side)
+        problem = self.ensure_ai_network(sock=sock)
+        if problem:
+            return None, problem
+        env = tuple(item for item in env or () if ENV_RE.fullmatch(str(item)))
+        gpus = False
+        if is_ollama_image(name, image) or name == OLLAMA_NAME:
+            mounts = (OLLAMA_MOUNT,)
+            existing = self._published_loopback_port(ports, OLLAMA_CONTAINER_PORT)
+            host_port = self._pick_loopback_port(existing or self.ollama_host_port(), OLLAMA_HOST_PORTS)
+            ports = (("127.0.0.1", str(host_port), OLLAMA_CONTAINER_PORT, "tcp"),)
+            self.write_ai_state(ollama_port=host_port)
+            gpu = self.ai_gpu_fields()
+            if side == RUNTIME_ENGINE and gpu.get("ready"):
+                gpus = True
+                extra = []
+                if NVIDIA_VISIBLE_ENV not in env:
+                    extra.append(NVIDIA_VISIBLE_ENV)
+                if NVIDIA_CAPS_ENV not in env:
+                    extra.append(NVIDIA_CAPS_ENV)
+                env = tuple(env) + tuple(extra)
+            return (mounts, env, ports, AI_NETWORK, gpus, AI_MEMORY), ""
+        if is_open_webui_image(name, image) or name == OPENWEBUI_NAME:
+            mounts = (OPENWEBUI_MOUNT,)
+            existing = self._published_loopback_port(ports, OPENWEBUI_CONTAINER_PORT)
+            host_port = self._pick_loopback_port(existing or self.openwebui_host_port(), OPENWEBUI_HOST_PORTS)
+            ports = (("127.0.0.1", str(host_port), OPENWEBUI_CONTAINER_PORT, "tcp"),)
+            if OLLAMA_BASE_ENV not in env:
+                env = tuple(env) + (OLLAMA_BASE_ENV,)
+            self.write_ai_state(open_webui_port=host_port)
+            return (mounts, env, ports, AI_NETWORK, False, AI_MEMORY), ""
+        return None, "That AI image is not available."
+
+    def _item_state(self, name, items=None):
+        rows = items if items is not None else self.items()
+        for item in rows or ():
+            if isinstance(item, dict) and item.get("name") == name:
+                return item
+        return {"name": name, "state": "missing", "runtime": self.container_runtime(name), "reason": "", "image": ""}
+
+    def _publish_open_webui(self, port=None):
+        port = int(port or self.openwebui_host_port() or 0)
+        if not port:
+            return "Open WebUI does not have a local port yet.", ""
+        return self.publish_port(port, kind="https")
+
+    def openwebui_phone_url(self, ip=None, port=None):
+        ip = ip or self.tailscale_ipv4()
+        port = int(port or self.openwebui_host_port() or 0)
+        if not ip or not port:
+            return ""
+        return f"https://{ip}:{port}"
+
+    def _ollama_base_url(self):
+        port = self.ollama_host_port()
+        if not port:
+            return ""
+        return f"http://127.0.0.1:{port}"
+
+    def ollama_http(self, method, path, body=None, timeout=20):
+        base = self._ollama_base_url()
+        if not base:
+            return None, "Start Ollama first."
+        if not str(path or "").startswith("/"):
+            return None, "That request is not available."
+        url = base + path
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, method=str(method or "GET").upper(), headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+                if len(raw) > 4 * 1024 * 1024:
+                    return None, "That Ollama response was too large."
+                if not raw:
+                    return {}, ""
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return None, "Ollama did not return JSON."
+                return parsed, ""
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:180]
+            except OSError:
+                detail = ""
+            return None, detail or f"Ollama returned HTTP {exc.code}."
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            return None, str(exc)[:180] or "Ollama did not answer."
+
+    def _model_row(self, item, gpu_mb=0):
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name") or item.get("model") or "").strip()
+        if not valid_model_name(name):
+            return None
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        parameter = str(details.get("parameter_size") or item.get("parameter_size") or "")
+        quantization = str(details.get("quantization_level") or item.get("quantization_level") or "")
+        vram = estimate_model_vram_mb(size)
+        fit = "unknown"
+        if gpu_mb and vram:
+            fit = "fits" if vram <= gpu_mb else "tight" if vram <= gpu_mb + 1024 else "over"
+        elif not gpu_mb:
+            fit = "cpu"
+        return {
+            "name": name,
+            "size": size,
+            "sizeLabel": format_bytes(size) if size else "",
+            "vramMb": vram,
+            "parameter": parameter,
+            "quantization": quantization,
+            "fit": fit,
+        }
+
+    def list_ai_models(self):
+        payload, error = self.ollama_http("GET", "/api/tags", timeout=15)
+        if error:
+            return [], error
+        models = []
+        gpu_mb = self.ai_gpu_fields().get("memoryMb") or 0
+        for item in (payload or {}).get("models") or []:
+            row = self._model_row(item, gpu_mb)
+            if row:
+                models.append(row)
+        return models, ""
+
+    def ai_status_fields(self, models=False, items=None):
+        rows = items if items is not None else (self.items() if self.docker_running() else self._offline_items())
+        ollama = self._item_state(OLLAMA_NAME, rows)
+        webui = self._item_state(OPENWEBUI_NAME, rows)
+        gpu = self.ai_gpu_fields()
+        disk = self.ai_disk_fields()
+        ollama_port = self.ollama_host_port()
+        webui_port = self.openwebui_host_port()
+        ts_ip = ""
+        try:
+            if any(isinstance(item, dict) and item.get("name") == "tailscale" and item.get("state") == "running" for item in rows):
+                ts_ip = self.tailscale_ipv4()
+        except (RuntimeError, OSError):
+            ts_ip = ""
+        phone = self.openwebui_phone_url(ts_ip, webui_port) if webui.get("state") == "running" and ts_ip and webui_port else ""
+        suggestions = []
+        for item in AI_MODEL_SUGGESTIONS:
+            vram = int(item["vramMb"])
+            fit = "cpu"
+            if gpu.get("memoryMb"):
+                memory = int(gpu["memoryMb"])
+                fit = "fits" if vram <= memory else "tight" if vram <= memory + 1024 else "over"
+            suggestions.append({**item, "fit": fit})
+        installed, model_error = ([], "")
+        if models and ollama.get("state") == "running":
+            installed, model_error = self.list_ai_models()
+        return {
+            "ai": {
+                "network": AI_NETWORK,
+                "ollama": {
+                    "name": OLLAMA_NAME,
+                    "image": OLLAMA_IMAGE,
+                    "state": ollama.get("state") or "missing",
+                    "runtime": ollama.get("runtime") or self.container_runtime(OLLAMA_NAME),
+                    "reason": ollama.get("reason") or "",
+                    "gpu": bool(gpu.get("ready") and (ollama.get("runtime") or "") == RUNTIME_ENGINE and ollama.get("state") == "running"),
+                    "port": ollama_port,
+                    "localUrl": f"http://127.0.0.1:{ollama_port}" if ollama_port and ollama.get("state") == "running" else "",
+                },
+                "openWebui": {
+                    "name": OPENWEBUI_NAME,
+                    "image": OPENWEBUI_IMAGE,
+                    "state": webui.get("state") or "missing",
+                    "runtime": webui.get("runtime") or self.container_runtime(OPENWEBUI_NAME),
+                    "reason": webui.get("reason") or "",
+                    "port": webui_port,
+                    "localUrl": f"http://127.0.0.1:{webui_port}" if webui_port and webui.get("state") == "running" else "",
+                    "phoneUrl": phone,
+                },
+                "gpu": gpu,
+                "disk": disk,
+                "models": installed,
+                "modelsError": model_error,
+                "suggestions": suggestions,
+            }
+        }
+
+    def ai_status(self, models=False):
+        payload = self.engine_status()
+        payload.update(self.ai_status_fields(models=models, items=payload.get("items")))
+        return payload
+
+    def pull_ai_model(self, name, progress=None):
+        model = str(name or "").strip().lower()
+        if not valid_model_name(model):
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = "Use a model name like llama3.1:8b."
+            return payload
+        disk = self.ai_disk_fields()
+        if disk.get("warning") and disk.get("freeBytes") and disk["freeBytes"] < 3 * 1024 * 1024 * 1024:
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = disk["warning"]
+            return payload
+        base = self._ollama_base_url()
+        if not base:
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = "Start Ollama first."
+            return payload
+        body = json.dumps({"name": model, "stream": True}).encode("utf-8")
+        request = urllib.request.Request(
+            base + "/api/pull",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        last = {"name": model, "status": "Starting download…", "percent": None, "error": ""}
+        if callable(progress):
+            try:
+                progress({"ok": True, "error": "", "aiPull": last, **self.ai_status_fields(models=False)})
+            except Exception:
+                pass
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    status = str(event.get("status") or event.get("error") or "Downloading…")[:160]
+                    completed = event.get("completed")
+                    total = event.get("total")
+                    percent = None
+                    try:
+                        if total and completed is not None and int(total) > 0:
+                            percent = max(0, min(100, int(int(completed) * 100 / int(total))))
+                    except (TypeError, ValueError):
+                        percent = None
+                    last = {
+                        "name": model,
+                        "status": status,
+                        "percent": percent,
+                        "error": str(event.get("error") or ""),
+                    }
+                    if callable(progress):
+                        try:
+                            progress({"ok": not last["error"], "error": last["error"], "aiPull": last, **self.ai_status_fields(models=False)})
+                        except Exception:
+                            pass
+                    if event.get("error"):
+                        break
+        except urllib.error.HTTPError as exc:
+            last["error"] = f"Ollama returned HTTP {exc.code}."
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last["error"] = str(exc)[:180] or "Ollama did not finish that download."
+        payload = self.ai_status(models=True)
+        payload["aiPull"] = last
+        if last.get("error"):
+            payload["ok"] = False
+            payload["error"] = last["error"]
+        else:
+            payload["notice"] = f"Downloaded {model}."
+        return payload
+
+    def delete_ai_model(self, name):
+        model = str(name or "").strip().lower()
+        if not valid_model_name(model):
+            payload = self.ai_status(models=True)
+            payload["ok"] = False
+            payload["error"] = "Use a model name like llama3.1:8b."
+            return payload
+        _payload, error = self.ollama_http("DELETE", "/api/delete", {"name": model}, timeout=30)
+        payload = self.ai_status(models=True)
+        if error:
+            payload["ok"] = False
+            payload["error"] = error
+            return payload
+        payload["notice"] = f"Deleted {model}."
+        return payload
+
     def handle(self, action, name="", image=""):
         if action == "update-status":
             return self.update_status()
@@ -4098,6 +4701,12 @@ class Guard:
             return self._mark_docker(self.set_peer_endpoint(name))
         if action == "tailscale-up":
             return self._mark_docker(self.tailscale_up())
+        if action == "ai-models":
+            return self._mark_docker(self.ai_status(models=True))
+        if action == "ai-pull":
+            return self._mark_docker(self.pull_ai_model(name))
+        if action == "ai-delete":
+            return self._mark_docker(self.delete_ai_model(name))
         if action in {"run", "recreate"}:
             return self._mark_docker(self.apply_command(name, replace=action == "recreate", runtime=image))
         return self._mark_docker(self._act(action, name, image))
@@ -4134,16 +4743,18 @@ class Guard:
             if codes:
                 text = strip_ascii_qr(text)
             return {"ok": True, "error": "", "logs": text[-12000:], "qr": codes, "items": self.items()}
-        if action in {"start", "stop"}:
-            result = self.container_run(name, [action, name])
+        if action in {"start", "stop", "restart"}:
+            result = self.container_run(name, [action, name], timeout=40 if action == "restart" else 8)
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout or "Docker refused.").strip().splitlines()
                 return {"ok": False, "error": detail[-1][:180], "items": self.items()}
-            if action == "start" and not assess(info, name, self.data):
+            if action in {"start", "restart"} and not assess(info, name, self.data):
                 self.remember(name)
                 problem = self.prepare_tailscale_firewall(name, info)
                 if problem:
                     return {"ok": False, "error": problem, "items": self.items()}
+                if name == OPENWEBUI_NAME or is_open_webui_image(name, container_image(info, fallback="")):
+                    self._publish_open_webui()
             return {"ok": True, "error": "", "items": self.items()}
         reason = assess(info, name, self.data)
         if reason:
@@ -4204,6 +4815,8 @@ class Guard:
                     "items": self.items(),
                 }
             self.save_runtime(name, runtime)
+        elif is_ai_image(name, image) and self.runtime_available(RUNTIME_ENGINE):
+            self.save_runtime(name, RUNTIME_ENGINE)
         command_text = canonical_command(name, image, ports, vpn, command, env, sysctls, (), network)
         if "wireguard" in image.lower():
             problem = self.load_wireguard_module()
@@ -4252,6 +4865,7 @@ class Guard:
                 }
         mounts = ()
         gpus = False
+        memory = "2g"
         if jellyfin:
             mounts = self.jellyfin_mounts(info, side="engine" if self.gpu_enabled() else "desktop")
             if self.gpu_enabled():
@@ -4262,6 +4876,11 @@ class Guard:
                 if NVIDIA_CAPS_ENV not in env:
                     extra.append(NVIDIA_CAPS_ENV)
                 env = tuple(env) + tuple(extra)
+        if is_ai_image(name, image):
+            prepared, problem = self._prepare_ai_container(name, image, ports, env, self.container_runtime(name))
+            if problem:
+                return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
+            mounts, env, ports, network, gpus, memory = prepared
         if "tailscale" in image.lower() or name == "tailscale":
             mounts = (*mounts, TAILSCALE_STATE_MOUNT)
             side = self.container_runtime(name)
@@ -4272,7 +4891,7 @@ class Guard:
                 problem = self.ensure_tailscale_network(sock=self.container_sock(name))
                 if problem:
                     return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
-        run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus)
+        run_args = compose_run(name, image, ports, vpn, command, env, sysctls, mounts, network, gpus=gpus, memory=memory)
         if ("tailscale" in image.lower() or name == "tailscale") and network == "host":
             if "--cap-add=NET_ADMIN" in run_args and "--cap-add=NET_RAW" not in run_args:
                 run_args = list(run_args)
@@ -4299,12 +4918,47 @@ class Guard:
             self.save_runtime(name, self.container_runtime(name))
         elif jellyfin:
             self.save_runtime(name, RUNTIME_ENGINE if self.gpu_enabled() else self.container_runtime(name))
+        elif is_ai_image(name, image):
+            self.save_runtime(name, self.container_runtime(name))
         problem = self.prepare_tailscale_firewall(name, info)
         if problem:
             return {"ok": False, "error": problem, "items": self.items(), "command": command_text}
         verb = "Recreated" if replace else "Started"
         notice = f"{verb} {name}."
         enable = ""
+        if is_open_webui_image(name, image):
+            dns, live = self.tailscale_dns()
+            problem, enable = self._publish_open_webui() if live else ("", "")
+            port = self.openwebui_host_port()
+            if enable:
+                notice = (
+                    f"{verb} {name}. Allow Tailscale serve once from the AI or Tailscale page. "
+                    "The first account you create in Open WebUI becomes the admin."
+                )
+            elif problem:
+                notice = f"{verb} {name}. {problem}"
+            elif live and port and self.tailscale_ipv4():
+                notice = (
+                    f"{verb} {name}. On this computer open http://127.0.0.1:{port}. "
+                    f"On your phone open https://{self.tailscale_ipv4()}:{port}. "
+                    "The first account you create in Open WebUI becomes the admin."
+                )
+            elif port:
+                notice = (
+                    f"{verb} {name}. On this computer open http://127.0.0.1:{port}. "
+                    "Start Tailscale and sign in to reach it from your phone. "
+                    "The first account you create in Open WebUI becomes the admin."
+                )
+            if not any(item.get("name") == OLLAMA_NAME and item.get("state") == "running" for item in self.items() if isinstance(item, dict)):
+                notice = f"{notice} Start Ollama too so the chat page can reach models."
+        if is_ollama_image(name, image):
+            if gpus:
+                notice = f"{verb} {name}. Ollama is using the NVIDIA GPU on Docker Engine."
+            else:
+                notice = (
+                    f"{verb} {name}. No NVIDIA GPU is available to this runtime, so Ollama will run on the CPU. "
+                    "That is slower, especially for larger models."
+                )
         if "jellyfin" in image.lower():
             dns, live = self.tailscale_dns()
             if live:

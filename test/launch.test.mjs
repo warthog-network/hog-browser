@@ -10,7 +10,20 @@ function publishSpec(port) {
 
 function imageBringsCommand(image) {
   const text = String(image || "").toLowerCase();
-  return text.includes("wireguard") || text.includes("tailscale") || text.includes("cartesi") || text.includes("jellyfin");
+  return text.includes("wireguard") || text.includes("tailscale") || text.includes("cartesi") || text.includes("jellyfin") || text.includes("ollama") || text.includes("open-webui");
+}
+
+function allowedLaunchNetwork(name, image, network) {
+  if (!network) return true;
+  const img = String(image || "").toLowerCase();
+  if (network === "hog-tailscale" || network === "host") {
+    return name === "tailscale" && img.includes("tailscale");
+  }
+  if (network === "hog-ai") {
+    return (name === "hog-ollama" && img.startsWith("ollama/ollama"))
+      || (name === "hog-open-webui" && img.includes("open-webui/open-webui"));
+  }
+  return false;
 }
 
 function composeCommand(spec) {
@@ -63,9 +76,22 @@ function readLaunch(text) {
     if (token === "--pids-limit" || token === "--memory" || token === "--memory-swap") { index += 2; continue; }
     if (token === "-e" || token === "--env") { env.push(tokens[index + 1]); index += 2; continue; }
     if (token === "--sysctl") { sysctls.push(tokens[index + 1]); index += 2; continue; }
+    if (token === "-p" || token === "--publish") {
+      const spec = tokens[index + 1] || "";
+      const match = /^(?:(?<bind>(?:\d{1,3}\.){3}\d{1,3}):)?(?<host>\d{1,5}):(?<dest>\d{1,5})(?:\/(?<proto>tcp|udp))?$/.exec(spec);
+      if (!match) return null;
+      ports.push({
+        bind: match.groups.bind || "",
+        host: match.groups.host,
+        dest: match.groups.dest,
+        proto: match.groups.proto || "tcp",
+      });
+      index += 2;
+      continue;
+    }
     if (token === "--network" || token === "--net") {
       const value = tokens[index + 1];
-      if ((value !== "hog-tailscale" && value !== "host") || network) return null;
+      if ((value !== "hog-tailscale" && value !== "host" && value !== "hog-ai") || network) return null;
       network = value;
       index += 2;
       continue;
@@ -76,7 +102,7 @@ function readLaunch(text) {
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(name) || !positional.length) return null;
   const image = positional[0];
-  if (network && (name !== "tailscale" || !String(image).toLowerCase().includes("tailscale") || (network !== "hog-tailscale" && network !== "host"))) return null;
+  if (network && !allowedLaunchNetwork(name, image, network)) return null;
   return { name, image, ports, vpn, command: positional.slice(1), env, sysctls, network };
 }
 
@@ -164,4 +190,45 @@ test("network names and CIDR values are validated", () => {
   assert.equal(validCidr("fd00:686f:6700:1::/64"), true);
   assert.equal(validCidr("172.28.0.0"), false);
   assert.equal(validCidr("172.28.0.0/99"), false);
+});
+
+test("Ollama command stays on hog-ai and loopback only", () => {
+  const text = composeCommand({
+    name: "hog-ollama",
+    image: "ollama/ollama:latest",
+    ports: [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }],
+    command: [],
+    network: "hog-ai",
+  });
+  assert.match(text, /--network hog-ai/);
+  assert.match(text, /-p 127.0.0.1:11434:11434\/tcp/);
+  assert.doesNotMatch(text, /0.0.0.0/);
+  assert.doesNotMatch(text, /sleep/);
+  const parsed = readLaunch(text);
+  assert.equal(parsed.name, "hog-ollama");
+  assert.equal(parsed.network, "hog-ai");
+  assert.equal(parsed.ports[0].bind, "127.0.0.1");
+});
+
+test("Open WebUI command uses hog-ai, loopback, and Ollama URL", () => {
+  const text = composeCommand({
+    name: "hog-open-webui",
+    image: "ghcr.io/open-webui/open-webui:main",
+    ports: [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }],
+    command: [],
+    env: ["OLLAMA_BASE_URL=http://hog-ollama:11434"],
+    network: "hog-ai",
+  });
+  assert.match(text, /--network hog-ai/);
+  assert.match(text, /-p 127.0.0.1:3000:8080\/tcp/);
+  assert.match(text, /-e OLLAMA_BASE_URL=http:\/\/hog-ollama:11434/);
+  assert.doesNotMatch(text, /0.0.0.0/);
+  const parsed = readLaunch(text);
+  assert.equal(parsed.network, "hog-ai");
+  assert.equal(parsed.ports[0].bind, "127.0.0.1");
+});
+
+test("readLaunch rejects hog-ai on other images", () => {
+  assert.equal(readLaunch("docker run -d --name ubuntu --network hog-ai ubuntu:24.04 sleep infinity"), null);
+  assert.equal(readLaunch("docker run -d --name hog-ollama --network host ollama/ollama:latest"), null);
 });

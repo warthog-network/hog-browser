@@ -92,16 +92,18 @@ class ExitNodeGuideTest(unittest.TestCase):
         self.assertIn("Setting up your exit node", html)
         self.assertIn('id="exit-node-admin"', html)
         self.assertIn("hog-tailscale-state", html)
-        docker = html.split('id="settings-docker"', 1)[1].split('id="settings-files"', 1)[0]
-        files = html.split('id="settings-files"', 1)[1]
-        self.assertNotIn('id="tailscale-up"', docker)
-        self.assertNotIn('id="exit-node-guide"', docker)
-        self.assertIn('id="tailscale-up"', files)
-        self.assertIn('id="exit-node-guide"', files)
-        self.assertLess(files.find('id="jellyfin-host"'), files.find('id="tailscale-up"'))
-        self.assertLess(files.find('id="jellyfin-host"'), files.find('id="exit-node-guide"'))
-        self.assertLess(files.find('id="exit-node-guide"'), files.find('id="media-library"'))
-        self.assertIn("Open the running tailscale container, press Sign in", files)
+        containers = html.split('id="settings-containers"', 1)[1].split('id="settings-networks"', 1)[0]
+        files = html.split('id="settings-files"', 1)[1].split('id="settings-containers"', 1)[0]
+        tailscale = html.split('id="settings-tailscale"', 1)[1]
+        self.assertNotIn('id="tailscale-up"', containers)
+        self.assertNotIn('id="exit-node-guide"', containers)
+        self.assertNotIn('id="exit-node-guide"', files)
+        self.assertIn('id="tailscale-up"', tailscale)
+        self.assertIn('id="exit-node-guide"', tailscale)
+        self.assertLess(tailscale.find('id="jellyfin-host"'), tailscale.find('id="tailscale-up"'))
+        self.assertLess(tailscale.find('id="jellyfin-host"'), tailscale.find('id="exit-node-guide"'))
+        self.assertIn('id="media-library"', files)
+        self.assertIn("Open the running tailscale container, press Sign in", tailscale)
 
 
 
@@ -183,11 +185,13 @@ class DefaultBrowserToggleTest(unittest.TestCase):
         app = (root / "public" / "app.js").read_text(encoding="utf-8")
         hog = (root / "hog").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
-        files = html.split('id="settings-files"', 1)[1]
-        self.assertIn('id="default-browser-card"', files)
-        self.assertIn('id="default-browser-toggle"', files)
-        self.assertIn("Set as default browser", files)
-        self.assertLess(files.find('id="default-browser-card"'), files.find('id="jellyfin-host"'))
+        general = html.split('id="settings-general"', 1)[1].split('id="settings-files"', 1)[0]
+        files = html.split('id="settings-files"', 1)[1].split('id="settings-containers"', 1)[0]
+        self.assertIn('id="default-browser-card"', general)
+        self.assertIn('id="default-browser-toggle"', general)
+        self.assertIn("Set as default browser", general)
+        self.assertNotIn('id="default-browser-card"', files)
+        self.assertNotIn('id="jellyfin-host"', general)
         self.assertIn("function paintDefaultBrowser", app)
         self.assertIn("containers:browser-default-set", app)
         self.assertIn("containers:browser-default-clear", app)
@@ -195,7 +199,7 @@ class DefaultBrowserToggleTest(unittest.TestCase):
         self.assertIn("browser-default-set", hog)
         self.assertIn("browser-default-clear", hog)
         self.assertIn("Set as default browser", readme)
-        self.assertIn("File manager", readme)
+        self.assertIn("Settings → General", readme)
 
     def test_valid_desktop_id_is_strict(self):
         self.assertTrue(valid_desktop_id("brave-browser-beta.desktop"))
@@ -305,7 +309,7 @@ class JellyfinGpuToggleTest(unittest.TestCase):
         app = (root / "public" / "app.js").read_text(encoding="utf-8")
         hog = (root / "hog").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
-        docker = html.split('id="settings-docker"', 1)[1].split('id="settings-files"', 1)[0]
+        docker = html.split('id="settings-containers"', 1)[1].split('id="settings-networks"', 1)[0]
         self.assertIn('id="jellyfin-gpu-card"', docker)
         self.assertIn('id="jellyfin-gpu-toggle"', docker)
         self.assertIn("GPU acceleration (NVIDIA)", docker)
@@ -345,17 +349,19 @@ class DockerRuntimeUiTest(unittest.TestCase):
         app = (root / "public" / "app.js").read_text(encoding="utf-8")
         hog = (root / "hog").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
-        docker = html.split('id="settings-docker"', 1)[1].split('id="settings-files"', 1)[0]
+        docker = html.split('id="settings-containers"', 1)[1].split('id="settings-ai"', 1)[0]
+        networks = html.split('id="settings-networks"', 1)[1].split('id="settings-ai"', 1)[0]
         self.assertIn('id="container-runtime-card"', docker)
         self.assertIn('id="runtime-engine"', docker)
         self.assertIn('id="runtime-desktop"', docker)
-        self.assertIn('id="docker-networks-card"', docker)
-        self.assertIn('id="network-list"', docker)
-        self.assertIn('id="network-create"', docker)
+        self.assertIn('id="docker-networks-card"', networks)
+        self.assertIn('id="network-list"', networks)
+        self.assertIn('id="network-create"', networks)
         self.assertIn("macvlan", docker)
         self.assertIn("ipvlan", docker)
         self.assertLess(docker.find('id="container-runtime-card"'), docker.find('id="container-list"'))
-        self.assertLess(docker.find('id="container-list"'), docker.find('id="docker-networks-card"'))
+        self.assertIn('id="container-list"', docker)
+        self.assertTrue(html.find('id="container-list"') < html.find('id="docker-networks-card"'))
         self.assertIn("containers:runtime-set", app)
         self.assertIn("containers:network-list", app)
         self.assertIn("containers:network-create", app)
@@ -380,7 +386,7 @@ class SelfUpdateUiTest(unittest.TestCase):
         app = (root / "public" / "app.js").read_text(encoding="utf-8")
         hog = (root / "hog").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
-        files = html.split('id="settings-files"', 1)[1]
+        files = html.split('id="settings-general"', 1)[1].split('id="settings-files"', 1)[0]
         self.assertIn('id="hog-update-card"', files)
         self.assertIn('id="hog-update-check"', files)
         self.assertIn("Check for updates", files)
@@ -417,6 +423,39 @@ class SelfUpdateUiTest(unittest.TestCase):
         self.assertIn("org.hog.Browser.self-update.policy", script)
         workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertIn("SHA256SUMS", workflow)
+
+
+
+class AiToolboxUiTest(unittest.TestCase):
+    def test_ui_exposes_ai_toolbox_and_settings_nav(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        hog = (root / "hog").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn('id="settings-nav"', html)
+        self.assertIn('data-settings="general"', html)
+        self.assertIn('data-settings="containers"', html)
+        self.assertIn('data-settings="networks"', html)
+        self.assertIn('data-settings="ai"', html)
+        self.assertIn('data-settings="tailscale"', html)
+        self.assertIn('id="settings-general"', html)
+        self.assertLess(html.find('id="hog-update-card"'), html.find('id="settings-files"'))
+        self.assertGreater(html.find('id="settings-files"'), html.find('id="hog-update-card"'))
+        self.assertNotIn('id="hog-update-card"', html.split('id="settings-files"', 1)[1].split('id="settings-containers"', 1)[0])
+        ai = html.split('id="settings-ai"', 1)[1].split('id="settings-tailscale"', 1)[0]
+        self.assertIn('id="ai-run-ollama"', ai)
+        self.assertIn('id="ai-run-webui"', ai)
+        self.assertIn('id="ai-pull-form"', ai)
+        self.assertIn("The first account you create becomes the admin", ai)
+        self.assertIn("function paintAi", app)
+        self.assertIn("containers:ai-models", app)
+        self.assertIn("containers:ai-pull", app)
+        self.assertIn("containers:ai-delete", app)
+        self.assertIn("kebab", app)
+        self.assertIn("ai-models", hog)
+        self.assertIn("ai-pull", hog)
+        self.assertIn("Local AI", readme)
 
 
 if __name__ == "__main__":

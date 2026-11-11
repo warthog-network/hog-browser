@@ -34,8 +34,12 @@
         <button type="button" id="settings-btn" class="icon" aria-label="Settings" title="Settings" aria-haspopup="menu" aria-controls="settings-menu" aria-expanded="false">⚙</button>
         <div id="settings-menu" class="popover settings-menu" role="menu" hidden>
           <ul>
-            <li><button type="button" role="menuitem" data-settings="docker"><span>Docker</span><small>Containers, images, and logs</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="files"><span>File manager</span><small>Library, Jellyfin, and phone folders</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
+            <li><button type="button" role="menuitem" data-settings="general"><span>General</span><small>Updates and default browser</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
+            <li><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="ai"><span>AI</span><small>Local models and chat</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
           </ul>
         </div>
       </div>
@@ -80,154 +84,31 @@
             <button type="button" data-url="https://github.com/warthog-network">warthog-network</button>
             <button type="button" data-url="https://browser-node.netlify.app/">Warthog node</button>
           </div>
+          <div class="toolbox">
+            <p class="eyebrow">Toolbox</p>
+            <div class="shortcuts toolbox-shortcuts">
+              <button type="button" data-settings="ai">AI chat</button>
+              <button type="button" data-settings="containers">Containers</button>
+              <button type="button" data-settings="files">Files</button>
+              <button type="button" data-settings="tailscale">Tailscale</button>
+            </div>
+          </div>
         </section>
         <section class="home" id="browser-settings" hidden>
-          <div id="settings-docker">
-          <p class="eyebrow">Docker</p>
-          <h1>Containers</h1>
-          <p class="lede">Containers run from Hog, not from a web page. Each new one drops extra privileges and cannot see the wallet. Pick Docker Engine or Docker Desktop for each container. Tailscale on Docker Engine uses this computer's network so your phone can usually connect directly.</p>
-          <div class="engine-row">
-            <p id="docker-state" class="note">Checking whether Docker is running…</p>
-            <button type="button" id="start-docker">Start Docker</button>
-          </div>
-          <div class="picker">
-            <div class="popover-head"><strong>Images</strong></div>
-            <ul class="menu-list">
-              <li><button type="button" data-launch="ubuntu" data-image="ubuntu:24.04"><span>Flat Ubuntu</span><small>ubuntu:24.04 · name ubuntu</small></button></li>
-              <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Flat Fedora</span><small>fedora:latest · name fedora</small></button></li>
-              <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
-              <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>In Docker, click Tailscale, then Run. On Linux, Docker Engine is recommended so your phone can connect directly.</small></button></li>
-              <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media. Use GPU acceleration (NVIDIA) below if you want NVENC transcoding.</small></button></li>
-              <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
-              <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
-            </ul>
-          </div>
-          <p class="note">An image fills the command. Run starts it. Recreate replaces a container and deletes its files unless you used Save image.</p>
-          <div class="command-box stack">
-            <label>Command
-              <textarea id="container-command" class="mono" rows="5" spellcheck="false" autocomplete="off" aria-label="Docker run command"></textarea>
-            </label>
-            <p class="note">Run uses the command above. The port boxes are added only when you press Add port.</p>
-            <div class="port-fields">
-              <label>Host port
-                <input id="port-host" inputmode="numeric" autocomplete="off" spellcheck="false" value="8080">
-              </label>
-              <label>Container port
-                <input id="port-dest" inputmode="numeric" autocomplete="off" spellcheck="false" value="80">
-              </label>
-              <label>Protocol
-                <select id="port-proto">
-                  <option value="tcp">tcp</option>
-                  <option value="udp">udp</option>
-                </select>
-              </label>
-              <button type="button" id="add-port">Add port</button>
-              <button type="button" id="vpn-toggle" aria-pressed="false">VPN interface</button>
-            </div>
-            <div class="row" id="command-actions">
-              <button type="button" id="run-command" class="primary">Run</button>
-              <button type="button" id="recreate-command">Recreate</button>
-            </div>
-            <div id="container-runtime-card" class="engine-row runtime-row">
-              <div class="default-browser-copy">
-                <strong>Docker runtime</strong>
-                <p id="container-runtime-status" class="note" role="status">Choose Docker Engine or Docker Desktop for the command above.</p>
-              </div>
-              <div class="runtime-actions">
-                <button type="button" id="runtime-engine" aria-pressed="false">Docker Engine</button>
-                <button type="button" id="runtime-desktop" aria-pressed="true">Docker Desktop</button>
-              </div>
-            </div>
-          </div>
-          <div id="wireguard-setup" class="engine-row" hidden>
-            <p class="note">This computer needs the WireGuard kernel module before the tunnel can start. The button runs sudo modprobe wireguard. Ubuntu asks for your password.</p>
-            <button type="button" id="load-wireguard">Load kernel module</button>
-          </div>
-          <section id="jellyfin-gpu-card" class="connect-card" aria-label="GPU acceleration">
-            <p class="eyebrow">Jellyfin</p>
-            <div class="engine-row default-browser-row">
-              <div class="default-browser-copy">
-                <strong>GPU acceleration (NVIDIA)</strong>
-                <p id="jellyfin-gpu-status" class="note" role="status">Checking whether this computer can pass a GPU to Jellyfin…</p>
-                <p id="jellyfin-gpu-error" class="error" role="status"></p>
-              </div>
-              <button type="button" id="jellyfin-gpu-toggle" aria-pressed="false">Use NVIDIA GPU</button>
-            </div>
-            <ul id="jellyfin-gpu-checks" class="gpu-checks"></ul>
-            <div id="jellyfin-gpu-install-row" class="gpu-install-row" hidden>
-              <button type="button" id="jellyfin-gpu-install">Install NVIDIA toolkit</button>
-              <p id="jellyfin-gpu-install-hint" class="note">Ubuntu will ask for your password. This installs the toolkit and configures Docker Engine. Docker Desktop is not changed.</p>
-            </div>
-            <pre id="jellyfin-gpu-install-log" class="mono gpu-install-log" hidden></pre>
-          </section>
-          <p id="container-status" class="note" role="status"></p>
-          <p id="container-error" class="error" role="status"></p>
-          <div class="picker">
-            <div class="popover-head"><strong>Containers</strong></div>
-            <ul id="container-list" class="menu-list"></ul>
-          </div>
-          <section id="docker-networks-card" class="connect-card" aria-label="Docker networks">
-            <p class="eyebrow">Networks</p>
-            <div class="engine-row default-browser-row">
-              <div class="default-browser-copy">
-                <strong>Docker networks</strong>
-                <p id="network-status" class="note" role="status">Create a network on Docker Engine or Docker Desktop, then attach a Hog container to it.</p>
-                <p id="network-error" class="error" role="status"></p>
-              </div>
-              <div class="runtime-actions">
-                <button type="button" id="network-runtime-engine" aria-pressed="false">Docker Engine</button>
-                <button type="button" id="network-runtime-desktop" aria-pressed="true">Docker Desktop</button>
-              </div>
-            </div>
-            <ul id="network-list" class="menu-list"></ul>
-            <form id="network-create-form" class="network-create">
-              <label>Name
-                <input id="network-name" maxlength="63" autocomplete="off" spellcheck="false" placeholder="hog-app">
-              </label>
-              <label>Driver
-                <select id="network-driver">
-                  <option value="bridge">bridge</option>
-                  <option value="macvlan">macvlan</option>
-                  <option value="ipvlan">ipvlan</option>
-                </select>
-              </label>
-              <label>Subnet
-                <input id="network-subnet" placeholder="172.28.0.0/16" autocomplete="off" spellcheck="false">
-              </label>
-              <label>Gateway
-                <input id="network-gateway" placeholder="172.28.0.1" autocomplete="off" spellcheck="false">
-              </label>
-              <label id="network-parent-row" hidden>Parent interface
-                <input id="network-parent" placeholder="eth0" autocomplete="off" spellcheck="false">
-              </label>
-              <label class="network-internal"><input type="checkbox" id="network-internal"> Internal (no outbound internet)</label>
-              <button type="submit" id="network-create">Create network</button>
-            </form>
-            <div id="network-attach" class="network-attach">
-              <label>Container
-                <select id="network-container"></select>
-              </label>
-              <label>Network
-                <select id="network-attach-name"></select>
-              </label>
-              <div class="row">
-                <button type="button" id="network-connect">Connect</button>
-                <button type="button" id="network-disconnect">Disconnect</button>
-              </div>
-            </div>
-          </section>
-          <div id="wireguard-endpoint" class="endpoint-row" hidden>
-            <p class="note">The phone keeps the address from the square it already scanned. Remove that tunnel, then scan the new square. This Wi-Fi is for this network. Public address is for mobile data.</p>
-            <div class="row">
-              <button type="button" id="endpoint-lan">This Wi-Fi</button>
-              <button type="button" id="endpoint-public">Public address</button>
-            </div>
-          </div>
-          <div id="container-qr" class="qr-row" hidden></div>
-          <pre id="container-logs" class="mono" hidden></pre>
-          </div>
-          <div id="settings-files" hidden>
-            <p class="eyebrow">File manager</p>
+          <div class="settings-shell">
+            <nav id="settings-nav" class="settings-nav" aria-label="Settings">
+              <button type="button" data-settings="general"><span>General</span><small>Updates and browser</small></button>
+              <button type="button" data-settings="files"><span>Files</span><small>Library</small></button>
+              <button type="button" data-settings="containers"><span>Containers</span><small>Images and logs</small></button>
+              <button type="button" data-settings="networks"><span>Networks</span><small>Docker networks</small></button>
+              <button type="button" data-settings="ai"><span>AI</span><small>Models and chat</small></button>
+              <button type="button" data-settings="tailscale"><span>Tailscale</span><small>Phone access</small></button>
+            </nav>
+            <div class="settings-panes">
+          <div id="settings-general" hidden>
+            <p class="eyebrow">General</p>
+            <h1>Settings</h1>
+            <p class="lede">Keep Hog up to date, and choose whether it should open http and https links.</p>
             <section id="hog-update-card" class="connect-card" aria-label="Hog updates">
               <p class="eyebrow">Hog</p>
               <div class="engine-row default-browser-row">
@@ -259,32 +140,11 @@
                 <button type="button" id="default-browser-toggle" aria-pressed="false">Set as default browser</button>
               </div>
             </section>
-            <section id="jellyfin-connect" class="connect-card" aria-label="Tailscale IP">
-              <p class="eyebrow">Tailscale IP</p>
-              <div class="connect-addr">
-                <strong id="jellyfin-host">100.—</strong>
-                <button type="button" id="jellyfin-copy" hidden>Copy</button>
-              </div>
-              <div id="tailscale-setup">
-                <p id="tailscale-auth" class="note" role="status"></p>
-                <p id="tailscale-error" class="error" role="status"></p>
-                <button type="button" id="tailscale-up" hidden>Sign in</button>
-                <button type="button" id="tailscale-login-link" class="inline-link" hidden>Open sign-in link</button>
-              </div>
-              <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
-              <p class="note">On this computer, Jellyfin is 127.0.0.1:8096.</p>
-              <p id="jellyfin-gpu-hint" class="note" hidden>Jellyfin is using the NVIDIA GPU on Docker Engine. In Dashboard → Playback → Transcoding, pick NVIDIA NVENC.</p>
-            </section>
-            <details id="exit-node-guide" class="connect-card exit-node-guide">
-              <summary>Setting up your exit node</summary>
-              <ol class="share-steps">
-                <li>In Docker, click Tailscale, choose Docker Engine if it is available, then Run. Open the running tailscale container, press Sign in, open the link, and log in. Hog appears in your tailnet as &quot;hog&quot;. If you move Tailscale from Docker Desktop, delete the old hog or hog-1 machine in the admin console before signing in again, then approve the new one as an exit node.</li>
-                <li>In the <button type="button" id="exit-node-admin" class="inline-link">Tailscale admin console</button>, open hog's menu, choose Edit route settings, and turn on Use as exit node.</li>
-                <li>On your phone, install the Tailscale app, sign in to the same account, tap Exit node, and pick hog.</li>
-                <li>Check: browse a site such as youtube.com. Hog's container has IPv4 and IPv6 forwarding, so Private DNS such as one.one.one.one works too. If pages hang, set Private DNS to Automatic and try again, and make sure the container is running.</li>
-                <li>Note: the login is kept in the hog-tailscale-state volume, so Recreate keeps hog's identity. If you delete that volume, remove the old hog from the admin console before logging in again.</li>
-              </ol>
-            </details>
+          </div>
+          <div id="settings-files" hidden>
+            <p class="eyebrow">Files</p>
+            <h1>Library</h1>
+            <p class="lede">Films and photos in ~/hog-shares show up in Jellyfin at /media.</p>
             <div id="media-library" class="endpoint-row">
               <p class="eyebrow">Files</p>
               <p class="note">In Jellyfin, add a library at /media. Drop films onto the dashed box, or use Add files, Add folder, or New folder. Those land in ~/hog-shares, which Jellyfin already reads.</p>
@@ -310,9 +170,257 @@
               <p id="media-empty" class="note">Nothing in the library yet. Drop films and photos above, or use Add files.</p>
               <ul id="media-list" class="media-list"></ul>
             </div>
+          </div>
+          <div id="settings-containers" hidden>
+          <p class="eyebrow">Containers</p>
+          <h1>Containers</h1>
+          <p class="lede">Containers run from Hog, not from a web page. Each one drops extra privileges and cannot see the wallet. Pick Docker Engine or Docker Desktop for each container.</p>
+          <div class="engine-row">
+            <p id="docker-state" class="note">Checking whether Docker is running…</p>
+            <button type="button" id="start-docker">Start Docker</button>
+          </div>
+          <details class="settings-block" id="container-images">
+            <summary>Images</summary>
+            <div class="picker">
+            <div class="popover-head"><strong>Images</strong></div>
+            <ul class="menu-list">
+              <li><button type="button" data-launch="ubuntu" data-image="ubuntu:24.04"><span>Flat Ubuntu</span><small>ubuntu:24.04 · name ubuntu</small></button></li>
+              <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Fedora</span><small>fedora:latest · name fedora</small></button></li>
+              <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
+              <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>Click Tailscale, then Run. Docker Engine is recommended so your phone can connect directly.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>Click Jellyfin, then Run. That creates ~/hog-shares and attaches it at /media. Use GPU acceleration if you want NVENC transcoding.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="hog-ollama" data-image="ollama/ollama:latest"><span>Ollama</span><small>Local models on Docker Engine, with the GPU when it is available. Opens from the AI page.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="hog-open-webui" data-image="ghcr.io/open-webui/open-webui:main"><span>Open WebUI</span><small>Chat page for Ollama. It stays on 127.0.0.1 and is served to your phone over Tailscale only.</small></button></li>
+              <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
+              <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
+            </ul>
+            </div>
+            <p class="note">An image fills the command in Advanced. Run starts it. Recreate replaces a container and deletes its files unless you used Save image.</p>
+          </details>
+          <div id="container-runtime-card" class="engine-row runtime-row">
+            <div class="default-browser-copy">
+              <strong>Docker runtime</strong>
+              <p id="container-runtime-status" class="note" role="status">Choose Docker Engine or Docker Desktop for the command above.</p>
+            </div>
+            <div class="runtime-actions segment-control" role="group" aria-label="Docker runtime">
+              <button type="button" id="runtime-engine" aria-pressed="false">Engine</button>
+              <button type="button" id="runtime-desktop" aria-pressed="true">Desktop</button>
+            </div>
+          </div>
+          <p id="container-status" class="note" role="status"></p>
+          <p id="container-error" class="error" role="status"></p>
+          <div class="picker">
+            <div class="popover-head"><strong>Containers</strong></div>
+            <ul id="container-list" class="menu-list"></ul>
+          </div>
+          <section id="jellyfin-gpu-card" class="connect-card" aria-label="GPU acceleration">
+            <p class="eyebrow">Jellyfin</p>
+            <div class="engine-row default-browser-row">
+              <div class="default-browser-copy">
+                <strong>GPU acceleration (NVIDIA)</strong>
+                <p id="jellyfin-gpu-status" class="note" role="status">Checking whether this computer can pass a GPU to Jellyfin…</p>
+                <p id="jellyfin-gpu-error" class="error" role="status"></p>
+              </div>
+              <button type="button" id="jellyfin-gpu-toggle" aria-pressed="false">Use NVIDIA GPU</button>
+            </div>
+            <details class="settings-sub">
+              <summary>GPU details</summary>
+              <ul id="jellyfin-gpu-checks" class="gpu-checks"></ul>
+              <div id="jellyfin-gpu-install-row" class="gpu-install-row" hidden>
+                <button type="button" id="jellyfin-gpu-install">Install NVIDIA toolkit</button>
+                <p id="jellyfin-gpu-install-hint" class="note">Ubuntu will ask for your password. This installs the toolkit and configures Docker Engine. Docker Desktop is not changed.</p>
+              </div>
+              <pre id="jellyfin-gpu-install-log" class="mono gpu-install-log" hidden></pre>
+            </details>
+          </section>
+          <details class="settings-block" id="container-advanced">
+            <summary>Advanced</summary>
+            <div class="command-box stack">
+              <label>Command
+                <textarea id="container-command" class="mono" rows="5" spellcheck="false" autocomplete="off" aria-label="Docker run command"></textarea>
+              </label>
+              <p class="note">Run uses the command above. The port boxes are added only when you press Add port.</p>
+              <div class="port-fields">
+                <label>Host port
+                  <input id="port-host" inputmode="numeric" autocomplete="off" spellcheck="false" value="8080">
+                </label>
+                <label>Container port
+                  <input id="port-dest" inputmode="numeric" autocomplete="off" spellcheck="false" value="80">
+                </label>
+                <label>Protocol
+                  <select id="port-proto">
+                    <option value="tcp">tcp</option>
+                    <option value="udp">udp</option>
+                  </select>
+                </label>
+                <button type="button" id="add-port">Add port</button>
+                <button type="button" id="vpn-toggle" aria-pressed="false">VPN interface</button>
+              </div>
+              <div class="row" id="command-actions">
+                <button type="button" id="run-command" class="primary">Run</button>
+                <button type="button" id="recreate-command">Recreate</button>
+              </div>
+            </div>
+            <div id="wireguard-setup" class="engine-row" hidden>
+              <p class="note">This computer needs the WireGuard kernel module before the tunnel can start. The button runs sudo modprobe wireguard. Ubuntu asks for your password.</p>
+              <button type="button" id="load-wireguard">Load kernel module</button>
+            </div>
+            <div id="wireguard-endpoint" class="endpoint-row" hidden>
+              <p class="note">The phone keeps the address from the square it already scanned. Remove that tunnel, then scan the new square. This Wi-Fi is for this network. Public address is for mobile data.</p>
+              <div class="row">
+                <button type="button" id="endpoint-lan">This Wi-Fi</button>
+                <button type="button" id="endpoint-public">Public address</button>
+              </div>
+            </div>
+            <div id="container-qr" class="qr-row" hidden></div>
+            <pre id="container-logs" class="mono" hidden></pre>
+          </details>
+          </div>
+          <div id="settings-networks" hidden>
+            <p class="eyebrow">Networks</p>
+            <h1>Docker networks</h1>
+            <p class="lede">A user-defined network lets containers reach each other by name. Built-in networks cannot be deleted, and a network still in use cannot be removed.</p>
+            <section id="docker-networks-card" class="connect-card" aria-label="Docker networks">
+              <p class="eyebrow">Networks</p>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <strong>Docker networks</strong>
+                  <p id="network-status" class="note" role="status">Create a network on Docker Engine or Docker Desktop, then attach a Hog container to it.</p>
+                  <p id="network-error" class="error" role="status"></p>
+                </div>
+                <div class="runtime-actions segment-control" role="group" aria-label="Network runtime">
+                  <button type="button" id="network-runtime-engine" aria-pressed="false">Engine</button>
+                  <button type="button" id="network-runtime-desktop" aria-pressed="true">Desktop</button>
+                </div>
+              </div>
+              <ul id="network-list" class="menu-list network-tree"></ul>
+              <details class="settings-sub" id="network-create-wrap">
+                <summary>Create a network</summary>
+                <form id="network-create-form" class="network-create">
+                  <label>Name
+                    <input id="network-name" maxlength="63" autocomplete="off" spellcheck="false" placeholder="hog-app">
+                  </label>
+                  <label>Driver
+                    <select id="network-driver">
+                      <option value="bridge">bridge</option>
+                      <option value="macvlan">macvlan</option>
+                      <option value="ipvlan">ipvlan</option>
+                    </select>
+                  </label>
+                  <label>Subnet
+                    <input id="network-subnet" placeholder="172.28.0.0/16" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label>Gateway
+                    <input id="network-gateway" placeholder="172.28.0.1" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label id="network-parent-row" hidden>Parent interface
+                    <input id="network-parent" placeholder="eth0" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label class="network-internal"><input type="checkbox" id="network-internal"> Internal (no outbound internet)</label>
+                  <button type="submit" id="network-create">Create network</button>
+                </form>
+              </details>
+              <details class="settings-sub" id="network-attach-wrap">
+                <summary>Connect a container</summary>
+                <div id="network-attach" class="network-attach">
+                  <label>Container
+                    <select id="network-container"></select>
+                  </label>
+                  <label>Network
+                    <select id="network-attach-name"></select>
+                  </label>
+                  <div class="row">
+                    <button type="button" id="network-connect">Connect</button>
+                    <button type="button" id="network-disconnect">Disconnect</button>
+                  </div>
+                </div>
+              </details>
+            </section>
+          </div>
+          <div id="settings-ai" hidden>
+            <p class="eyebrow">AI</p>
+            <h1>Local AI box</h1>
+            <p class="lede">Run language models on this computer and chat from Hog or your phone over Tailscale. Ollama stays private. Open WebUI is published only on 127.0.0.1 and served to your tailnet. Funnel stays off.</p>
+            <p id="ai-gpu-notice" class="note" role="status">Checking whether a GPU is available…</p>
+            <p id="ai-disk-warning" class="note" role="status" hidden></p>
+            <p id="ai-status" class="note" role="status"></p>
+            <p id="ai-error" class="error" role="status"></p>
+            <section class="connect-card" aria-label="Ollama">
+              <p class="eyebrow">Models</p>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <strong>Ollama</strong>
+                  <p class="note">Runs models on Docker Engine, with the NVIDIA GPU when it is ready. The API is only on 127.0.0.1, and Open WebUI reaches it by name on the hog-ai network.</p>
+                  <div id="ai-ollama-pills" class="status-pills"></div>
+                </div>
+                <button type="button" id="ai-run-ollama" class="primary">Run Ollama</button>
+              </div>
+            </section>
+            <section class="connect-card" aria-label="Open WebUI">
+              <p class="eyebrow">Chat</p>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <strong>Open WebUI</strong>
+                  <p class="note">A ChatGPT-style page for the models on Ollama. The first account you create becomes the admin.</p>
+                  <div id="ai-webui-pills" class="status-pills"></div>
+                  <p id="ai-webui-url" class="note" hidden></p>
+                </div>
+                <div class="hog-update-actions">
+                  <button type="button" id="ai-run-webui" class="primary">Run Open WebUI</button>
+                  <button type="button" id="ai-open-webui" hidden>Open on this computer</button>
+                  <button type="button" id="ai-copy-webui" hidden>Copy phone address</button>
+                </div>
+              </div>
+            </section>
+            <section class="connect-card" aria-label="Model library">
+              <p class="eyebrow">Library</p>
+              <strong>Models</strong>
+              <p class="note">Names on the short list are a good fit for 12 GB of video memory. You can also type another Ollama model name.</p>
+              <ul id="ai-suggestions" class="menu-list ai-suggestions"></ul>
+              <form id="ai-pull-form" class="ai-pull-form">
+                <label>Model name
+                  <input id="ai-pull-name" autocomplete="off" spellcheck="false" placeholder="llama3.1:8b" maxlength="80">
+                </label>
+                <button type="submit" id="ai-pull">Pull model</button>
+              </form>
+              <p id="ai-pull-progress" class="note" role="status" hidden></p>
+              <p id="ai-models-empty" class="note">No models yet. Pull one from the list above.</p>
+              <ul id="ai-model-list" class="media-list"></ul>
+            </section>
+          </div>
+          <div id="settings-tailscale" hidden>
+            <p class="eyebrow">Tailscale</p>
+            <h1>Phone access</h1>
+            <p class="lede">Sign in to Tailscale, then reach Jellyfin, shared folders, and the AI chat page from your phone. Funnel stays off.</p>
+            <section id="jellyfin-connect" class="connect-card" aria-label="Tailscale IP">
+              <p class="eyebrow">Tailscale IP</p>
+              <div class="connect-addr">
+                <strong id="jellyfin-host">100.—</strong>
+                <button type="button" id="jellyfin-copy" hidden>Copy</button>
+              </div>
+              <div id="tailscale-setup">
+                <p id="tailscale-auth" class="note" role="status"></p>
+                <p id="tailscale-error" class="error" role="status"></p>
+                <button type="button" id="tailscale-up" hidden>Sign in</button>
+                <button type="button" id="tailscale-login-link" class="inline-link" hidden>Open sign-in link</button>
+              </div>
+              <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
+              <p class="note">On this computer, Jellyfin is 127.0.0.1:8096.</p>
+              <p id="jellyfin-gpu-hint" class="note" hidden>Jellyfin is using the NVIDIA GPU on Docker Engine. In Dashboard → Playback → Transcoding, pick NVIDIA NVENC.</p>
+            </section>
+            <details id="exit-node-guide" class="connect-card exit-node-guide">
+              <summary>Setting up your exit node</summary>
+              <ol class="share-steps">
+                <li>In Containers, click Tailscale, choose Docker Engine if it is available, then Run. Open the running tailscale container, press Sign in, open the link, and log in. Hog appears in your tailnet as &quot;hog&quot;. If you move Tailscale from Docker Desktop, delete the old hog or hog-1 machine in the admin console before signing in again, then approve the new one as an exit node.</li>
+                <li>In the <button type="button" id="exit-node-admin" class="inline-link">Tailscale admin console</button>, open hog's menu, choose Edit route settings, and turn on Use as exit node.</li>
+                <li>On your phone, install the Tailscale app, sign in to the same account, tap Exit node, and pick hog.</li>
+                <li>Check: browse a site such as youtube.com. Hog's container has IPv4 and IPv6 forwarding, so Private DNS such as one.one.one.one works too. If pages hang, set Private DNS to Automatic and try again, and make sure the container is running.</li>
+                <li>Note: the login is kept in the hog-tailscale-state volume, so Recreate keeps hog's identity. If you delete that volume, remove the old hog from the admin console before logging in again.</li>
+              </ol>
+            </details>
             <div id="tailscale-shares" class="endpoint-row share-walk">
               <p class="eyebrow">Phone folders</p>
-              <p id="share-offline" class="note">Start the tailscale container in Docker and sign in. A folder you add here then gets an https address for the phone's browser.</p>
+              <p id="share-offline" class="note">Start the tailscale container in Containers and sign in. A folder you add here then gets an https address for the phone's browser.</p>
               <ol id="share-steps" class="share-steps" hidden>
                 <li><strong>Tailscale is running.</strong> <span id="share-dns">The phone uses the Tailscale app on this same account. Funnel stays off.</span></li>
                 <li>
@@ -357,6 +465,8 @@
               </ol>
               <p id="share-empty" class="note">No folders yet.</p>
               <ul id="share-list" class="share-list"></ul>
+            </div>
+          </div>
             </div>
           </div>
         </section>

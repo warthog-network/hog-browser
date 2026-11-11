@@ -1837,7 +1837,7 @@ class Hog(Gtk.Application):
         parts = command.split(":", 2)
         action = parts[1] if len(parts) > 1 else ""
         rest = parts[2] if len(parts) > 2 else ""
-        if action not in {"list", "add", "remove", "start", "stop", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder", "browser-default", "browser-default-set", "browser-default-clear", "jellyfin-gpu", "jellyfin-gpu-set", "jellyfin-gpu-clear", "jellyfin-gpu-install", "runtime-set", "network-list", "network-create", "network-remove", "network-connect", "network-disconnect", "update-status", "update-check", "update-check-now", "update-install", "update-restart"}:
+        if action not in {"list", "add", "remove", "start", "stop", "restart", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder", "browser-default", "browser-default-set", "browser-default-clear", "jellyfin-gpu", "jellyfin-gpu-set", "jellyfin-gpu-clear", "jellyfin-gpu-install", "runtime-set", "network-list", "network-create", "network-remove", "network-connect", "network-disconnect", "update-status", "update-check", "update-check-now", "update-install", "update-restart", "ai-models", "ai-pull", "ai-delete"}:
             return
         if action == "share-pick":
             self.pick_share_folder()
@@ -1869,11 +1869,7 @@ class Hog(Gtk.Application):
         else:
             name, image = rest, ""
 
-        def work():
-            try:
-                payload = guard.handle(action, name, image)
-            except RuntimeError as exc:
-                payload = {"ok": False, "error": str(exc), "items": []}
+        def emit(payload):
             raw = json.dumps(payload)
 
             def deliver():
@@ -1892,6 +1888,16 @@ class Hog(Gtk.Application):
                 return False
 
             GLib.idle_add(deliver)
+
+        def work():
+            try:
+                if action == "ai-pull":
+                    payload = guard.pull_ai_model(name, progress=emit)
+                else:
+                    payload = guard.handle(action, name, image)
+            except RuntimeError as exc:
+                payload = {"ok": False, "error": str(exc), "items": []}
+            emit(payload)
 
         threading.Thread(target=work, daemon=True).start()
 

@@ -27,7 +27,7 @@ User data (wallet, cache, shares) stays in `~/.local/share/hog-browser` and is n
 
 ## Update Hog from the app
 
-After 0.1.11 is installed, **Settings → File manager** has an **Updates** card that shows the current version and a **Check for updates** button. Hog also checks the latest GitHub release once a day when it starts (quietly, in the background) and puts a small **Update available** mark on the Settings gear when a newer version exists.
+After 0.1.11 is installed, **Settings → General** has an **Updates** card that shows the current version and a **Check for updates** button. Hog also checks the latest GitHub release once a day when it starts (quietly, in the background) and puts a small **Update available** mark on the Settings gear when a newer version exists.
 
 **Update** downloads `hog-browser_<version>_amd64.deb` into a private folder (`~/.local/share/hog-browser/updates`, mode 0700). Hog checks that the file name and `dpkg-deb` metadata are a `hog-browser` amd64 build of that version, then verifies the SHA-256 digest from the GitHub release asset (`digest: sha256:…`). If the API does not include a digest, Hog uses the `SHA256SUMS` file published with the release. It will not install a package that has neither. Installation uses the packaged helper `/opt/hog-browser/libexec/hog-self-update` through `pkexec`, so Ubuntu can ask for your password in a system prompt. Hog never stores or types that password. The helper only accepts a regular file from that updates folder, copies it to a root-owned directory, checks that the package is exactly `hog-browser` and newer than the installed version, and runs `apt-get install`. After it finishes, press **Restart hog**.
 
@@ -43,7 +43,7 @@ If you are running Hog from source, or the helper or `pkexec` is missing, the **
 
 ## Set Hog as your default browser
 
-After installing the `.deb`, open **Settings → File manager** in Hog and turn on **Set as default browser**. That saves your previous default and points http(s) links at Hog. Turn it off to restore the previous browser (or the next installed http handler if none was saved).
+After installing the `.deb`, open **Settings → General** in Hog and turn on **Set as default browser**. That saves your previous default and points http(s) links at Hog. Turn it off to restore the previous browser (or the next installed http handler if none was saved).
 
 You can still do it from a terminal:
 
@@ -56,19 +56,31 @@ Or use **Settings → Default Apps** (sometimes labeled Default Applications) an
 
 ## Docker Engine or Docker Desktop
 
-Each container in Hog can run on **Docker Engine** (native docker-ce, `/var/run/docker.sock`) or **Docker Desktop** (the LinuxKit VM). The Docker page has a runtime control above the command box, and each container in the list shows which runtime it is on, with a button to move it. Moving a container stops and removes it on the old runtime, then starts it on the new one. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over. Hog does not move an existing container until you click.
+Each container in Hog can run on **Docker Engine** (native docker-ce, `/var/run/docker.sock`) or **Docker Desktop** (the LinuxKit VM). **Settings → Containers** has a compact Engine/Desktop control, and each container in the list shows which runtime it is on. Open the ⋯ menu on a container to start, stop, restart, move, or remove it. Moving a container stops and removes it on the old runtime, then starts it on the new one. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over. Hog does not move an existing container until you click.
 
 If Docker Engine's socket is missing or this user cannot use it, the Engine button is disabled and the reason is shown. If Docker Desktop's socket is missing, the Desktop button is disabled.
 
 On Linux, new Tailscale installs default to Docker Engine when it is available. Engine Tailscale uses `--network host`, `/dev/net/tun`, and `NET_ADMIN`/`NET_RAW`, with `TS_USERSPACE=false` and a persistent `hog-tailscale-state` volume, so it can usually open a direct connection to your phone instead of a DERP relay. It publishes Jellyfin at `127.0.0.1:8096`. Tailscale that stays on Docker Desktop still uses the `hog-tailscale` network and `host.docker.internal:8096`, because `127.0.0.1` inside Desktop is the VM, not this computer. After you move Tailscale to Engine, sign in again, delete the old `hog` or `hog-1` machine in the Tailscale admin console, and approve the new one as an exit node. Confirm a direct path with `docker exec tailscale tailscale status` — peers should say `direct`, not `relay`.
 
-The same Docker page has a **Networks** card. It lists networks for the selected runtime (name, driver, subnet, attached containers), creates a bridge, macvlan, or ipvlan network, deletes unused user-defined networks, and can connect or disconnect a Hog-managed container. Built-in networks (`bridge`, `host`, `none`) and networks that still have containers cannot be deleted. A container that already uses the host network, such as Engine Tailscale, cannot join another network.
+**Settings → Networks** has a **Networks** card. Rows expand for subnet and attached containers, and the create and attach forms stay in dropdowns. It lists networks for the selected runtime (name, driver, subnet, attached containers), creates a bridge, macvlan, or ipvlan network, deletes unused user-defined networks, and can connect or disconnect a Hog-managed container. Built-in networks (`bridge`, `host`, `none`) and networks that still have containers cannot be deleted. A container that already uses the host network, such as Engine Tailscale, cannot join another network.
+
+
+## Local AI box
+
+**Settings → AI** (also on the home Toolbox) runs a local chat stack on Docker Engine:
+
+1. Press **Run Ollama**. Hog creates the `hog-ai` network if needed, starts `hog-ollama` with the `hog-ollama` volume at `/root/.ollama`, and uses `--gpus all` when the NVIDIA toolkit is ready. If no GPU is available, Ollama runs on the CPU and the page says so. Its API is published only on `127.0.0.1`, never on `0.0.0.0`.
+2. Press **Run Open WebUI**. That starts `hog-open-webui` on the same network with `OLLAMA_BASE_URL=http://hog-ollama:11434`, a `hog-open-webui` volume, and a port bound only to `127.0.0.1`. If Tailscale is signed in, Hog serves that port to your tailnet (HTTPS, no funnel).
+3. Pull a model from the short 12 GB list (for example `llama3.1:8b`) or type another validated name, then chat in Open WebUI on this computer or at the Tailscale address on your phone.
+4. The first account you create in Open WebUI becomes the admin.
+
+Models stay in the Ollama volume. Hog estimates whether a model fits the detected GPU memory and warns when disk space is low before a pull.
 
 ## Jellyfin GPU acceleration (NVIDIA)
 
 Docker Desktop on Linux runs containers inside a small virtual machine, so it cannot pass through an NVIDIA GPU. Hog can instead run Jellyfin on native Docker Engine (`/var/run/docker.sock`, docker-ce) with `--gpus all`. GPU acceleration requires Docker Engine and turns that runtime on for Jellyfin. Turning the GPU off leaves Jellyfin on Engine without the GPU; use the runtime control if you want it back on Docker Desktop. Tailscale can run on either runtime. If Tailscale is on Docker Engine it reaches Jellyfin at `127.0.0.1:8096`; on Docker Desktop it still uses `host.docker.internal:8096`.
 
-On the Docker page, the **GPU acceleration (NVIDIA)** card checks three things and shows copyable install commands when something is missing:
+On **Settings → Containers**, the **GPU acceleration (NVIDIA)** card checks three things and shows copyable install commands when something is missing:
 
 1. An NVIDIA GPU and driver (`nvidia-smi` works).
 2. Native Docker Engine, separate from Docker Desktop, with this user in the `docker` group.

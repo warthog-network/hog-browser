@@ -2318,3 +2318,231 @@ class RuntimeAndNetworkTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AiToolboxTest(unittest.TestCase):
+    def test_model_name_validation(self):
+        from guard import valid_model_name
+        self.assertTrue(valid_model_name("llama3.1:8b"))
+        self.assertTrue(valid_model_name("qwen2.5:14b"))
+        self.assertTrue(valid_model_name("mistral"))
+        self.assertTrue(valid_model_name("gemma2:9b"))
+        self.assertTrue(valid_model_name("library/llama3.1:8b-instruct-q4_k_m"))
+        self.assertFalse(valid_model_name(""))
+        self.assertFalse(valid_model_name("llama 3"))
+        self.assertFalse(valid_model_name("../escape"))
+        self.assertFalse(valid_model_name("http://evil.example"))
+        self.assertFalse(valid_model_name("name;rm"))
+        self.assertFalse(valid_model_name("a" * 81))
+        self.assertFalse(valid_model_name("-starts-with-dash"))
+        self.assertFalse(valid_model_name("foo:"))
+        self.assertFalse(valid_model_name(":tag"))
+
+    def test_ollama_command_uses_gpu_volume_network_and_loopback(self):
+        from guard import (
+            AI_MEMORY,
+            AI_NETWORK,
+            NVIDIA_CAPS_ENV,
+            NVIDIA_VISIBLE_ENV,
+            OLLAMA_BASE_ENV,
+            OLLAMA_IMAGE,
+            OLLAMA_MOUNT,
+            OLLAMA_NAME,
+            OPENWEBUI_IMAGE,
+            OPENWEBUI_MOUNT,
+            OPENWEBUI_NAME,
+            compose_run,
+            parse_run,
+        )
+        ollama_ports = (("127.0.0.1", "11434", "11434", "tcp"),)
+        args = compose_run(
+            OLLAMA_NAME,
+            OLLAMA_IMAGE,
+            ports=ollama_ports,
+            mounts=(OLLAMA_MOUNT,),
+            network=AI_NETWORK,
+            gpus=True,
+            memory=AI_MEMORY,
+            command=(),
+        )
+        self.assertIn("--gpus", args)
+        self.assertEqual(args[args.index("--gpus") + 1], "all")
+        self.assertIn("--network", args)
+        self.assertEqual(args[args.index("--network") + 1], AI_NETWORK)
+        self.assertIn("-v", args)
+        self.assertEqual(args[args.index("-v") + 1], OLLAMA_MOUNT)
+        self.assertIn("-p", args)
+        self.assertEqual(args[args.index("-p") + 1], "127.0.0.1:11434:11434/tcp")
+        self.assertNotIn("0.0.0.0", " ".join(args))
+        self.assertIn("--memory", args)
+        self.assertEqual(args[args.index("--memory") + 1], "16g")
+        joined = " ".join(args)
+        self.assertNotIn("-p 11434:", joined)
+        self.assertNotIn("-p 0.0.0.0:", joined)
+
+        text = canonical_command(OLLAMA_NAME, OLLAMA_IMAGE, ollama_ports, False, (), (), (), (), AI_NETWORK)
+        parsed = parse_run(text)
+        self.assertEqual(parsed[0], OLLAMA_NAME)
+        self.assertEqual(parsed[2], ollama_ports)
+        self.assertEqual(parsed[8], AI_NETWORK)
+        self.assertEqual(parse_run(canonical_command(*parsed)), parsed)
+
+        webui_ports = (("127.0.0.1", "3000", "8080", "tcp"),)
+        webui = compose_run(
+            OPENWEBUI_NAME,
+            OPENWEBUI_IMAGE,
+            ports=webui_ports,
+            env=(OLLAMA_BASE_ENV,),
+            mounts=(OPENWEBUI_MOUNT,),
+            network=AI_NETWORK,
+            memory=AI_MEMORY,
+            command=(),
+        )
+        self.assertEqual(webui[webui.index("-p") + 1], "127.0.0.1:3000:8080/tcp")
+        self.assertNotIn("--gpus", webui)
+        self.assertIn(OLLAMA_BASE_ENV, webui)
+        self.assertEqual(webui[webui.index("-v") + 1], OPENWEBUI_MOUNT)
+        self.assertNotIn("0.0.0.0", " ".join(webui))
+        with self.assertRaises(CommandError):
+            parse_run("docker run --name ubuntu --network hog-ai ubuntu:24.04 sleep infinity")
+        with self.assertRaises(CommandError):
+            parse_run(f"docker run --name {OLLAMA_NAME} --network host {OLLAMA_IMAGE}")
+
+    def test_prepare_ai_container_binds_loopback_and_skips_public_publish(self):
+        from guard import (
+            AI_NETWORK,
+            NVIDIA_VISIBLE_ENV,
+            OLLAMA_BASE_ENV,
+            OLLAMA_IMAGE,
+            OLLAMA_MOUNT,
+            OLLAMA_NAME,
+            OPENWEBUI_IMAGE,
+            OPENWEBUI_NAME,
+            RUNTIME_ENGINE,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.ensure_ai_network = lambda sock=None: ""
+            guard.port_open = lambda port: False
+            guard.ai_gpu_fields = lambda: {"ready": True, "name": "NVIDIA GeForce RTX 3060", "memoryMb": 12288, "notice": "ready"}
+            prepared, error = guard._prepare_ai_container(OLLAMA_NAME, OLLAMA_IMAGE, (), (), RUNTIME_ENGINE)
+            self.assertEqual(error, "")
+            mounts, env, ports, network, gpus, memory = prepared
+            self.assertEqual(mounts, (OLLAMA_MOUNT,))
+            self.assertEqual(network, AI_NETWORK)
+            self.assertTrue(gpus)
+            self.assertEqual(memory, "16g")
+            self.assertEqual(ports, (("127.0.0.1", "11434", "11434", "tcp"),))
+            self.assertTrue(all(port[0] == "127.0.0.1" for port in ports))
+            self.assertIn(NVIDIA_VISIBLE_ENV, env)
+            cpu, error = guard._prepare_ai_container(OLLAMA_NAME, OLLAMA_IMAGE, (), (), "desktop")
+            self.assertEqual(error, "")
+            self.assertFalse(cpu[4])
+            webui, error = guard._prepare_ai_container(OPENWEBUI_NAME, OPENWEBUI_IMAGE, (), (), RUNTIME_ENGINE)
+            self.assertEqual(error, "")
+            mounts, env, ports, network, gpus, memory = webui
+            self.assertIn(OLLAMA_BASE_ENV, env)
+            self.assertEqual(ports[0][0], "127.0.0.1")
+            self.assertEqual(ports[0][2], "8080")
+            self.assertFalse(gpus)
+            self.assertEqual(network, AI_NETWORK)
+
+    def test_apply_command_starts_ollama_without_publishing_on_all_interfaces(self):
+        from guard import AI_NETWORK, OLLAMA_IMAGE, OLLAMA_MOUNT, OLLAMA_NAME, RUNTIME_ENGINE
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            calls = []
+            state = {"up": False}
+
+            def inspect(name):
+                if name != OLLAMA_NAME or not state["up"]:
+                    return None, "missing"
+                return {
+                    "Name": f"/{OLLAMA_NAME}",
+                    "State": {"Status": "running", "Running": True},
+                    "Config": {"Image": OLLAMA_IMAGE},
+                    "HostConfig": {
+                        "Privileged": False,
+                        "NetworkMode": AI_NETWORK,
+                        "PidMode": "",
+                        "IpcMode": "private",
+                        "CapAdd": None,
+                        "Binds": None,
+                        "Devices": None,
+                    },
+                    "Mounts": [
+                        {"Name": "hog-ollama", "Source": "/var/lib/docker/volumes/hog-ollama/_data", "Destination": "/root/.ollama", "Type": "volume"},
+                    ],
+                }, ""
+
+            def run(args, timeout=8):
+                calls.append(list(args))
+                if args[0] == "run":
+                    state["up"] = True
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            guard.inspect = inspect
+            guard.run = run
+            guard.run_on = lambda args, timeout=8, sock=None: run(args, timeout)
+            guard.container_run = lambda name, args, timeout=8: run(args, timeout)
+            guard.items = lambda: []
+            guard.docker_running = lambda: True
+            guard.ensure_ai_network = lambda sock=None: ""
+            guard.port_open = lambda port: False
+            guard.ai_gpu_fields = lambda: {"ready": True, "name": "NVIDIA GeForce RTX 3060", "memoryMb": 12288, "notice": "ready"}
+            guard.container_runtime = lambda name="": RUNTIME_ENGINE
+            guard.container_sock = lambda name="": None
+            guard.prepare_tailscale_firewall = lambda name, info: ""
+            guard._attach_gpu = lambda payload: payload
+            line = canonical_command(OLLAMA_NAME, OLLAMA_IMAGE, (("127.0.0.1", "11434", "11434", "tcp"),), False, (), (), (), (), AI_NETWORK)
+            result = guard.handle("run", line, "engine")
+            self.assertTrue(result["ok"], result.get("error"))
+            run_args = next(item for item in calls if item and item[0] == "run")
+            publish = run_args[run_args.index("-p") + 1]
+            self.assertTrue(publish.startswith("127.0.0.1:"))
+            self.assertIn(":11434/tcp", publish)
+            self.assertNotIn("0.0.0.0", " ".join(run_args))
+            self.assertEqual(run_args[run_args.index("-v") + 1], OLLAMA_MOUNT)
+            self.assertEqual(run_args[run_args.index("--network") + 1], AI_NETWORK)
+            self.assertIn("--gpus", run_args)
+            self.assertEqual(run_args[run_args.index("--memory") + 1], "16g")
+
+    def test_publish_port_keeps_other_services(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            seen = []
+
+            def capture(args, timeout=8, sock=None):
+                seen.append(list(args))
+                return "ok", 0
+
+            guard.capture = capture
+            problem, url = guard.publish_services(({"port": 8096, "kind": "tcp"}, {"port": 3000, "kind": "https"}))
+            self.assertEqual((problem, url), ("", ""))
+            text = " ".join(" ".join(item) for item in seen)
+            self.assertIn("--tcp=8096", text)
+            self.assertIn("--https=3000", text)
+            self.assertNotIn("funnel", text)
+            self.assertTrue(any(item[-1] == "tcp://host.docker.internal:8096" for item in seen))
+            self.assertTrue(any(item[-1] == "http://host.docker.internal:3000" for item in seen))
+            # Publishing Open WebUI must not turn off Jellyfin's tcp serve.
+            off_calls = [item for item in seen if item and item[-1] == "off"]
+            self.assertTrue(any("--https=8096" in item for item in off_calls))
+            self.assertFalse(any("--tcp=8096" in item and item[-1] == "off" for item in seen))
+            self.assertFalse(any("--https=3000" in item and item[-1] == "off" for item in seen))
+
+    def test_publish_port_engine_uses_loopback_for_open_webui(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.container_runtime = lambda name="": "engine"
+            seen = []
+
+            def capture(args, timeout=8, sock=None):
+                seen.append(list(args))
+                return "ok", 0
+
+            guard.capture = capture
+            problem, url = guard.publish_port(3000, kind="https")
+            self.assertEqual((problem, url), ("", ""))
+            self.assertEqual(seen[0][-1], "http://127.0.0.1:3000")
+            self.assertNotIn("funnel", seen[0])

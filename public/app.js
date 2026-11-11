@@ -418,34 +418,45 @@ function showBrowserSettings() {
   $("settings-btn").classList.add("is-open");
   reportView(false);
   desktopCommand("containers:list");
-  requestNetworks(networkRuntime);
   requestAnimationFrame(reportShareDrop);
 }
 
+const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "ai", "tailscale"];
+
+function normalizeSettingsPage(page) {
+  if (page === "docker") return "containers";
+  return SETTINGS_SECTIONS.includes(page) ? page : "containers";
+}
+
 function showSettingsPage(page) {
-  const next = page === "files" ? "files" : "docker";
+  const next = normalizeSettingsPage(page);
   const wasHidden = $("browser-settings").hidden;
   if (wasHidden) showBrowserSettings();
-  $("settings-docker").hidden = next !== "docker";
-  $("settings-files").hidden = next !== "files";
+  for (const name of SETTINGS_SECTIONS) {
+    const pane = $(`settings-${name}`);
+    if (pane) pane.hidden = name !== next;
+  }
   $("browser-settings").scrollTop = 0;
   const menu = $("settings-menu");
   if (menu) menu.hidden = true;
   $("settings-btn").setAttribute("aria-expanded", "false");
   $("settings-btn").classList.add("is-open");
-  document.querySelectorAll("#settings-menu [data-settings]").forEach((button) => {
+  document.querySelectorAll("#settings-menu [data-settings], #settings-nav [data-settings]").forEach((button) => {
     button.setAttribute("aria-current", button.dataset.settings === next ? "page" : "false");
   });
   if (!wasHidden) {
     desktopCommand("containers:list");
-    if (next === "docker") requestNetworks(networkRuntime);
     requestAnimationFrame(reportShareDrop);
   }
-  if (next === "files") {
+  if (next === "networks") requestNetworks(networkRuntime);
+  if (next === "files" || next === "tailscale") {
     desktopCommand("containers:share-status");
+  }
+  if (next === "general") {
     desktopCommand("containers:browser-default");
     desktopCommand("containers:update-status");
   }
+  if (next === "ai") desktopCommand("containers:ai-models");
 }
 
 function showHome() {
@@ -971,6 +982,7 @@ function closePopovers() {
   if (menu) menu.hidden = true;
   const settingsBtn = $("settings-btn");
   if (settingsBtn) settingsBtn.setAttribute("aria-expanded", "false");
+  if (typeof closeKebabs === "function") closeKebabs();
   setNetOpen(false);
   syncPageView();
 }
@@ -1809,7 +1821,20 @@ function composeCommand(spec) {
 
 function imageBringsCommand(image) {
   const text = String(image || "").toLowerCase();
-  return text.includes("wireguard") || text.includes("tailscale") || text.includes("cartesi") || text.includes("jellyfin");
+  return text.includes("wireguard") || text.includes("tailscale") || text.includes("cartesi") || text.includes("jellyfin") || text.includes("ollama") || text.includes("open-webui");
+}
+
+function allowedLaunchNetwork(name, image, network) {
+  if (!network) return true;
+  const img = String(image || "").toLowerCase();
+  if (network === "hog-tailscale" || network === "host") {
+    return name === "tailscale" && img.includes("tailscale");
+  }
+  if (network === "hog-ai") {
+    return (name === "hog-ollama" && img.startsWith("ollama/ollama"))
+      || (name === "hog-open-webui" && img.includes("open-webui/open-webui"));
+  }
+  return false;
 }
 
 function readPort(text) {
@@ -1929,7 +1954,7 @@ function readLaunch(text) {
     }
     if (token === "--network" || token === "--net" || token.startsWith("--network=") || token.startsWith("--net=")) {
       const value = token === "--network" || token === "--net" ? tokens[index + 1] : token.slice(token.indexOf("=") + 1);
-      if ((value !== "hog-tailscale" && value !== "host") || network) return null;
+      if ((value !== "hog-tailscale" && value !== "host" && value !== "hog-ai") || network) return null;
       network = value;
       index += token === "--network" || token === "--net" ? 2 : 1;
       continue;
@@ -1947,7 +1972,7 @@ function readLaunch(text) {
   if (command.some((part) => !/^[A-Za-z0-9_./:-]+$/.test(part))) return null;
   if (tun && !vpn) return null;
   if (ports.length > 8 || env.length > 16) return null;
-  if (network && (name !== "tailscale" || !String(image).toLowerCase().includes("tailscale") || (network !== "hog-tailscale" && network !== "host"))) return null;
+  if (network && !allowedLaunchNetwork(name, image, network)) return null;
   return { name, image, ports, vpn, command, env, sysctls, network };
 }
 
@@ -2114,17 +2139,24 @@ function paintNetworks(payload) {
   } else {
     for (const item of rows) {
       const li = document.createElement("li");
-      const line = document.createElement("div");
-      line.className = "menu-row";
+      const details = document.createElement("details");
+      details.className = "network-item";
+      const summary = document.createElement("summary");
+      summary.className = "menu-row";
       const title = document.createElement("span");
       title.textContent = item.name;
       const small = document.createElement("small");
-      const bits = [item.driver, item.subnet, (item.containers || []).join(", ")].filter(Boolean);
+      const bits = [item.driver, item.subnet].filter(Boolean);
       small.textContent = bits.join(" · ") || "no subnet";
       if (item.internal) small.textContent += " · internal";
       if (item.builtin) small.textContent += " · built-in";
-      line.append(title, small);
-      li.append(line);
+      const count = (item.containers || []).length;
+      if (count) small.textContent += count === 1 ? " · 1 container" : ` · ${count} containers`;
+      summary.append(title, small);
+      const meta = document.createElement("p");
+      meta.className = "network-meta";
+      const attached = (item.containers || []).join(", ") || "No containers attached.";
+      meta.textContent = [item.gateway ? `Gateway ${item.gateway}` : "", attached].filter(Boolean).join(" · ");
       const actions = document.createElement("div");
       actions.className = "menu-actions";
       const remove = document.createElement("button");
@@ -2138,13 +2170,15 @@ function paintNetworks(payload) {
         : (item.containers || []).length
           ? "Disconnect every container before deleting this network."
           : "Delete this unused network.";
-      remove.addEventListener("click", () => {
+      remove.addEventListener("click", (event) => {
+        event.preventDefault();
         if (item.builtin || (item.containers || []).length) return;
         if (!window.confirm(`Delete network ${item.name}? This only works when nothing is attached.`)) return;
         desktopCommand(`containers:network-remove:${networkRuntime}:${item.name}`);
       });
       actions.append(remove);
-      li.append(actions);
+      details.append(summary, meta, actions);
+      li.append(details);
       list.append(li);
     }
   }
@@ -2536,7 +2570,7 @@ function paintJellyfinPhone(payload) {
 }
 
 function openJellyfinConnect() {
-  showSettingsPage("files");
+  showSettingsPage("tailscale");
   requestAnimationFrame(() => {
     const panel = $("jellyfin-connect");
     if (panel) panel.scrollIntoView({ block: "start" });
@@ -2545,7 +2579,7 @@ function openJellyfinConnect() {
 
 function openTailscaleShares() {
   sharesOpen = true;
-  showSettingsPage("files");
+  showSettingsPage("tailscale");
   requestAnimationFrame(() => {
     const panel = $("jellyfin-connect") || $("exit-node-guide") || $("tailscale-shares");
     if (panel) panel.scrollIntoView({ block: "start" });
@@ -2926,6 +2960,168 @@ function openHogRelease(url) {
   if (typeof openUrl === "function") openUrl(allowed);
 }
 
+
+function closeKebabs(except) {
+  document.querySelectorAll(".kebab-menu").forEach((menu) => {
+    if (except && menu === except) return;
+    menu.hidden = true;
+    const button = menu.parentElement?.querySelector(".kebab");
+    if (button) button.setAttribute("aria-expanded", "false");
+  });
+}
+
+function statusPill(label, kind) {
+  const pill = document.createElement("span");
+  pill.className = `pill${kind ? ` is-${kind}` : ""}`;
+  pill.textContent = label;
+  return pill;
+}
+
+function runAiPreset(kind) {
+  const ollama = kind === "hog-open-webui" ? false : true;
+  const name = ollama ? "hog-ollama" : "hog-open-webui";
+  const image = ollama ? "ollama/ollama:latest" : "ghcr.io/open-webui/open-webui:main";
+  const existing = (lastContainerItems || []).find((item) => item && item.name === name);
+  const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
+  const runtime = preferEngine ? "engine" : (runtimeOk("desktop") ? "desktop" : "engine");
+  const status = ollama
+    ? (preferEngine
+      ? "Ollama will run on Docker Engine. The GPU is used when the toolkit is ready. Its API stays on 127.0.0.1."
+      : "Ollama will run on Docker Desktop on the CPU. Its API stays on 127.0.0.1.")
+    : "Open WebUI will join the hog-ai network, listen on 127.0.0.1, and be served to your phone over Tailscale only. The first account you create becomes the admin.";
+  fillLaunch(name, image, status, {
+    ports: ollama
+      ? [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }]
+      : [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }],
+    command: [],
+    env: ollama ? [] : ["OLLAMA_BASE_URL=http://hog-ollama:11434"],
+    network: "hog-ai",
+    runtime,
+  });
+  sendLaunch(false);
+}
+
+function paintAi(payload) {
+  if (!payload || !payload.ai) return;
+  const ai = payload.ai;
+  const gpu = ai.gpu || {};
+  const notice = $("ai-gpu-notice");
+  if (notice) notice.textContent = gpu.notice || "";
+  const disk = $("ai-disk-warning");
+  if (disk) {
+    const warning = (ai.disk && ai.disk.warning) || "";
+    disk.hidden = !warning;
+    disk.textContent = warning;
+  }
+  const status = $("ai-status");
+  if (status && Object.prototype.hasOwnProperty.call(payload, "notice")) {
+    status.textContent = payload.notice || "";
+  }
+  const error = $("ai-error");
+  if (error && (Object.prototype.hasOwnProperty.call(payload, "ai") || Object.prototype.hasOwnProperty.call(payload, "error"))) {
+    error.textContent = payload.ok === false ? (payload.error || "") : (ai.modelsError || "");
+  }
+  const paintService = (id, item, extra) => {
+    const host = $(id);
+    if (!host || !item) return;
+    host.replaceChildren();
+    const state = item.state || "missing";
+    host.append(statusPill(state === "running" ? "Running" : state === "missing" ? "Not created" : state, state === "running" ? "running" : "stopped"));
+    if (item.runtime) host.append(statusPill(item.runtime === "engine" ? "Engine" : "Desktop", item.runtime === "engine" ? "engine" : "desktop"));
+    if (item.gpu) host.append(statusPill("GPU", "gpu"));
+    (extra || []).forEach((pill) => host.append(pill));
+  };
+  paintService("ai-ollama-pills", ai.ollama);
+  const webuiExtra = [];
+  if (ai.openWebui && ai.openWebui.phoneUrl) webuiExtra.push(statusPill("Tailnet", "tailnet"));
+  paintService("ai-webui-pills", ai.openWebui, webuiExtra);
+  const urlLine = $("ai-webui-url");
+  const openBtn = $("ai-open-webui");
+  const copyBtn = $("ai-copy-webui");
+  const local = ai.openWebui && ai.openWebui.localUrl;
+  const phone = ai.openWebui && ai.openWebui.phoneUrl;
+  if (urlLine) {
+    urlLine.hidden = !local && !phone;
+    urlLine.textContent = [local ? `This computer: ${local}` : "", phone ? `Phone: ${phone}` : ""].filter(Boolean).join(" · ");
+  }
+  if (openBtn) {
+    openBtn.hidden = !local;
+    openBtn.dataset.url = local || "";
+  }
+  if (copyBtn) {
+    copyBtn.hidden = !phone;
+    copyBtn.dataset.url = phone || "";
+  }
+  const runOllama = $("ai-run-ollama");
+  if (runOllama) runOllama.textContent = ai.ollama && ai.ollama.state === "running" ? "Ollama is running" : "Run Ollama";
+  const runWebui = $("ai-run-webui");
+  if (runWebui) runWebui.textContent = ai.openWebui && ai.openWebui.state === "running" ? "Open WebUI is running" : "Run Open WebUI";
+  const suggestions = $("ai-suggestions");
+  if (suggestions && Array.isArray(ai.suggestions)) {
+    suggestions.replaceChildren();
+    for (const item of ai.suggestions) {
+      if (!item || !item.name) continue;
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.model = item.name;
+      const title = document.createElement("span");
+      title.textContent = item.label || item.name;
+      const meta = document.createElement("small");
+      meta.textContent = `${item.name} · ${item.disk || ""}`;
+      button.append(title, meta, statusPill(item.fit === "fits" ? "Fits 12 GB" : item.fit === "tight" ? "Tight" : item.fit === "over" ? "Too large" : "CPU", item.fit || "cpu"));
+      button.addEventListener("click", () => {
+        const input = $("ai-pull-name");
+        if (input) input.value = item.name;
+        if (input) input.focus();
+      });
+      li.append(button);
+      suggestions.append(li);
+    }
+  }
+  const pull = payload.aiPull;
+  const progress = $("ai-pull-progress");
+  if (progress) {
+    if (pull && pull.status) {
+      progress.hidden = false;
+      const pct = Number.isInteger(pull.percent) ? ` ${pull.percent}%` : "";
+      progress.textContent = `${pull.name || ""}: ${pull.status}${pct}`;
+    } else if (payload.ok !== false) {
+      progress.hidden = true;
+    }
+  }
+  const models = Array.isArray(ai.models) ? ai.models : [];
+  const empty = $("ai-models-empty");
+  const list = $("ai-model-list");
+  if (empty) empty.hidden = models.length > 0 || (ai.ollama && ai.ollama.state !== "running");
+  if (empty && ai.ollama && ai.ollama.state !== "running") empty.textContent = "Start Ollama to list and pull models.";
+  else if (empty) empty.textContent = "No models yet. Pull one from the list above.";
+  if (list) {
+    list.replaceChildren();
+    for (const item of models) {
+      if (!item || !item.name) continue;
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "media-name";
+      name.textContent = item.name;
+      const meta = document.createElement("span");
+      meta.className = "media-size";
+      const fit = item.fit === "fits" ? "fits GPU" : item.fit === "tight" ? "tight on GPU" : item.fit === "over" ? "needs more VRAM" : "CPU";
+      meta.textContent = [item.sizeLabel, item.parameter, fit].filter(Boolean).join(" · ");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "tiny";
+      remove.textContent = "Delete";
+      remove.addEventListener("click", () => {
+        if (!window.confirm(`Delete model ${item.name}? This removes the downloaded files.`)) return;
+        desktopCommand(`containers:ai-delete:${item.name}`);
+      });
+      li.append(name, meta, remove);
+      list.append(li);
+    }
+  }
+}
+
 function renderContainers(payload) {
   const list = $("container-list");
   const error = $("container-error");
@@ -2978,6 +3174,7 @@ function renderContainers(payload) {
     logs.textContent = payload.logs.trim() || "No logs.";
   }
   if (payload.qr != null) paintQr(payload.qr);
+  if (payload.ai) paintAi(payload);
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.disabled = false;
   });
@@ -2994,26 +3191,33 @@ function renderContainers(payload) {
   }
   for (const item of payload.items) {
     const li = document.createElement("li");
+    const wrap = document.createElement("div");
+    wrap.className = "container-row";
     const line = document.createElement("div");
     line.className = "menu-row";
     const title = document.createElement("span");
     title.textContent = item.name;
-    const small = document.createElement("small");
-    const runtimeLabel = item.runtime === "engine" ? "Docker Engine" : "Docker Desktop";
-    small.textContent = `${item.state || "unknown"} · ${runtimeLabel}${item.image ? ` · ${item.image}` : ""}`;
-    line.append(title, small);
-    li.append(line);
+    const pills = document.createElement("div");
+    pills.className = "status-pills";
+    const running = item.state === "running";
+    pills.append(statusPill(running ? "Running" : (item.state || "unknown"), running ? "running" : "stopped"));
+    const runtimeLabel = item.runtime === "engine" ? "Engine" : "Desktop";
+    pills.append(statusPill(runtimeLabel, item.runtime === "engine" ? "engine" : "desktop"));
+    if (item.name === "jellyfin" && running) pills.append(statusPill("Tailnet", "tailnet"));
+    if (item.name === "hog-ollama" && payload.ai && payload.ai.ollama && payload.ai.ollama.gpu) pills.append(statusPill("GPU", "gpu"));
+    if (item.image) {
+      const image = statusPill(item.image);
+      image.title = item.image;
+      pills.append(image);
+    }
+    line.append(title, pills);
     if (item.reason) {
       const note = document.createElement("p");
       note.className = "note";
       note.textContent = item.reason;
-      li.append(note);
+      line.append(note);
     }
-    const row = document.createElement("div");
-    row.className = "menu-actions";
-    const running = item.state === "running";
     if (item.name === "jellyfin" && running && !item.reason) {
-      small.textContent = `${small.textContent} · click for Tailscale IP`;
       line.classList.add("is-share");
       line.tabIndex = 0;
       line.setAttribute("role", "button");
@@ -3026,7 +3230,6 @@ function renderContainers(payload) {
       });
     }
     if (item.name === "tailscale" && running && !item.reason) {
-      small.textContent = `${small.textContent} · click for Tailscale IP`;
       line.classList.add("is-share");
       line.tabIndex = 0;
       line.setAttribute("role", "button");
@@ -3038,20 +3241,54 @@ function renderContainers(payload) {
         openTailscaleShares();
       });
     }
+    if ((item.name === "hog-ollama" || item.name === "hog-open-webui") && running && !item.reason) {
+      line.classList.add("is-share");
+      line.tabIndex = 0;
+      line.setAttribute("role", "button");
+      line.title = "Open the AI toolbox";
+      line.addEventListener("click", () => showSettingsPage("ai"));
+      line.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        showSettingsPage("ai");
+      });
+    }
+    const kebab = document.createElement("button");
+    kebab.type = "button";
+    kebab.className = "kebab";
+    kebab.setAttribute("aria-haspopup", "menu");
+    kebab.setAttribute("aria-expanded", "false");
+    kebab.setAttribute("aria-label", `Actions for ${item.name}`);
+    kebab.textContent = "⋯";
+    const menu = document.createElement("div");
+    menu.className = "kebab-menu";
+    menu.setAttribute("role", "menu");
+    menu.hidden = true;
+    kebab.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const willOpen = menu.hidden;
+      closeKebabs();
+      menu.hidden = !willOpen;
+      kebab.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    });
     const actions = [["Command", "command"]];
     const other = item.runtime === "engine" ? "desktop" : "engine";
     const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
     if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
-    if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"]);
+    if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
     actions.push(...(running
       ? [["Stop", "stop"], ["Logs", "logs"]]
       : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
+    if (running) actions.push(["Recreate", "recreate-prompt"]);
     for (const [label, action] of actions) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "tiny";
+      button.setAttribute("role", "menuitem");
       button.textContent = label;
-      button.addEventListener("click", () => {
+      if (action === "remove") button.classList.add("is-danger");
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeKebabs();
         if (action === "command") {
           const image = item.image && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,200}$/.test(item.image) && !item.image.includes("..")
             ? item.image
@@ -3066,11 +3303,22 @@ function renderContainers(payload) {
             if (extra.runtime !== "engine") {
               extra.sysctls = ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"];
             }
+          } else if (item.name === "hog-ollama" || item.name === "hog-open-webui") {
+            extra.command = [];
+            extra.runtime = item.runtime === "engine" ? "engine" : "desktop";
+            extra.network = "hog-ai";
+            extra.ports = item.name === "hog-ollama"
+              ? [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }]
+              : [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }];
+            if (item.name === "hog-open-webui") extra.env = ["OLLAMA_BASE_URL=http://hog-ollama:11434"];
           } else if (item.runtime) {
             extra.runtime = item.runtime;
           }
+          const advanced = $("container-advanced");
+          if (advanced) advanced.open = true;
           fillLaunch(item.name, image, `Command for ${item.name}. Add a port, then Recreate. Docker cannot add a port in place.`, extra);
-          $("container-command").focus();
+          showSettingsPage("containers");
+          $("container-command")?.focus();
           return;
         }
         if (action === "runtime") {
@@ -3082,23 +3330,37 @@ function renderContainers(payload) {
           desktopCommand(`containers:runtime-set:${item.name}:${target}`);
           return;
         }
+        if (action === "recreate-prompt") {
+          const advanced = $("container-advanced");
+          if (advanced) advanced.open = true;
+          showSettingsPage("containers");
+          $("container-status").textContent = `Use Recreate in Advanced to replace ${item.name}.`;
+          return;
+        }
         if (action === "shell") beginShell(item.name);
         else if (action === "remove" && !window.confirm(`Remove ${item.name}? This deletes that container.`)) return;
-        else {
+        else if (action === "logs") {
+          const advanced = $("container-advanced");
+          if (advanced) advanced.open = true;
+          desktopCommand(`containers:logs:${item.name}`);
+        } else {
           if (action === "commit") error.textContent = `Saving ${item.name}:local…`;
           if (action === "remove") error.textContent = `Removing ${item.name}…`;
           desktopCommand(`containers:${action}:${item.name}`);
         }
       });
-      row.append(button);
+      menu.append(button);
     }
-    li.append(row);
+    wrap.append(line, kebab);
+    li.append(wrap, menu);
     list.append(li);
   }
+
   if (payload.shell) connectShell(payload.shell);
   if (payload.commit) noteCommit(payload.commit);
 }
 window.__hogContainers = renderContainers;
+window.__hogAi = paintAi;
 window.__hogUpdate = paintUpdate;
 
 function syncNetworkActions() {
@@ -4518,7 +4780,11 @@ function menuItems(kind) {
     return [...$("settings-menu").querySelectorAll("[data-settings]")].map((button) => ({
       title: button.querySelector("span")?.textContent || "",
       sub: button.querySelector("small")?.textContent || "",
-      accent: button.dataset.settings === "files" ? "flare" : "amber",
+      accent: button.dataset.settings === "files" || button.dataset.settings === "tailscale"
+        ? "flare"
+        : button.dataset.settings === "general" || button.dataset.settings === "ai"
+          ? "gold"
+          : "amber",
       current: button.getAttribute("aria-current") === "page",
     }));
   }
@@ -4895,6 +5161,83 @@ function bind() {
     event.stopPropagation();
     showSettingsPage(button.dataset.settings);
   });
+  const settingsNav = $("settings-nav");
+  if (settingsNav) {
+    settingsNav.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-settings]");
+      if (!button) return;
+      showSettingsPage(button.dataset.settings);
+    });
+    settingsNav.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const buttons = [...settingsNav.querySelectorAll("[data-settings]")];
+      const index = buttons.indexOf(document.activeElement);
+      if (index < 0) return;
+      event.preventDefault();
+      const next = event.key === "ArrowDown"
+        ? buttons[(index + 1) % buttons.length]
+        : buttons[(index - 1 + buttons.length) % buttons.length];
+      next.focus();
+    });
+  }
+  document.querySelectorAll("#home [data-settings]").forEach((button) => {
+    button.addEventListener("click", () => showSettingsPage(button.dataset.settings));
+  });
+  const bindAiRun = (id, kind) => {
+    const button = $(id);
+    if (!button) return;
+    button.addEventListener("click", () => {
+      showSettingsPage("ai");
+      const status = $("ai-status");
+      if (status) status.textContent = kind === "hog-ollama" ? "Starting Ollama…" : "Starting Open WebUI…";
+      runAiPreset(kind);
+    });
+  };
+  bindAiRun("ai-run-ollama", "hog-ollama");
+  bindAiRun("ai-run-webui", "hog-open-webui");
+  const openWebui = $("ai-open-webui");
+  if (openWebui) {
+    openWebui.addEventListener("click", () => {
+      const url = openWebui.dataset.url || "";
+      if (!url.startsWith("http://127.0.0.1:")) return;
+      if (typeof createTab === "function") createTab();
+      if (typeof openUrl === "function") openUrl(url);
+    });
+  }
+  const copyWebui = $("ai-copy-webui");
+  if (copyWebui) {
+    copyWebui.addEventListener("click", async () => {
+      const url = copyWebui.dataset.url || "";
+      if (!url) return;
+      try {
+        await navigator.clipboard.writeText(url);
+        copyWebui.textContent = "Copied";
+        setTimeout(() => { copyWebui.textContent = "Copy phone address"; }, 1200);
+      } catch {
+        copyWebui.textContent = url;
+      }
+    });
+  }
+  const pullForm = $("ai-pull-form");
+  if (pullForm) {
+    pullForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = ($("ai-pull-name")?.value || "").trim().toLowerCase();
+      if (!/^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/.test(name) || name.length > 80 || name.includes("..")) {
+        const error = $("ai-error");
+        if (error) error.textContent = "Use a model name like llama3.1:8b.";
+        return;
+      }
+      const warning = $("ai-disk-warning");
+      if (warning && !warning.hidden && !window.confirm(`${warning.textContent} Pull ${name} anyway?`)) return;
+      const progress = $("ai-pull-progress");
+      if (progress) {
+        progress.hidden = false;
+        progress.textContent = `Pulling ${name}…`;
+      }
+      desktopCommand(`containers:ai-pull:${name}`);
+    });
+  }
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.addEventListener("click", () => {
       const kind = button.dataset.launch;
@@ -4958,10 +5301,39 @@ function bind() {
         return;
       }
       if (kind === "jellyfin") {
-        fillLaunch(kind, button.dataset.image, "In Docker, click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media. Use GPU acceleration (NVIDIA) on this page for NVENC.", {
+        fillLaunch(kind, button.dataset.image, "Click Jellyfin, then Run. That creates the empty folder ~/hog-shares and attaches it inside Jellyfin at /media. Use GPU acceleration (NVIDIA) on this page for NVENC.", {
           ports: [{ bind: "127.0.0.1", host: "8096", dest: "8096", proto: "tcp" }],
           command: [],
         });
+        return;
+      }
+      if (kind === "hog-ollama") {
+        const existing = (lastContainerItems || []).find((item) => item && item.name === "hog-ollama");
+        const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
+        fillLaunch(kind, button.dataset.image, preferEngine
+          ? "Ollama will run on Docker Engine and use the GPU when it is ready. The API stays on 127.0.0.1. Open the AI page to pull models."
+          : "Ollama will run on this runtime. Without a GPU it uses the CPU. The API stays on 127.0.0.1.", {
+          ports: [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }],
+          command: [],
+          network: "hog-ai",
+          runtime: preferEngine ? "engine" : "desktop",
+        });
+        const advanced = $("container-advanced");
+        if (advanced) advanced.open = true;
+        return;
+      }
+      if (kind === "hog-open-webui") {
+        const existing = (lastContainerItems || []).find((item) => item && item.name === "hog-open-webui");
+        const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
+        fillLaunch(kind, button.dataset.image, "Open WebUI joins the hog-ai network so it can reach Ollama by name. It listens on 127.0.0.1 and is served to your phone over Tailscale only. The first account you create becomes the admin.", {
+          ports: [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }],
+          command: [],
+          env: ["OLLAMA_BASE_URL=http://hog-ollama:11434"],
+          network: "hog-ai",
+          runtime: preferEngine ? "engine" : "desktop",
+        });
+        const advanced = $("container-advanced");
+        if (advanced) advanced.open = true;
         return;
       }
       fillLaunch(kind, button.dataset.image, `Command for ${button.dataset.image} as ${kind}. Add a port or the VPN interface, then Run.`);
