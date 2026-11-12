@@ -7,6 +7,7 @@
   <link rel="icon" href="favicon.svg">
   <link rel="stylesheet" href="xterm.css">
   <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="retro.css">
 </head>
 <body>
   <div id="boot-flash" class="boot-flash" role="button" tabindex="0" aria-label="Skip the intro">
@@ -25,8 +26,9 @@
         <input id="address" type="text" autocomplete="off" spellcheck="false" placeholder="Search or URL" aria-label="Address" role="combobox" aria-expanded="false" aria-controls="suggestions">
         <div id="suggestions" class="suggestions" hidden></div>
       </form>
-      <button type="button" id="star" class="icon" aria-label="Bookmark this page" aria-pressed="false">☆</button>
-      <div id="bookmarks" class="bookmarks" aria-label="Bookmarks"></div>
+      <button type="button" id="star" class="icon" aria-label="Bookmark this page (Ctrl+D)" title="Bookmark this page (Ctrl+D)" aria-pressed="false">☆</button>
+      <div id="bookmarks" class="bookmarks" aria-label="Favorites"></div>
+      <button type="button" id="bookmarks-btn" class="icon" aria-label="Bookmarks (Ctrl+Shift+O)" title="Bookmarks (Ctrl+Shift+O)">▤</button>
       <button type="button" id="zoom-btn" class="zoom" aria-label="Reset zoom">100%</button>
       <button type="button" id="shields" class="icon" aria-label="How this tab is opened" title="How this tab is opened" aria-expanded="false">◈</button>
       <button type="button" id="history-btn" class="icon" aria-label="History" aria-expanded="false">◷</button>
@@ -34,6 +36,7 @@
         <button type="button" id="settings-btn" class="icon" aria-label="Settings" title="Settings" aria-haspopup="menu" aria-controls="settings-menu" aria-expanded="false">⚙</button>
         <div id="settings-menu" class="popover settings-menu" role="menu" hidden>
           <ul>
+            <li><button type="button" role="menuitem" data-settings="bookmarks"><span>Bookmarks</span><small>Folders, favorites, import and export · Ctrl+Shift+O</small></button></li>
             <li><button type="button" role="menuitem" data-settings="general"><span>General</span><small>Updates and default browser</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
             <li><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
             <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
@@ -56,6 +59,17 @@
         <ul id="history-list"></ul>
       </div>
     </header>
+    <div id="bookmark-row" class="shield-row bookmark-row" role="region" aria-label="Bookmark" hidden>
+      <strong id="bookmark-row-title">Bookmarked</strong>
+      <span id="bookmark-row-name" class="bookmark-row-name"></span>
+      <label class="bookmark-row-folder">Folder
+        <select id="bookmark-row-folder"></select>
+      </label>
+      <button type="button" id="bookmark-row-fav" class="tiny" aria-pressed="false">☆ Favorite</button>
+      <button type="button" id="bookmark-row-edit" class="tiny">Edit…</button>
+      <button type="button" id="bookmark-row-remove" class="tiny danger-text">Remove</button>
+      <button type="button" id="bookmark-row-done" class="tiny">Done</button>
+    </div>
     <div id="shields-panel" class="shield-row" hidden>
       <strong id="shield-title">Direct</strong>
       <span id="shield-copy">Pages load directly in Hog. An isolated tab keeps its own cookies. A site cannot read the wallet.</span>
@@ -74,21 +88,106 @@
       </div>
       <main class="view" id="view">
         <section class="home" id="home">
-          <p class="eyebrow">New tab</p>
-          <h1>Search, or open a bookmark.</h1>
-          <p class="lede">Pages open at their real address. Iso starts a tab with its own cookies. The wallet stays in this window.</p>
-          <div class="shortcuts">
-            <button type="button" data-url="https://example.com">example.com</button>
-            <button type="button" data-url="https://duckduckgo.com/">DuckDuckGo</button>
-            <button type="button" data-url="https://github.com/warthog-network">warthog-network</button>
-            <button type="button" data-url="https://browser-node.netlify.app/">Warthog node</button>
+          <div class="home-hero">
+            <img class="hero-logo" src="hog-icon.svg" alt="" width="72" height="72">
+            <div>
+              <p class="eyebrow">New tab</p>
+              <h1>Search, or open a bookmark.</h1>
+              <p class="lede">Pages open at their real address. Iso starts a tab with its own cookies. The wallet stays in this window.</p>
+            </div>
           </div>
+          <section class="favs" aria-labelledby="favs-title">
+            <div class="favs-head">
+              <p class="eyebrow" id="favs-title">Favorites</p>
+              <div class="favs-actions">
+                <button type="button" id="favs-add" class="tiny">+ Add</button>
+                <button type="button" id="favs-all" class="tiny">All bookmarks →</button>
+              </div>
+            </div>
+            <ol id="fav-grid" class="fav-grid" aria-describedby="favs-hint"></ol>
+            <p id="favs-hint" class="note favs-hint">Drag a tile to reorder, or use its arrows. ✎ edits, × takes it off Favorites. It stays in Bookmarks.</p>
+          </section>
           <div class="toolbox">
             <p class="eyebrow">Toolbox</p>
             <div class="shortcuts toolbox-shortcuts">
               <button type="button" data-settings="containers">Containers</button>
               <button type="button" data-settings="files">Files</button>
               <button type="button" data-settings="tailscale">Tailscale</button>
+            </div>
+          </div>
+        </section>
+        <section class="home bm-page" id="bookmarks-view" aria-label="Bookmarks" hidden>
+          <div class="bm-shell">
+            <aside class="bm-side" aria-label="Bookmark folders">
+              <p class="eyebrow">Library</p>
+              <div id="bm-views" class="bm-folder-list">
+                <button type="button" data-bm-view="all"><span class="bm-glyph">▤</span><span class="bm-name">All bookmarks</span><small id="bm-count-all"></small></button>
+                <button type="button" data-bm-view="favorites"><span class="bm-glyph">★</span><span class="bm-name">Favorites</span><small id="bm-count-fav"></small></button>
+              </div>
+              <p class="eyebrow bm-side-label">Folders</p>
+              <div id="bm-folders" class="bm-folder-list"></div>
+              <form id="bm-folder-form" class="bm-folder-form">
+                <input id="bm-folder-name" autocomplete="off" spellcheck="false" maxlength="120" placeholder="New folder" aria-label="New folder name">
+                <button type="submit" class="tiny" aria-label="Create folder">+</button>
+              </form>
+            </aside>
+            <div class="bm-main">
+              <div class="bm-head">
+                <div class="bm-heading">
+                  <p class="eyebrow">hog://bookmarks</p>
+                  <h1 id="bm-title">All bookmarks</h1>
+                  <p id="bm-path" class="note"></p>
+                </div>
+                <div class="bm-head-actions">
+                  <button type="button" id="bm-add" class="primary">+ Add bookmark</button>
+                  <div class="bm-more-anchor">
+                    <button type="button" id="bm-more" aria-haspopup="menu" aria-expanded="false" aria-controls="bm-more-menu">⋯</button>
+                    <div id="bm-more-menu" class="popover bm-more-menu" role="menu" hidden>
+                      <ul>
+                        <li><button type="button" role="menuitem" id="bm-import"><span>Import HTML…</span><small>A bookmarks file from Brave, Chrome, or Firefox</small></button></li>
+                        <li><button type="button" role="menuitem" id="bm-export"><span>Export HTML…</span><small>Every bookmark, in the same format</small></button></li>
+                        <li class="bm-folder-only"><button type="button" role="menuitem" id="bm-rename-folder"><span>Rename folder</span><small>Change this folder's name</small></button></li>
+                        <li class="bm-folder-only"><button type="button" role="menuitem" id="bm-delete-folder"><span>Delete folder</span><small>Its bookmarks move up a level</small></button></li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="bm-toolbar">
+                <input id="bm-search" type="search" autocomplete="off" spellcheck="false" placeholder="Filter by title or address" aria-label="Filter bookmarks">
+                <label class="bm-sort">Sort
+                  <select id="bm-sort">
+                    <option value="manual">Manual</option>
+                    <option value="title">Title A–Z</option>
+                    <option value="added">Newest first</option>
+                    <option value="host">Site</option>
+                  </select>
+                </label>
+              </div>
+              <form id="bm-rename-form" class="bm-inline-form" hidden>
+                <input id="bm-rename-input" autocomplete="off" spellcheck="false" maxlength="120" aria-label="Folder name">
+                <button type="submit" class="primary">Rename</button>
+                <button type="button" id="bm-rename-cancel">Cancel</button>
+              </form>
+              <form id="bm-editor" class="connect-card bm-editor" aria-label="Edit bookmark" hidden>
+                <p class="eyebrow" id="bm-editor-title">Add bookmark</p>
+                <div class="bm-editor-grid">
+                  <label>Name<input id="bm-edit-title" autocomplete="off" spellcheck="false" maxlength="300"></label>
+                  <label>Address<input id="bm-edit-url" autocomplete="off" spellcheck="false" placeholder="https://" required></label>
+                  <label>Folder<select id="bm-edit-folder"></select></label>
+                  <label class="bm-check"><input id="bm-edit-fav" type="checkbox"> Show in Favorites</label>
+                </div>
+                <p id="bm-edit-error" class="error" role="status"></p>
+                <div class="row">
+                  <button type="submit" class="primary">Save</button>
+                  <button type="button" id="bm-edit-cancel">Cancel</button>
+                  <button type="button" id="bm-edit-delete" class="danger-text" hidden>Delete</button>
+                </div>
+              </form>
+              <p id="bm-status" class="note bm-status" role="status"></p>
+              <ul id="bm-list" class="bm-list" aria-label="Bookmarks"></ul>
+              <p id="bm-empty" class="note bm-empty" hidden></p>
+              <input id="bm-file" type="file" accept=".html,.htm,text/html" hidden>
             </div>
           </div>
         </section>

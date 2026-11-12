@@ -21,6 +21,7 @@ import urllib.parse
 from pathlib import Path
 
 from guard import Guard, allowed_browser_open_url, allowed_tailscale_open_url
+from bookmark_files import bookmark_backup_path, read_bookmark_file, write_bookmark_backup, write_bookmark_file
 
 import gi
 
@@ -282,7 +283,7 @@ EDGE_GRIP_SCRIPT = r"""
       "transition: width .18s ease, background .18s ease; }",
       "button.grip.tabs { left: 0; right: auto; border-radius: 0 8px 8px 0; }",
       "button.grip.wallet { left: auto; right: 0; border-radius: 8px 0 0 8px; }",
-      "button.grip.hot { width: 112px; background: #242624; border: 1px solid rgba(255,255,255,.16);",
+      "button.grip.hot { width: 112px; background: #221a3d; border: 1px solid rgba(255,255,255,.16);",
       "box-shadow: 0 8px 18px #00000055; }",
       "button.grip.tabs.hot { left: 2px; right: auto; border-radius: 0 999px 999px 0; border-left: 0; justify-content: flex-start; padding: 0 12px; }",
       "button.grip.wallet.hot { left: auto; right: 2px; border-radius: 999px 0 0 999px; border-right: 0; justify-content: flex-end; padding: 0 12px; }",
@@ -295,8 +296,8 @@ EDGE_GRIP_SCRIPT = r"""
       ".label { display: none; white-space: nowrap; }",
       "button.grip.hot:not(.drag) .label { display: block; }",
       "#menu { position: absolute; inset: 0; z-index: 2147483647; pointer-events: none; }",
-      ".panel { position: absolute; box-sizing: border-box; background: #18181b; color: #f4f4f5;",
-      "border: 1px solid rgba(253,185,19,.35); border-radius: 14px; box-shadow: 0 16px 32px -18px #000;",
+      ".panel { position: absolute; box-sizing: border-box; background: #140f26; color: #f4f1ff;",
+      "border: 1px solid rgba(255,79,216,.38); border-radius: 14px; box-shadow: 0 18px 40px -18px #000, 0 0 26px -12px rgba(255,79,216,.6);",
       "overflow: hidden; pointer-events: auto; font: 13px/1.3 'Segoe UI','Helvetica Neue',sans-serif; }",
       ".panel.suggestions { padding: 6px; }",
       ".panel.history { padding: 14px; }",
@@ -307,19 +308,19 @@ EDGE_GRIP_SCRIPT = r"""
       ".panel button.item { display: block; width: 100%; text-align: left; background: transparent;",
       "border-radius: 10px; padding: 8px 10px; }",
       ".panel button.item span, .panel button.item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-      ".panel button.item small { color: #a1a1aa; font-size: 11px; margin-top: 2px; }",
-      ".panel button.item:hover { background: rgba(253,185,19,.12); }",
+      ".panel button.item small { color: #bdb5d8; font-size: 11px; margin-top: 2px; }",
+      ".panel button.item:hover { background: rgba(62,240,255,.09); }",
       ".panel .head { display: flex; justify-content: space-between; align-items: center; }",
       ".panel .head strong { font: 600 13px/1 'Segoe UI',sans-serif; }",
       ".panel button.clear { color: #a1a1aa; font-size: 12px; border-radius: 8px; padding: 4px 8px; }",
       ".panel button.clear:hover { color: #f4f4f5; background: #ffffff12; }",
-      ".panel p { margin: 8px 4px; color: #a1a1aa; }",
+      ".panel p { margin: 8px 4px; color: #bdb5d8; }",
       ".panel.settings { padding: 8px; }",
       ".panel.settings .list { display: flex; flex-direction: column; gap: 8px; margin: 0; max-height: none; }",
       ".panel.settings button.item span, .panel.settings button.item small { overflow: visible; text-overflow: clip; white-space: normal; }",
       ".panel.settings button.item.amber { box-shadow: inset 3px 0 0 #e79300; }",
       ".panel.settings button.item.flare { box-shadow: inset 3px 0 0 #f25c05; }",
-      ".panel.settings button.item.current { background: rgba(253,185,19,.12); }"
+      ".panel.settings button.item.current { background: rgba(62,240,255,.09); }"
     ].join("");
     try {
       var sheet = new CSSStyleSheet();
@@ -1588,6 +1589,9 @@ class Hog(Gtk.Application):
         if command.startswith("containers:"):
             self.on_containers(command)
             return
+        if command.startswith("bookmarks:"):
+            self.on_bookmarks(command)
+            return
         if command.startswith("dapp-reply:"):
             if self.pages is not None:
                 self.pages.deliver_dapp_reply(command[len("dapp-reply:"):])
@@ -1712,6 +1716,117 @@ class Hog(Gtk.Application):
             return False
 
         GLib.idle_add(deliver)
+
+    def tell_bookmarks(self, payload):
+        raw = json.dumps(payload)
+
+        def deliver():
+            try:
+                self.chrome.run_javascript(
+                    f"window.__hogBookmarks && window.__hogBookmarks({raw})",
+                    None, None, None,
+                )
+            except Exception:
+                pass
+            return False
+
+        GLib.idle_add(deliver)
+
+    def on_bookmarks(self, command):
+        action, _, rest = command[len("bookmarks:"):].partition(":")
+        if action == "backup":
+            path = bookmark_backup_path(DATA)
+            write_bookmark_backup(path, rest)
+            return
+        if action == "import":
+            self.pick_bookmarks_import()
+            return
+        if action == "export":
+            self.pick_bookmarks_export(rest)
+            return
+
+    def pick_bookmarks_import(self):
+        if self.window is None or getattr(self, "_share_dialog", None) is not None:
+            return
+        dialog = Gtk.FileChooserDialog(
+            title="Import bookmarks (an HTML file from Brave, Chrome, or Firefox)",
+            parent=self.window,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Import", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        html_filter = Gtk.FileFilter()
+        html_filter.set_name("Bookmark files (*.html)")
+        html_filter.add_pattern("*.html")
+        html_filter.add_pattern("*.htm")
+        html_filter.add_pattern("*.HTML")
+        dialog.add_filter(html_filter)
+        any_filter = Gtk.FileFilter()
+        any_filter.set_name("All files")
+        any_filter.add_pattern("*")
+        dialog.add_filter(any_filter)
+        start = Path.home() / "Downloads"
+        try:
+            dialog.set_current_folder(str(start if start.is_dir() else Path.home()))
+        except Exception:
+            pass
+        self._share_dialog = dialog
+
+        def on_response(_dialog, response):
+            path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+            dialog.destroy()
+            self._share_dialog = None
+            if not path:
+                return
+            self.tell_bookmarks(read_bookmark_file(path))
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def pick_bookmarks_export(self, html):
+        if self.window is None or getattr(self, "_share_dialog", None) is not None:
+            return
+        dialog = Gtk.FileChooserDialog(
+            title="Export bookmarks",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SAVE,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Export", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        dialog.set_do_overwrite_confirmation(True)
+        start = Path.home() / "Downloads"
+        try:
+            dialog.set_current_folder(str(start if start.is_dir() else Path.home()))
+        except Exception:
+            pass
+        dialog.set_current_name(f"hog-bookmarks-{time.strftime('%Y-%m-%d')}.html")
+        self._share_dialog = dialog
+
+        def on_response(_dialog, response):
+            path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+            dialog.destroy()
+            self._share_dialog = None
+            if not path:
+                return
+            self.tell_bookmarks(write_bookmark_file(path, html))
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def on_shortcut_key(self, _window, event):
+        name = shortcut_for_key(event.keyval, event.state)
+        if not name or self.chrome is None:
+            return False
+        try:
+            self.chrome.run_javascript(
+                f"window.__hogKey && window.__hogKey({json.dumps(name)})",
+                None, None, None,
+            )
+        except Exception:
+            return False
+        return True
 
     def pick_share_folder(self):
         if self.window is None or getattr(self, "_share_dialog", None) is not None:
@@ -2182,7 +2297,7 @@ class Hog(Gtk.Application):
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
         view = WebKit2.WebView.new_with_context(context)
         background = Gdk.RGBA()
-        background.parse("#141416")
+        background.parse("#0b0816")
         view.set_background_color(background)
         settings = view.get_settings()
         settings.set_enable_javascript(True)
@@ -2218,6 +2333,7 @@ class Hog(Gtk.Application):
         view.connect("leave-notify-event", self.on_leave)
         view.connect("button-press-event", self.on_button, window)
         window.set_resizable(True)
+        window.connect("key-press-event", self.on_shortcut_key)
         self.chrome = view
         self.window = window
         self.pages = PageHost(view)
@@ -2277,6 +2393,18 @@ class Hog(Gtk.Application):
             self.open_external_url(uri)
         if self.window is not None:
             self.window.present()
+
+
+def shortcut_for_key(keyval, state):
+    """Browser shortcuts hog catches even while a web page has focus."""
+    mods = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.MOD1_MASK
+    held = state & mods
+    name = Gdk.keyval_name(Gdk.keyval_to_lower(keyval)) or ""
+    if held == Gdk.ModifierType.CONTROL_MASK and name == "d":
+        return "bookmark"
+    if held == (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK) and name == "o":
+        return "bookmarks"
+    return ""
 
 
 def main():

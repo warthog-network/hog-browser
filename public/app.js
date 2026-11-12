@@ -17,10 +17,32 @@ import {
   signWartTransfer,
   validateAddress,
 } from "./wallet-bundle.js";
+import {
+  ROOT_ID as BOOKMARK_ROOT,
+  addBookmark as addBookmarkEntry,
+  addFolder as addBookmarkFolder,
+  exportNetscape as exportBookmarkHtml,
+  favorites as bookmarkFavorites,
+  findByUrl as findBookmarkByUrl,
+  folderPath as bookmarkFolderPath,
+  folderTree as bookmarkFolderTree,
+  hostLabel as bookmarkHost,
+  importNetscape as importBookmarkHtml,
+  listBookmarks as listBookmarkEntries,
+  loadStore as loadBookmarkStore,
+  moveFavorite as moveFavoriteTo,
+  nudgeBookmark as nudgeBookmarkEntry,
+  removeBookmark as removeBookmarkEntry,
+  removeFolder as removeBookmarkFolder,
+  renameFolder as renameBookmarkFolder,
+  safeUrl as bookmarkSafeUrl,
+  saveStore as saveBookmarkStore,
+  toggleFavorite as toggleBookmarkFavorite,
+  updateBookmark as updateBookmarkEntry,
+} from "./bookmarks-store.js";
 
 const STORE = "hog-wallet-v1";
 const LAST_URL = "hog-last-url";
-const BOOKMARKS_KEY = "hog-bookmarks";
 const HISTORY_KEY = "hog-history";
 const WALLET_OPEN_KEY = "hog-wallet-open";
 const TABS_OPEN_KEY = "hog-tabs-open";
@@ -80,11 +102,6 @@ const NETWORKS = {
 };
 const NODE_ORIGIN = "https://browser-node.netlify.app";
 const DDG_HOME = "https://duckduckgo.com/";
-const SEED_BOOKMARKS = [
-  { title: "DuckDuckGo", url: DDG_HOME },
-  { title: "warthog-network", url: "https://github.com/warthog-network" },
-  { title: "Warthog node", url: "https://browser-node.netlify.app/" },
-];
 const WALLET_PAGES = [
   "home", "send", "receive", "trade", "swap", "liquidity", "mint",
   "safetrade", "aave", "activity", "settings", "account", "accounts", "key",
@@ -378,6 +395,7 @@ function reportShareDrop() {
 }
 
 function hideBrowserSettings() {
+  hideBookmarksView();
   const panel = $("browser-settings");
   const menu = $("settings-menu");
   if (menu) menu.hidden = true;
@@ -399,11 +417,14 @@ function hideShell() {
 
 function pageSurfaceClear() {
   const shell = $("shell-view");
-  return home.hidden && $("browser-settings").hidden && (!shell || shell.hidden);
+  const marks = $("bookmarks-view");
+  return home.hidden && $("browser-settings").hidden && (!shell || shell.hidden) && (!marks || marks.hidden);
 }
 
 function showBrowserSettings() {
   hideShell();
+  hideBookmarksView();
+  hideBookmarkRow();
   hideSuggestions();
   closePopovers();
   viewSeq += 1;
@@ -588,17 +609,6 @@ function renderShield(tab) {
   }
   title.textContent = "Direct";
   copy.textContent = `This page loads at its real address. Cookies are shared with your other direct tabs. It cannot read the wallet.${sandbox}`;
-}
-
-function updateStar() {
-  const tab = activeTab();
-  const url = tab?.url || "";
-  const on = Boolean(url && bookmarks().some((item) => item.url === url));
-  const star = $("star");
-  star.disabled = !url;
-  star.classList.toggle("star-on", on);
-  star.textContent = on ? "★" : "☆";
-  star.setAttribute("aria-pressed", on ? "true" : "false");
 }
 
 function renderTabs() {
@@ -829,53 +839,792 @@ function readList(key) {
   }
 }
 
-function migrateBookmark(item) {
-  const url = String(item?.url || "");
-  if (/^https?:\/\/html\.duckduckgo\.com\/html(?:\/|\?|$)/i.test(url)) {
-    return { ...item, url: DDG_HOME, title: item.title || "DuckDuckGo" };
-  }
-  return item;
+// ---------- Bookmarks and favorites (one store, see bookmarks-store.js) ----------
+
+let bmStore = null;
+const bmState = { view: "all", query: "", sort: "manual", editing: null, dragId: "", favDragId: "" };
+
+function bmLoad() {
+  if (bmStore) return bmStore;
+  const { store, backup } = loadBookmarkStore(localStorage);
+  bmStore = store;
+  // First run after the upgrade: also keep a copy of the old list on disk.
+  if (backup) desktopCommand(`bookmarks:backup:${backup}`);
+  return bmStore;
+}
+
+function bmCommit(next) {
+  bmStore = next;
+  saveBookmarkStore(localStorage, next);
+  renderBookmarks();
 }
 
 function bookmarks() {
-  const saved = readList(BOOKMARKS_KEY);
-  if (!saved) {
-    localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(SEED_BOOKMARKS));
-    return SEED_BOOKMARKS.slice();
-  }
-  let changed = false;
-  const next = saved.map((item) => {
-    const migrated = migrateBookmark(item);
-    if (migrated !== item && migrated.url !== item.url) changed = true;
-    return migrated;
-  });
-  if (changed) localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(next));
-  return next;
+  return bmLoad().items;
 }
 
-function renderBookmarks() {
+function bmFaviconUrl(url) {
+  return `/api/favicon?url=${encodeURIComponent(url)}`;
+}
+
+const BM_TILE_COLORS = ["#ff4fd8", "#3ef0ff", "#fdb913", "#9b7bff", "#3dff9a", "#ff7a3d"];
+
+function bmLetterTile(item, className) {
+  const host = bmHost(item.url);
+  const letter = (item.title || host || "?").replace(/^[^\p{L}\p{N}]+/u, "").charAt(0).toUpperCase() || "•";
+  let hash = 0;
+  for (const ch of host) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  const tile = document.createElement("span");
+  tile.className = `${className} bm-letter`;
+  tile.textContent = letter;
+  tile.style.setProperty("--tile", BM_TILE_COLORS[hash % BM_TILE_COLORS.length]);
+  tile.setAttribute("aria-hidden", "true");
+  return tile;
+}
+
+function bmIcon(item, className = "bm-icon") {
+  const wrap = document.createElement("span");
+  wrap.className = `${className}-wrap`;
+  const tile = bmLetterTile(item, className);
+  wrap.append(tile);
+  if (!/^https?:/i.test(item.url)) return wrap;
+  const img = document.createElement("img");
+  img.className = className;
+  img.alt = "";
+  img.decoding = "async";
+  img.width = 32;
+  img.height = 32;
+  img.hidden = true;
+  img.addEventListener("load", () => {
+    if (img.naturalWidth > 0) {
+      img.hidden = false;
+      tile.hidden = true;
+    }
+  });
+  img.addEventListener("error", () => img.remove());
+  img.src = bmFaviconUrl(item.url);
+  wrap.append(img);
+  return wrap;
+}
+
+function bmHost(url) {
+  return bookmarkHost(url);
+}
+
+// Chrome strip: favorites as compact chips.
+function renderFavoriteStrip() {
   const bar = $("bookmarks");
+  if (!bar) return;
   bar.replaceChildren();
-  for (const item of bookmarks()) {
+  for (const item of bookmarkFavorites(bmLoad())) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = item.title || hostOf(item.url);
-    button.title = item.url;
+    button.title = `${item.title}\n${item.url}`;
+    button.append(bmIcon(item, "chip-icon"));
+    const label = document.createElement("span");
+    label.textContent = item.title || bmHost(item.url);
+    button.append(label);
     button.addEventListener("click", () => openUrl(item.url));
     bar.append(button);
   }
 }
 
+// Home: favorites grid with reorder, edit, and remove.
+function renderFavGrid() {
+  const grid = $("fav-grid");
+  if (!grid) return;
+  grid.replaceChildren();
+  const favs = bookmarkFavorites(bmLoad());
+  favs.forEach((item, index) => {
+    const li = document.createElement("li");
+    li.className = "fav-tile";
+    li.draggable = true;
+    li.dataset.id = item.id;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "fav-open";
+    open.title = `${item.title}\n${item.url}`;
+    open.append(bmIcon(item, "fav-icon"));
+    const name = document.createElement("span");
+    name.className = "fav-name";
+    name.textContent = item.title || bmHost(item.url);
+    const host = document.createElement("small");
+    host.className = "fav-host";
+    host.textContent = bmHost(item.url);
+    open.append(name, host);
+    open.addEventListener("click", () => openUrl(item.url));
+    const tools = document.createElement("div");
+    tools.className = "fav-tools";
+    const mk = (label, text, handler, disabled = false) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "fav-tool";
+      button.textContent = text;
+      button.setAttribute("aria-label", `${label} ${item.title}`);
+      button.title = label;
+      button.disabled = disabled;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        handler();
+      });
+      return button;
+    };
+    tools.append(
+      mk("Move left", "‹", () => bmCommit(moveFavoriteTo(bmLoad(), item.id, index - 1)), index === 0),
+      mk("Move right", "›", () => bmCommit(moveFavoriteTo(bmLoad(), item.id, index + 1)), index === favs.length - 1),
+      mk("Edit", "✎", () => showBookmarksView({ edit: item.id })),
+      mk("Remove from Favorites", "×", () => {
+        bmCommit(updateBookmarkEntry(bmLoad(), item.id, { favorite: false }));
+      }),
+    );
+    li.append(open, tools);
+    li.addEventListener("dragstart", (event) => {
+      bmState.favDragId = item.id;
+      li.classList.add("is-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", item.url);
+    });
+    li.addEventListener("dragend", () => {
+      bmState.favDragId = "";
+      li.classList.remove("is-dragging");
+      grid.querySelectorAll(".is-drop").forEach((el) => el.classList.remove("is-drop"));
+    });
+    li.addEventListener("dragover", (event) => {
+      if (!bmState.favDragId || bmState.favDragId === item.id) return;
+      event.preventDefault();
+      li.classList.add("is-drop");
+    });
+    li.addEventListener("dragleave", () => li.classList.remove("is-drop"));
+    li.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const id = bmState.favDragId;
+      bmState.favDragId = "";
+      if (id && id !== item.id) bmCommit(moveFavoriteTo(bmLoad(), id, index));
+    });
+    grid.append(li);
+  });
+  const add = document.createElement("li");
+  add.className = "fav-tile fav-add";
+  const addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.className = "fav-open";
+  addButton.innerHTML = '<span class="fav-icon-wrap"><span class="fav-icon bm-letter fav-plus" aria-hidden="true">+</span></span><span class="fav-name">Add favorite</span><small class="fav-host">or pick from Bookmarks</small>';
+  addButton.addEventListener("click", () => showBookmarksView({ add: true, favorite: true }));
+  add.append(addButton);
+  grid.append(add);
+  $("favs-hint").hidden = favs.length < 2;
+}
+
+function updateStar() {
+  const tab = activeTab();
+  const url = tab?.url || "";
+  const saved = url ? findBookmarkByUrl(bmLoad(), url) : null;
+  const on = Boolean(saved);
+  const star = $("star");
+  star.disabled = !url || !bookmarkSafeUrl(url);
+  star.classList.toggle("star-on", on);
+  star.textContent = on ? "★" : "☆";
+  star.setAttribute("aria-pressed", on ? "true" : "false");
+  const row = $("bookmark-row");
+  if (row && !row.hidden && (!saved || saved.id !== row.dataset.id)) hideBookmarkRow();
+}
+
+function fillFolderSelect(select, selected) {
+  select.replaceChildren();
+  for (const folder of bookmarkFolderTree(bmLoad())) {
+    const option = document.createElement("option");
+    option.value = folder.id;
+    option.textContent = `${"\u2003".repeat(folder.depth)}${folder.name}`;
+    if (folder.id === selected) option.selected = true;
+    select.append(option);
+  }
+}
+
+// Ctrl+D or the star: save the page, then offer favorite, folder, edit, remove in a row under the toolbar.
 function toggleBookmark() {
   const tab = activeTab();
-  if (!tab?.url) return;
-  const items = bookmarks();
-  const index = items.findIndex((item) => item.url === tab.url);
-  if (index >= 0) items.splice(index, 1);
-  else items.unshift({ title: tab.title || hostOf(tab.url), url: tab.url });
-  localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(items));
-  renderBookmarks();
+  if (!tab?.url || !bookmarkSafeUrl(tab.url)) return;
+  let item = findBookmarkByUrl(bmLoad(), tab.url);
+  if (!item) {
+    const result = addBookmarkEntry(bmLoad(), { title: tab.title || bmHost(tab.url), url: tab.url });
+    bmCommit(result.store);
+    item = result.item;
+    showBookmarkRow(item, "Bookmarked");
+  } else {
+    showBookmarkRow(item, "Already bookmarked");
+  }
   updateStar();
+}
+
+function showBookmarkRow(item, heading) {
+  const row = $("bookmark-row");
+  row.dataset.id = item.id;
+  $("bookmark-row-title").textContent = heading;
+  $("bookmark-row-name").textContent = item.title;
+  $("bookmark-row-name").title = item.url;
+  fillFolderSelect($("bookmark-row-folder"), item.folder);
+  const fav = $("bookmark-row-fav");
+  fav.setAttribute("aria-pressed", item.favorite ? "true" : "false");
+  fav.textContent = item.favorite ? "★ Favorite" : "☆ Favorite";
+  row.hidden = false;
+  syncPageView();
+  try { $("bookmark-row-done").focus({ preventScroll: true }); } catch { /* ignore */ }
+}
+
+function hideBookmarkRow() {
+  const row = $("bookmark-row");
+  if (!row || row.hidden) return;
+  row.hidden = true;
+  syncPageView();
+}
+
+function bookmarkRowItem() {
+  const id = $("bookmark-row").dataset.id;
+  return bmLoad().items.find((item) => item.id === id) || null;
+}
+
+// ---------- hog://bookmarks ----------
+
+function bookmarksViewOpen() {
+  const panel = $("bookmarks-view");
+  return Boolean(panel && !panel.hidden);
+}
+
+function hideBookmarksView() {
+  const panel = $("bookmarks-view");
+  if (!panel || panel.hidden) return;
+  panel.hidden = true;
+  $("bookmarks-btn")?.classList.remove("is-open");
+  if (addressInput.value === "hog://bookmarks") addressInput.value = activeTab()?.url || "";
+  const more = $("bm-more-menu");
+  if (more) more.hidden = true;
+}
+
+function showBookmarksView({ view, edit, add, favorite } = {}) {
+  hideShell();
+  hideSuggestions();
+  closePopovers();
+  hideBrowserSettings();
+  hideBookmarkRow();
+  viewSeq += 1;
+  home.hidden = true;
+  status.hidden = true;
+  frame.hidden = true;
+  $("view").classList.remove("is-page");
+  frame.removeAttribute("srcdoc");
+  if (frame.getAttribute("src")) frame.src = "about:blank";
+  parkNode();
+  $("bookmarks-view").hidden = false;
+  $("bookmarks-btn")?.classList.add("is-open");
+  addressInput.value = "hog://bookmarks";
+  if (view) bmState.view = view;
+  if (!bmViewValid(bmState.view)) bmState.view = "all";
+  bmState.editing = null;
+  $("bm-editor").hidden = true;
+  $("bm-rename-form").hidden = true;
+  renderBookmarksPage();
+  if (edit) openBookmarkEditor(edit);
+  else if (add) openBookmarkEditor(null, { favorite: Boolean(favorite) });
+  else {
+    $("bookmarks-view").scrollTop = 0;
+    try { $("bm-search").focus({ preventScroll: true }); } catch { $("bm-search").focus(); }
+  }
+  reportView(false);
+  // Earlier syncPageView calls queue a frame that may still say "show the page".
+  // Run after them so the page view stays hidden behind hog://bookmarks.
+  requestAnimationFrame(() => {
+    if (bookmarksViewOpen()) reportView(false);
+    requestAnimationFrame(() => { if (bookmarksViewOpen()) reportView(false); });
+  });
+}
+
+function bmViewValid(view) {
+  return view === "all" || view === "favorites" || bmLoad().folders.some((folder) => folder.id === view);
+}
+
+function bmViewTitle(view) {
+  if (view === "all") return "All bookmarks";
+  if (view === "favorites") return "Favorites";
+  return bmLoad().folders.find((folder) => folder.id === view)?.name || "Bookmarks";
+}
+
+function renderBookmarksPage() {
+  if (!bookmarksViewOpen()) return;
+  const store = bmLoad();
+  if (!bmViewValid(bmState.view)) bmState.view = "all";
+  const view = bmState.view;
+  const isFolder = view !== "all" && view !== "favorites";
+  $("bm-count-all").textContent = String(store.items.length);
+  $("bm-count-fav").textContent = String(bookmarkFavorites(store).length);
+  $("bm-views").querySelectorAll("[data-bm-view]").forEach((button) => {
+    button.setAttribute("aria-current", button.dataset.bmView === view ? "page" : "false");
+  });
+  const folderList = $("bm-folders");
+  folderList.replaceChildren();
+  for (const folder of bookmarkFolderTree(store)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.bmView = folder.id;
+    button.style.setProperty("--depth", String(folder.depth));
+    button.setAttribute("aria-current", folder.id === view ? "page" : "false");
+    const glyph = document.createElement("span");
+    glyph.className = "bm-glyph";
+    glyph.textContent = folder.id === BOOKMARK_ROOT ? "◆" : "▸";
+    const name = document.createElement("span");
+    name.className = "bm-name";
+    name.textContent = folder.name;
+    const count = document.createElement("small");
+    count.textContent = String(store.items.filter((item) => item.folder === folder.id).length);
+    button.append(glyph, name, count);
+    // Drop a bookmark row on a folder to move it there.
+    button.addEventListener("dragover", (event) => {
+      if (!bmState.dragId) return;
+      event.preventDefault();
+      button.classList.add("is-drop");
+    });
+    button.addEventListener("dragleave", () => button.classList.remove("is-drop"));
+    button.addEventListener("drop", (event) => {
+      event.preventDefault();
+      button.classList.remove("is-drop");
+      const id = bmState.dragId;
+      bmState.dragId = "";
+      if (!id) return;
+      bmCommit(updateBookmarkEntry(bmLoad(), id, { folder: folder.id }));
+      bmStatus(`Moved to ${folder.name}.`);
+    });
+    folderList.append(button);
+  }
+  $("bm-title").textContent = bmViewTitle(view);
+  $("bm-path").textContent = isFolder && view !== BOOKMARK_ROOT ? bookmarkFolderPath(store, view) : "";
+  document.querySelectorAll("#bm-more-menu .bm-folder-only").forEach((li) => {
+    li.hidden = !isFolder || view === BOOKMARK_ROOT;
+  });
+  const sortSelect = $("bm-sort");
+  if (sortSelect.value !== bmState.sort) sortSelect.value = bmState.sort;
+  const items = listBookmarkEntries(store, {
+    view,
+    query: bmState.query,
+    sort: bmState.sort,
+    deep: Boolean(bmState.query) && isFolder,
+  });
+  const manual = bmState.sort === "manual" && !bmState.query;
+  const list = $("bm-list");
+  list.replaceChildren();
+  items.forEach((item, index) => list.append(bookmarkRow(item, { index, total: items.length, manual, view })));
+  const empty = $("bm-empty");
+  if (items.length) {
+    empty.hidden = true;
+  } else {
+    empty.hidden = false;
+    empty.textContent = bmState.query
+      ? "Nothing matches that filter."
+      : view === "favorites"
+        ? "No favorites yet. Star a bookmark (☆) to pin it to the new tab page and the toolbar."
+        : "No bookmarks here yet. Press Ctrl+D on any page, use + Add bookmark, or import an HTML file from the ⋯ menu.";
+  }
+}
+
+function bookmarkRow(item, { index, total, manual, view }) {
+  const store = bmLoad();
+  const li = document.createElement("li");
+  li.className = `bm-row${item.favorite ? " is-fav" : ""}`;
+  li.dataset.id = item.id;
+  li.draggable = true;
+  li.addEventListener("dragstart", (event) => {
+    bmState.dragId = item.id;
+    li.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", item.url);
+  });
+  li.addEventListener("dragend", () => {
+    bmState.dragId = "";
+    li.classList.remove("is-dragging");
+  });
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "bm-open";
+  open.title = item.url;
+  open.append(bmIcon(item, "bm-icon"));
+  const text = document.createElement("span");
+  text.className = "bm-text";
+  const title = document.createElement("span");
+  title.className = "bm-row-title";
+  title.textContent = item.title;
+  const url = document.createElement("small");
+  url.className = "bm-row-url";
+  url.textContent = item.url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  text.append(title, url);
+  open.append(text);
+  open.addEventListener("click", () => openUrl(item.url));
+  const meta = document.createElement("span");
+  meta.className = "bm-row-meta";
+  if (view === "all" || view === "favorites" || bmState.query) {
+    const chip = document.createElement("span");
+    chip.className = "bm-chip";
+    chip.textContent = store.folders.find((folder) => folder.id === item.folder)?.name || "Bookmarks";
+    meta.append(chip);
+  }
+  const tools = document.createElement("span");
+  tools.className = "bm-tools";
+  const mk = (label, glyph, handler, { disabled = false, pressed } = {}) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "bm-tool";
+    button.textContent = glyph;
+    button.title = label;
+    button.setAttribute("aria-label", `${label}: ${item.title}`);
+    if (pressed !== undefined) button.setAttribute("aria-pressed", pressed ? "true" : "false");
+    button.disabled = disabled;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      handler();
+    });
+    return button;
+  };
+  tools.append(mk(item.favorite ? "Remove from Favorites" : "Add to Favorites", item.favorite ? "★" : "☆", () => {
+    bmCommit(toggleBookmarkFavorite(bmLoad(), item.id));
+  }, { pressed: item.favorite }));
+  if (manual && view === "favorites") {
+    tools.append(
+      mk("Move up", "↑", () => bmCommit(moveFavoriteTo(bmLoad(), item.id, index - 1)), { disabled: index === 0 }),
+      mk("Move down", "↓", () => bmCommit(moveFavoriteTo(bmLoad(), item.id, index + 1)), { disabled: index === total - 1 }),
+    );
+  } else if (manual && view !== "all") {
+    tools.append(
+      mk("Move up", "↑", () => bmCommit(nudgeBookmarkEntry(bmLoad(), item.id, -1)), { disabled: index === 0 }),
+      mk("Move down", "↓", () => bmCommit(nudgeBookmarkEntry(bmLoad(), item.id, 1)), { disabled: index === total - 1 }),
+    );
+  }
+  const move = document.createElement("select");
+  move.className = "bm-move";
+  move.setAttribute("aria-label", `Move ${item.title} to folder`);
+  move.title = "Move to folder";
+  fillFolderSelect(move, item.folder);
+  move.addEventListener("change", () => {
+    const folder = bmLoad().folders.find((entry) => entry.id === move.value);
+    bmCommit(updateBookmarkEntry(bmLoad(), item.id, { folder: move.value }));
+    if (folder) bmStatus(`Moved “${item.title}” to ${folder.name}.`);
+  });
+  tools.append(
+    move,
+    mk("Edit", "✎", () => openBookmarkEditor(item.id)),
+    mk("Delete", "🗑", () => deleteBookmarkWithUndo(item.id)),
+  );
+  meta.append(tools);
+  li.append(open, meta);
+  return li;
+}
+
+let bmUndo = null;
+function deleteBookmarkWithUndo(id) {
+  const before = bmLoad();
+  const item = before.items.find((entry) => entry.id === id);
+  if (!item) return;
+  bmUndo = before;
+  bmCommit(removeBookmarkEntry(before, id));
+  bmStatus(`Deleted “${item.title}”.`, { undo: true });
+}
+
+let bmStatusTimer = 0;
+function bmStatus(message, { undo = false, error = false } = {}) {
+  const line = $("bm-status");
+  if (!line) return;
+  clearTimeout(bmStatusTimer);
+  line.replaceChildren();
+  line.classList.toggle("is-error", error);
+  if (!message) return;
+  line.append(document.createTextNode(message));
+  if (undo && bmUndo) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tiny bm-undo";
+    button.textContent = "Undo";
+    button.addEventListener("click", () => {
+      if (!bmUndo) return;
+      bmCommit(bmUndo);
+      bmUndo = null;
+      bmStatus("Restored.");
+    });
+    line.append(" ", button);
+  }
+  bmStatusTimer = setTimeout(() => {
+    line.replaceChildren();
+    if (undo) bmUndo = null;
+  }, undo ? 12000 : 6000);
+}
+
+function openBookmarkEditor(id, { favorite = false } = {}) {
+  const store = bmLoad();
+  const item = id ? store.items.find((entry) => entry.id === id) : null;
+  bmState.editing = item ? item.id : "new";
+  $("bm-editor-title").textContent = item ? "Edit bookmark" : "Add bookmark";
+  $("bm-edit-title").value = item ? item.title : "";
+  const tab = activeTab();
+  const suggest = !item && tab?.url && bookmarkSafeUrl(tab.url) && !findBookmarkByUrl(store, tab.url) ? tab.url : "";
+  $("bm-edit-url").value = item ? item.url : suggest;
+  if (!item && suggest) $("bm-edit-title").value = tab.title || "";
+  const folder = item ? item.folder : (bmState.view !== "all" && bmState.view !== "favorites" ? bmState.view : BOOKMARK_ROOT);
+  fillFolderSelect($("bm-edit-folder"), folder);
+  $("bm-edit-fav").checked = item ? item.favorite : (favorite || bmState.view === "favorites");
+  $("bm-edit-delete").hidden = !item;
+  $("bm-edit-error").textContent = "";
+  $("bm-editor").hidden = false;
+  $("bookmarks-view").scrollTop = 0;
+  const focus = item || !suggest ? $("bm-edit-url") : $("bm-edit-title");
+  try { (item ? $("bm-edit-title") : focus).focus({ preventScroll: true }); } catch { focus.focus(); }
+}
+
+function closeBookmarkEditor() {
+  bmState.editing = null;
+  $("bm-editor").hidden = true;
+}
+
+function saveBookmarkEditor(event) {
+  event.preventDefault();
+  const fields = {
+    title: $("bm-edit-title").value,
+    url: $("bm-edit-url").value,
+    folder: $("bm-edit-folder").value,
+    favorite: $("bm-edit-fav").checked,
+  };
+  try {
+    let store = bmLoad();
+    if (bmState.editing && bmState.editing !== "new") {
+      store = updateBookmarkEntry(store, bmState.editing, fields);
+      bmCommit(store);
+      bmStatus("Saved.");
+    } else {
+      const result = addBookmarkEntry(store, fields);
+      store = result.store;
+      if (!result.created) store = updateBookmarkEntry(store, result.item.id, { folder: fields.folder, favorite: fields.favorite });
+      bmCommit(store);
+      bmStatus(result.created ? `Added “${result.item.title}”.` : `That page was already saved, so it was updated.`);
+    }
+    closeBookmarkEditor();
+    updateStar();
+  } catch (error) {
+    $("bm-edit-error").textContent = error instanceof Error ? error.message : "Could not save that bookmark";
+  }
+}
+
+function bmImportText(text, name = "") {
+  try {
+    const label = `Imported ${new Date().toISOString().slice(0, 10)}`;
+    const result = importBookmarkHtml(bmLoad(), text, { folderName: label });
+    if (!result.added && !result.duplicates) {
+      bmStatus("No bookmarks found in that file. Export an HTML bookmarks file from Brave (Bookmarks → Export bookmarks) and try again.", { error: true });
+      return;
+    }
+    bmCommit(result.store);
+    bmState.view = result.folder.id;
+    renderBookmarksPage();
+    const parts = [`Imported ${result.added} bookmark${result.added === 1 ? "" : "s"}${name ? ` from ${name}` : ""}`];
+    if (result.duplicates) parts.push(`${result.duplicates} already saved`);
+    if (result.skipped) parts.push(`${result.skipped} skipped (not http or https)`);
+    bmStatus(`${parts.join(", ")}.`);
+  } catch (error) {
+    bmStatus(error instanceof Error ? error.message : "Could not read that file", { error: true });
+  }
+}
+
+function bmExport() {
+  const html = exportBookmarkHtml(bmLoad());
+  if (desktopOn()) {
+    desktopCommand(`bookmarks:export:${html}`);
+    return;
+  }
+  const blob = new Blob([html], { type: "text/html" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `hog-bookmarks-${new Date().toISOString().slice(0, 10)}.html`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 4000);
+  bmStatus("Exported.");
+}
+
+function bmImport() {
+  if (desktopOn()) {
+    desktopCommand("bookmarks:import");
+    return;
+  }
+  $("bm-file").click();
+}
+
+// Replies from hog's native file dialogs.
+window.__hogBookmarks = (payload) => {
+  if (!payload || typeof payload !== "object") return;
+  if (payload.kind === "import") {
+    if (payload.ok && typeof payload.text === "string") bmImportText(payload.text, payload.name || "");
+    else if (payload.error) bmStatus(payload.error, { error: true });
+  } else if (payload.kind === "export") {
+    if (payload.ok) bmStatus(`Exported to ${payload.path}.`);
+    else if (payload.error) bmStatus(payload.error, { error: true });
+  }
+};
+
+// Keys hog's window catches while a web page has focus.
+window.__hogKey = (name) => {
+  if (name === "bookmark") toggleBookmark();
+  else if (name === "bookmarks") showBookmarksView();
+};
+
+function renderBookmarks() {
+  renderFavoriteStrip();
+  renderFavGrid();
+  renderBookmarksPage();
+  if (typeof activeTab === "function" && activeTab()) updateStar();
+}
+
+function bindBookmarks() {
+  $("bookmarks-btn").addEventListener("click", () => {
+    if (bookmarksViewOpen()) renderTab();
+    else showBookmarksView();
+  });
+  $("favs-all").addEventListener("click", () => showBookmarksView({ view: "all" }));
+  $("favs-add").addEventListener("click", () => showBookmarksView({ add: true, favorite: true }));
+  $("bookmark-row-done").addEventListener("click", hideBookmarkRow);
+  $("bookmark-row-fav").addEventListener("click", () => {
+    const item = bookmarkRowItem();
+    if (!item) return hideBookmarkRow();
+    bmCommit(toggleBookmarkFavorite(bmLoad(), item.id));
+    const next = bookmarkRowItem();
+    if (next) showBookmarkRow(next, $("bookmark-row-title").textContent);
+  });
+  $("bookmark-row-folder").addEventListener("change", (event) => {
+    const item = bookmarkRowItem();
+    if (!item) return hideBookmarkRow();
+    bmCommit(updateBookmarkEntry(bmLoad(), item.id, { folder: event.target.value }));
+  });
+  $("bookmark-row-edit").addEventListener("click", () => {
+    const item = bookmarkRowItem();
+    hideBookmarkRow();
+    if (item) showBookmarksView({ edit: item.id });
+  });
+  $("bookmark-row-remove").addEventListener("click", () => {
+    const item = bookmarkRowItem();
+    if (item) bmCommit(removeBookmarkEntry(bmLoad(), item.id));
+    hideBookmarkRow();
+    updateStar();
+  });
+  $("bookmark-row").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideBookmarkRow();
+  });
+  const sides = [$("bm-views"), $("bm-folders")];
+  for (const side of sides) {
+    side.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-bm-view]");
+      if (!button) return;
+      bmState.view = button.dataset.bmView;
+      closeBookmarkEditor();
+      $("bm-rename-form").hidden = true;
+      renderBookmarksPage();
+    });
+  }
+  $("bm-views").querySelector('[data-bm-view="favorites"]').addEventListener("dragover", (event) => {
+    if (!bmState.dragId) return;
+    event.preventDefault();
+    event.currentTarget.classList.add("is-drop");
+  });
+  $("bm-views").querySelector('[data-bm-view="favorites"]').addEventListener("dragleave", (event) => event.currentTarget.classList.remove("is-drop"));
+  $("bm-views").querySelector('[data-bm-view="favorites"]').addEventListener("drop", (event) => {
+    event.preventDefault();
+    event.currentTarget.classList.remove("is-drop");
+    const id = bmState.dragId;
+    bmState.dragId = "";
+    if (id) bmCommit(updateBookmarkEntry(bmLoad(), id, { favorite: true }));
+  });
+  $("bm-folder-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = $("bm-folder-name");
+    try {
+      const parent = bmState.view !== "all" && bmState.view !== "favorites" ? bmState.view : BOOKMARK_ROOT;
+      const result = addBookmarkFolder(bmLoad(), input.value, parent);
+      input.value = "";
+      bmState.view = result.folder.id;
+      bmCommit(result.store);
+      bmStatus(`Made folder “${result.folder.name}”.`);
+    } catch (error) {
+      bmStatus(error instanceof Error ? error.message : "Could not make that folder", { error: true });
+    }
+  });
+  $("bm-search").addEventListener("input", (event) => {
+    bmState.query = event.target.value;
+    renderBookmarksPage();
+  });
+  $("bm-search").addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && event.target.value) {
+      event.target.value = "";
+      bmState.query = "";
+      renderBookmarksPage();
+    }
+  });
+  $("bm-sort").addEventListener("change", (event) => {
+    bmState.sort = event.target.value;
+    renderBookmarksPage();
+  });
+  $("bm-add").addEventListener("click", () => openBookmarkEditor(null));
+  $("bm-editor").addEventListener("submit", saveBookmarkEditor);
+  $("bm-edit-cancel").addEventListener("click", closeBookmarkEditor);
+  $("bm-edit-delete").addEventListener("click", () => {
+    const id = bmState.editing;
+    closeBookmarkEditor();
+    if (id && id !== "new") deleteBookmarkWithUndo(id);
+  });
+  $("bm-editor").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeBookmarkEditor();
+  });
+  $("bm-more").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = $("bm-more-menu");
+    menu.hidden = !menu.hidden;
+    $("bm-more").setAttribute("aria-expanded", menu.hidden ? "false" : "true");
+  });
+  $("bm-more-menu").addEventListener("click", () => {
+    $("bm-more-menu").hidden = true;
+    $("bm-more").setAttribute("aria-expanded", "false");
+  });
+  $("bm-import").addEventListener("click", bmImport);
+  $("bm-export").addEventListener("click", bmExport);
+  $("bm-file").addEventListener("change", async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 20_000_000) {
+      bmStatus("That file is too large for a bookmarks file.", { error: true });
+      return;
+    }
+    bmImportText(await file.text(), file.name);
+  });
+  $("bm-rename-folder").addEventListener("click", () => {
+    const folder = bmLoad().folders.find((entry) => entry.id === bmState.view);
+    if (!folder) return;
+    $("bm-rename-input").value = folder.name;
+    $("bm-rename-form").hidden = false;
+    $("bm-rename-input").focus();
+    $("bm-rename-input").select();
+  });
+  $("bm-rename-cancel").addEventListener("click", () => { $("bm-rename-form").hidden = true; });
+  $("bm-rename-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    try {
+      bmCommit(renameBookmarkFolder(bmLoad(), bmState.view, $("bm-rename-input").value));
+      $("bm-rename-form").hidden = true;
+    } catch (error) {
+      bmStatus(error instanceof Error ? error.message : "Could not rename that folder", { error: true });
+    }
+  });
+  $("bm-delete-folder").addEventListener("click", () => {
+    const store = bmLoad();
+    const folder = store.folders.find((entry) => entry.id === bmState.view);
+    if (!folder || folder.id === BOOKMARK_ROOT) return;
+    bmUndo = store;
+    const parent = folder.parent || BOOKMARK_ROOT;
+    bmState.view = parent;
+    bmCommit(removeBookmarkFolder(store, folder.id));
+    bmStatus(`Deleted folder “${folder.name}”. Its bookmarks moved up a level.`, { undo: true });
+  });
 }
 
 function historyItems() {
@@ -1101,7 +1850,14 @@ function onPageMessage(msg) {
     }
   }
   renderTabs();
-  if (tab.id === activeId) renderTab();
+  if (tab.id !== activeId) return;
+  // A page finishing in the background must not close hog://bookmarks.
+  if (bookmarksViewOpen()) {
+    updateNav();
+    updateStar();
+    return;
+  }
+  renderTab();
 }
 
 async function openUrl(raw, { push = true, method, fields } = {}) {
@@ -1112,6 +1868,14 @@ async function openUrl(raw, { push = true, method, fields } = {}) {
     return openUrl(raw, { push, method, fields });
   }
   let text = String(raw || "").trim();
+  if (/^hog:\/\/bookmarks\/?$/i.test(text)) {
+    showBookmarksView();
+    return;
+  }
+  if (/^hog:\/\/settings\/?/i.test(text)) {
+    showSettingsPage(text.replace(/^hog:\/\/settings\/?/i, "") || "general");
+    return;
+  }
   text = directUrl(text);
   if (!text) {
     goHome();
@@ -4795,9 +5559,12 @@ function onShortcut(event) {
     event.preventDefault();
     addressInput.focus();
     addressInput.select();
-  } else if (key === "d") {
+  } else if (key === "d" && !event.shiftKey) {
     event.preventDefault();
     toggleBookmark();
+  } else if (key === "o" && event.shiftKey) {
+    event.preventDefault();
+    showBookmarksView();
   } else if (key === "h") {
     event.preventDefault();
     togglePopover("history-panel", "history-btn");
@@ -5218,6 +5985,7 @@ function bind() {
     addressInput.focus();
   });
   $("star").addEventListener("click", toggleBookmark);
+  bindBookmarks();
   $("zoom-btn").addEventListener("click", () => setZoom(1));
   $("shields").addEventListener("click", () => togglePopover("shields-panel", "shields"));
   $("history-btn").addEventListener("click", () => togglePopover("history-panel", "history-btn"));
@@ -5234,6 +6002,10 @@ function bind() {
     const button = event.target.closest("[data-settings]");
     if (!button) return;
     event.stopPropagation();
+    if (button.dataset.settings === "bookmarks") {
+      showBookmarksView();
+      return;
+    }
     showSettingsPage(button.dataset.settings);
   });
   const settingsNav = $("settings-nav");
@@ -5707,6 +6479,13 @@ function bind() {
   });
   document.addEventListener("click", (event) => {
     if (event.target.closest("#net-menu")) return;
+    if (!event.target.closest("#bm-more, #bm-more-menu")) {
+      const more = $("bm-more-menu");
+      if (more && !more.hidden) {
+        more.hidden = true;
+        $("bm-more").setAttribute("aria-expanded", "false");
+      }
+    }
     if (event.target.closest("#shields, #shields-panel, #history-btn, #history-panel, #settings-btn, #settings-menu")) return;
     closePopovers();
   });

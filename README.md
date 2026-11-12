@@ -54,6 +54,25 @@ xdg-settings set default-web-browser org.hog.Browser.desktop
 Or use **Settings → Default Apps** (sometimes labeled Default Applications) and choose **Hog Browser** for Web. Hog only accepts `http` and `https` URLs from the desktop; `file:`, `javascript:`, and other schemes are ignored. Opening a link while Hog is already running sends it to that window as a new tab.
 
 
+## Bookmarks and favorites
+
+Press **Ctrl+D** (or click ☆) to bookmark the page you are on. A row under the
+toolbar lets you pin it to Favorites, pick a folder, edit it, or remove it.
+
+**Ctrl+Shift+O**, the ▤ button, the Bookmarks entry in the ⚙ menu, or typing
+`hog://bookmarks` opens the bookmarks page. It has folders (drag a bookmark
+onto a folder to move it), a filter box, sorting, add/edit/delete with undo,
+and a ⋯ menu to import or export a Netscape HTML bookmarks file (the format
+Brave, Chrome, and Firefox use).
+
+Favorites are bookmarks with a star. They show as tiles on the new tab page
+(drag or use the arrows to reorder) and as chips in the toolbar. Site icons
+come through Hog's own server; sites without one get a letter tile.
+
+Upgrading from 0.1.20 or older turns the old toolbar list into Favorites,
+drops only exact duplicates, and keeps a copy of the old list in
+`~/.local/share/hog-browser/bookmarks-v1-backup.json`.
+
 ## Docker Engine or Docker Desktop
 
 Each container in Hog can run on **Docker Engine** (native docker-ce, `/var/run/docker.sock`) or **Docker Desktop** (the LinuxKit VM). **Settings → Containers** has a compact Engine/Desktop control, and each container in the list shows which runtime it is on. Open the ⋯ menu on a container to start, stop, restart, move, or remove it. Moving a container stops and removes it on the old runtime, then starts it on the new one. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over. Hog does not move an existing container until you click.

@@ -64,6 +64,9 @@ const TYPES = {
   ".png": "image/png",
   ".json": "application/json; charset=utf-8",
   ".mp4": "video/mp4",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain; charset=utf-8",
 };
 
 /**
@@ -588,6 +591,105 @@ async function fetchAsset(start) {
     return { body, type: safeType(response.headers.get("content-type")) };
   }
   throw new Error("Too many redirects");
+}
+
+// ---------- Favicons for bookmark tiles ----------
+// The Hog page runs cross-origin isolated, so it cannot show a site's icon
+// directly. Hog fetches the icon here (same guards as browsing) and serves it
+// same-origin. Results are cached in memory, misses too.
+const FAVICON_MAX = 200_000;
+const FAVICON_CACHE_CAP = 400;
+const FAVICON_TTL = 6 * 60 * 60 * 1000;
+const faviconCache = new Map();
+
+/** The origin whose icon a bookmark URL should show. */
+export function faviconOrigin(raw) {
+  const url = parseBrowseUrl(raw);
+  return url.origin;
+}
+
+/** Recognises icon bytes by content, never by the site's say-so. */
+export function sniffIcon(body) {
+  if (!body || body.length < 4) return "";
+  if (body[0] === 0x89 && body[1] === 0x50 && body[2] === 0x4e && body[3] === 0x47) return "image/png";
+  if (body[0] === 0x00 && body[1] === 0x00 && (body[2] === 0x01 || body[2] === 0x02) && body[3] === 0x00) return "image/x-icon";
+  if (body[0] === 0x47 && body[1] === 0x49 && body[2] === 0x46) return "image/gif";
+  if (body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) return "image/jpeg";
+  if (body.length > 12 && body.toString("latin1", 0, 4) === "RIFF" && body.toString("latin1", 8, 12) === "WEBP") return "image/webp";
+  const head = body.toString("utf8", 0, Math.min(body.length, 512)).trimStart().toLowerCase();
+  if (head.startsWith("<svg") || (head.startsWith("<?xml") && head.includes("<svg"))) return "image/svg+xml";
+  return "";
+}
+
+/** Finds the first <link rel="icon"> style href in a page. */
+export function iconHrefFromHtml(html, base) {
+  const re = /<link\b[^>]*>/gi;
+  let match;
+  while ((match = re.exec(String(html || "")))) {
+    const tag = match[0];
+    const rel = (tag.match(/\brel\s*=\s*["']?([^"'>]+)/i) || [])[1] || "";
+    if (!/(^|\s)(icon|shortcut icon|apple-touch-icon)(\s|$)/i.test(rel.trim())) continue;
+    const href = (tag.match(/\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i) || []);
+    const value = href[2] ?? href[3] ?? href[4];
+    if (!value) continue;
+    try {
+      const url = new URL(value.trim(), base);
+      if (url.protocol === "http:" || url.protocol === "https:") return url.href;
+    } catch {
+      // try the next link
+    }
+  }
+  return "";
+}
+
+async function fetchSmall(start, limit, accept) {
+  let current = new URL(start);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertFetchAllowed(current.hostname);
+    const response = await fetch(current, {
+      redirect: "manual",
+      headers: { accept, "user-agent": BROWSER_UA },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) return null;
+      current = new URL(location, current);
+      if (current.protocol !== "http:" && current.protocol !== "https:") return null;
+      continue;
+    }
+    if (!response.ok) return null;
+    const length = Number(response.headers.get("content-length") || 0);
+    if (length > limit) return null;
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > limit) return null;
+    return { body, url: current };
+  }
+  return null;
+}
+
+async function loadFavicon(origin) {
+  const direct = await fetchSmall(`${origin}/favicon.ico`, FAVICON_MAX, "image/*").catch(() => null);
+  const directType = direct && sniffIcon(direct.body);
+  if (directType) return { body: direct.body, type: directType };
+  const page = await fetchSmall(`${origin}/`, 512_000, "text/html").catch(() => null);
+  if (!page) return null;
+  const href = iconHrefFromHtml(page.body.toString("utf8"), page.url);
+  if (!href) return null;
+  const icon = await fetchSmall(href, FAVICON_MAX, "image/*").catch(() => null);
+  const type = icon && sniffIcon(icon.body);
+  return type ? { body: icon.body, type } : null;
+}
+
+async function cachedFavicon(origin) {
+  const hit = faviconCache.get(origin);
+  if (hit && Date.now() - hit.at < FAVICON_TTL) return hit.pending ? hit.pending : hit.value;
+  const pending = loadFavicon(origin).catch(() => null);
+  faviconCache.set(origin, { at: Date.now(), pending });
+  const value = await pending;
+  faviconCache.set(origin, { at: Date.now(), value });
+  while (faviconCache.size > FAVICON_CACHE_CAP) faviconCache.delete(faviconCache.keys().next().value);
+  return value;
 }
 
 function escapeText(value) {
@@ -1166,8 +1268,29 @@ async function handle(req, res, runtime) {
     }
 
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
-    if ((url.pathname === "/api/browse" || url.pathname === "/api/node") && !walletRequest) {
+    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon") && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
+      return;
+    }
+
+    if (url.pathname === "/api/favicon" && req.method === "GET") {
+      let origin;
+      try {
+        origin = faviconOrigin(url.searchParams.get("url"));
+      } catch {
+        send(res, 400, "", "text/plain; charset=utf-8");
+        return;
+      }
+      const icon = await cachedFavicon(origin);
+      if (!icon) {
+        send(res, 404, "", "text/plain; charset=utf-8", { "cache-control": "private, max-age=3600" });
+        return;
+      }
+      send(res, 200, icon.body, icon.type, {
+        "cache-control": "private, max-age=86400",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        "cross-origin-resource-policy": "same-origin",
+      });
       return;
     }
 

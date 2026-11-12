@@ -347,8 +347,12 @@ test("home uses the regular search site and a wider wallet", async () => {
   try {
     const home = await fetch(`http://127.0.0.1:${port}/`);
     const html = await home.text();
-    assert.match(html, /data-url="https:\/\/duckduckgo.com\/"/);
+    // Home tiles come from the favorites store; its seed uses the regular search site.
+    assert.match(html, /id="fav-grid"/);
     assert.doesNotMatch(html, /html\.duckduckgo\.com/);
+    const store = await (await fetch(`http://127.0.0.1:${port}/bookmarks-store.js`)).text();
+    assert.match(store, /url: DDG_HOME/);
+    assert.match(store, /const DDG_HOME = "https:\/\/duckduckgo\.com\/"/);
     assert.match(html, /id="isolate-tab"/);
     const css = await (await fetch(`http://127.0.0.1:${port}/app.css`)).text();
     assert.match(css, /--wallet-w: 400px/);

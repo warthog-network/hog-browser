@@ -88,6 +88,7 @@ cp -a \
   "${HB}/guard.py" \
   "${HB}/shell.py" \
   "${HB}/share_page.py" \
+  "${HB}/bookmark_files.py" \
   "${HB}/server.mjs" \
   "${HB}/opfs-polyfill.js" \
   "${HB}/package.json" \
