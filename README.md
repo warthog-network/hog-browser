@@ -73,6 +73,19 @@ Upgrading from 0.1.20 or older turns the old toolbar list into Favorites,
 drops only exact duplicates, and keeps a copy of the old list in
 `~/.local/share/hog-browser/bookmarks-v1-backup.json`.
 
+## Files (hog://files) and the tailnet network drive
+
+Type `hog://files` in the address bar, or pick Settings → Files. It is a file explorer for `~/hog-shares` (and any extra folders you add in Settings → Files → Files folders): list and grid views with thumbnails, sort, filter and subfolder search, multi-select, drag and drop (drop files from your desktop to upload them, drag items onto folders to move them, hold Ctrl to copy), cut/copy/paste, rename (F2), new folder (Ctrl+Shift+N), a details panel (Ctrl+I), previews for images, video, audio and text, and Delete sends things to a Trash with Restore. Big uploads go up in 8 MB chunks and resume after a dropped connection.
+
+The file API only answers Hog's own page on 127.0.0.1, every path is checked against the folder's real path (no `..`, no absolute paths, no symlinks that lead outside), and files are served with a sandbox CSP so a shared HTML file cannot run in Hog.
+
+**Network drive (Samba), off by default.** Settings → Tailscale → Network drive. Pick a user name and password, press Save sign-in, then Download and turn on. Hog runs `dockurr/samba` on Docker Engine and publishes port 445 only on hog's Tailscale address and 127.0.0.1, never on your LAN. It needs the tailscale container running on Docker Engine (Docker Desktop runs containers in a VM, so its ports cannot reach the tailnet address). Then connect with:
+
+- Phone (iOS Files → Connect to Server, or an Android SMB file manager) or macOS/Linux: `smb://hog.<your-tailnet>.ts.net/hog-shares`
+- Windows: `\\hog\hog-shares` (or `\\100.x.y.z\hog-shares`)
+
+The password is kept in `~/.local/share/hog-samba/pass` (mode 600) and mounted into the container as a secret; it is never put in the command line or the container environment.
+
 ## Docker Engine or Docker Desktop
 
 Each container in Hog can run on **Docker Engine** (native docker-ce, `/var/run/docker.sock`) or **Docker Desktop** (the LinuxKit VM). **Settings → Containers** has a compact Engine/Desktop control, and each container in the list shows which runtime it is on. Open the ⋯ menu on a container to start, stop, restart, move, or remove it. Moving a container stops and removes it on the old runtime, then starts it on the new one. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over. Hog does not move an existing container until you click.
