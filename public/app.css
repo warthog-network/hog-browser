@@ -1451,10 +1451,14 @@ h3 { margin: 8px 0; font-size: 18px; }
   max-width: 100%;
   height: 108px;
   object-fit: contain;
-  background: var(--wallet);
+  /* wartlogorun-wallet.mp4 is encoded on this exact color (retro --wallet). */
+  background: #0e0f11;
   border: 0;
   pointer-events: none;
 }
+/* The intro clip is encoded full-range with its background flattened to
+   #0b0b0d, the theme --bg and the GTK chrome view color. Keep these three
+   equal, or re-encode wartlogorun.mp4, or the clip shows as a square. */
 .boot-flash {
   position: fixed;
   inset: 0;
@@ -1464,13 +1468,13 @@ h3 { margin: 8px 0; font-size: 18px; }
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: #09090b;
+  background: #0b0b0d;
   cursor: pointer;
 }
 .boot-flash video {
   width: min(440px, 86vw);
   height: auto;
-  background: #09090b;
+  background: #0b0b0d;
   pointer-events: none;
 }
 .boot-flash p { margin: 0; color: var(--muted); font-size: 12px; }
