@@ -6949,7 +6949,7 @@ function paintMining(state) {
       ? "Open, not started"
       : state.miningNetwork && tabNet !== label
         ? `On ${tabNet || state.pageNetwork}`
-        : state.synced ? "Synced" : "Syncing";
+        : state.synced ? "Synced" : miningSyncText(state);
   setText("mining-stat-node", tab);
   setText("mining-stat-height", state.height ? Number(state.height).toLocaleString() : "—");
   setText("mining-stat-miners", String(state.miners || 0));
@@ -6968,6 +6968,14 @@ function paintMining(state) {
   }
   error.textContent = state.error || state.lastError || "";
   paintMiningTailnet(state);
+}
+
+/** "Syncing (height X of ~Y)" while the mining ready gate is closed. */
+function miningSyncText(state) {
+  const fmt = (n) => Number(n).toLocaleString();
+  if (state.nodeHeight && state.tipHeight) return `Syncing (height ${fmt(state.nodeHeight)} of ~${fmt(state.tipHeight)})`;
+  if (state.nodeHeight) return state.gate === "no-tip" ? `Syncing (height ${fmt(state.nodeHeight)}, checking the network tip)` : `Syncing (height ${fmt(state.nodeHeight)})`;
+  return "Syncing";
 }
 
 function paintMiningTailnet(state) {

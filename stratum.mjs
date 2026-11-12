@@ -35,6 +35,79 @@ const RECONCILE_GIVE_UP_MS = 10 * 60_000;
 // Answer BzMiner by then even if the chain has not settled a pending block yet.
 const MINER_REPLY_MS = 60_000;
 
+// ---------- Ready gate: no work until the node has really caught up ----------
+// A node's own "synced" flag is not enough: a fresh node can say synced:true
+// at height 1 before it has heard of any peer. Work starts only when the node
+// says synced AND its height is close to the network tip seen elsewhere.
+//
+// READY_SLACK: how many blocks behind the best known tip still counts as caught
+// up. Both networks average ~20 s blocks (last 500 blocks, Nov 2026: mainnet
+// 21.4 s, DeFi testnet 20.0 s), with bursts of a few seconds. The public tip is
+// re-read every TIP_REFRESH_MS (15 s) and can be a block or two ahead of what
+// has reached the node tab over its one WebSocket peer, and short reorgs move
+// the tip by a block or two. 5 blocks (~100 s) absorbs that, while a fresh or
+// fallen-back node (thousands of blocks behind) stays gated. The node's own
+// synced flag is still required, so a node inside the slack is following the
+// tip, not syncing toward it.
+export const READY_SLACK = 5;
+// Hard floors: mainnet is past 5,285,000 (Nov 2026), so a mainnet node below
+// 5,000,000 is not synced whatever it says. The DeFi testnet can be reset, so
+// it gets no floor beyond "never at height 1".
+export const HEIGHT_FLOORS = { mainnet: 5_000_000, defi: 0 };
+const TIP_REFRESH_MS = 15_000;
+// A public tip older than this (its node unreachable since) no longer counts.
+const TIP_MAX_AGE_MS = 120_000;
+// A caught-up node's own synced flag can flip to false for a poll or two as a
+// new block arrives (seen in DeFi smoke). Within this grace Hog sends no new
+// work but keeps miners on their current job; a fall-back (far behind the tip,
+// or height 1) stops work at once.
+const GATE_GRACE_MS = 10_000;
+
+/**
+ * Decide whether to hand out work for a /chain/mine template.
+ * Tip sources, best first:
+ *  - publicTip: the network's public node (Hog's own wallet backend for that
+ *    network), read over HTTPS by Hog;
+ *  - pinHeight: the signed checkpoint the in-tab node got from its peers (lags
+ *    the tip by a few blocks, never ahead of it; 0 on a fresh node);
+ *  - highWater: the highest height this node reached while mining here, so a
+ *    fall-back or a reorg to a tiny height closes the gate even if every other
+ *    source is unavailable;
+ *  - floor: HEIGHT_FLOORS for the network.
+ * With neither a public tip nor a peer checkpoint there is nothing to compare
+ * against, so the gate stays closed rather than trust the node's own flag.
+ * @param {{ synced: boolean, templateHeight: number, publicTip?: number, pinHeight?: number, highWater?: number, floor?: number, slack?: number }} input
+ * @returns {{ open: boolean, nodeHeight: number, tipHeight: number, reason: string }}
+ */
+export function readyGate({ synced, templateHeight, publicTip = 0, pinHeight = 0, highWater = 0, floor = 0, slack = READY_SLACK }) {
+  const nodeHeight = Number.isInteger(templateHeight) ? Math.max(0, templateHeight - 1) : 0;
+  const tipHeight = Math.max(publicTip || 0, pinHeight || 0, highWater || 0, floor || 0);
+  const closed = (reason) => ({ open: false, nodeHeight, tipHeight, reason });
+  if (!Number.isInteger(templateHeight) || templateHeight <= 1) return closed("fresh");
+  if (synced !== true) return closed("syncing");
+  if (!(publicTip > 0) && !(pinHeight > 0)) return closed("no-tip");
+  if (floor > 0 && nodeHeight < floor) return closed("behind");
+  if (pinHeight > 0 && nodeHeight < pinHeight) return closed("behind");
+  if (nodeHeight < tipHeight - slack) return closed("behind");
+  return { open: true, nodeHeight, tipHeight, reason: "" };
+}
+
+/** Height from a /chain/head answer (0.10.x nests it under chainHead, 0.9.x does not). */
+export function headHeights(result) {
+  const data = result && typeof result === "object" && result.data && typeof result.data === "object" ? result.data : null;
+  if (!data) return { height: 0, pinHeight: 0 };
+  const head = data.chainHead && typeof data.chainHead === "object" ? data.chainHead : data;
+  const num = (v) => (Number.isInteger(v) && v > 0 ? v : 0);
+  return { height: num(head.height), pinHeight: num(head.pinHeight) };
+}
+
+/** What Settings and the miner-facing error say while the gate is closed. */
+export function gateMessage(gate, label) {
+  const of = gate.tipHeight ? ` (height ${gate.nodeHeight.toLocaleString("en-US")} of ~${gate.tipHeight.toLocaleString("en-US")})` : gate.nodeHeight ? ` (height ${gate.nodeHeight.toLocaleString("en-US")})` : "";
+  if (gate.reason === "no-tip") return `The ${label} node says it is synced${of}, but Hog cannot see the network tip yet to check; work starts once it can.`;
+  return `The ${label} node is still syncing${of}; work starts when it has caught up.`;
+}
+
 /** @param {string|undefined} raw */
 export function stratumPort(raw = process.env.HOG_STRATUM_PORT) {
   if (raw == null || raw === "") return DEFAULT_STRATUM_PORT;
@@ -173,8 +246,16 @@ export function createStratumBridge({
   reconcileMs = RECONCILE_MS,
   reconcileGiveUpMs = RECONCILE_GIVE_UP_MS,
   minerReplyMs = MINER_REPLY_MS,
+  getPublicTip = async () => 0,
+  tipRefreshMs = TIP_REFRESH_MS,
+  slack = READY_SLACK,
+  gateGraceMs = GATE_GRACE_MS,
 }) {
   let server = null;
+  /** network key -> { publicTip, publicAt, pinHeight, pinAt, highWater, refreshing, refreshedAt } */
+  const tips = new Map();
+  let gateOpen = false;
+  let closedSince = 0;
   let listenPort = 0;
   let allowTailnet = false;
   /** @type {Map<string, any>} tailnet address -> net.Server */
@@ -190,7 +271,9 @@ export function createStratumBridge({
   // blocks: on chain (the node accepted it, or the chain shows it). rejected:
   // not on chain, of which stale: that height was already taken. pending:
   // the node tab has not answered yet; checked against the chain.
-  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, stale: 0, pending: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "" };
+  // synced: the ready gate is open (node synced and caught up with the tip).
+  // nodeHeight / tipHeight: what the gate last compared ("height X of ~Y").
+  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, stale: 0, pending: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "", nodeHeight: 0, tipHeight: 0, gate: "" };
   /** @type {Set<any>} submitted blocks whose fate is not known yet */
   const pendingShares = new Set();
   let reconcileTimer = null;
@@ -220,6 +303,68 @@ export function createStratumBridge({
     send(socket, { id: null, method: "mining.notify", params: [job.id, job.prevHash, job.merklePrefix.toString("hex"), job.version, job.nbits, job.ntime, clean] });
   }
 
+  function tipState(key) {
+    let t = tips.get(key);
+    if (!t) {
+      t = { publicTip: 0, publicAt: 0, pinHeight: 0, highWater: 0, refreshing: false, refreshedAt: 0 };
+      tips.set(key, t);
+    }
+    return t;
+  }
+
+  /** Re-read the public tip and the node's signed checkpoint (rate limited). */
+  async function refreshTips(net) {
+    const t = tipState(net.key);
+    if (t.refreshing || Date.now() - t.refreshedAt < tipRefreshMs) return;
+    t.refreshing = true;
+    try {
+      const [pub, head] = await Promise.all([
+        Promise.resolve().then(() => getPublicTip(net.key)).catch(() => 0),
+        call("GET", "/chain/head", undefined, net.page, { timeoutMs: templateTimeoutMs }).catch(() => null),
+      ]);
+      if (Number.isInteger(pub) && pub > 0) {
+        t.publicTip = pub;
+        t.publicAt = Date.now();
+      }
+      if (head?.ok) t.pinHeight = headHeights(head.result).pinHeight;
+      t.refreshedAt = Date.now();
+    } finally {
+      t.refreshing = false;
+    }
+  }
+
+  /** Gate a template for a network, from what Hog knows about the tip. */
+  function gateFor(data, net) {
+    const t = tipState(net.key);
+    const fresh = t.publicAt && Date.now() - t.publicAt < TIP_MAX_AGE_MS;
+    return readyGate({
+      synced: data?.synced === true,
+      templateHeight: data?.height,
+      publicTip: fresh ? t.publicTip : 0,
+      pinHeight: t.pinHeight,
+      highWater: t.highWater,
+      floor: HEIGHT_FLOORS[net.key] || 0,
+      slack,
+    });
+  }
+
+  /**
+   * The node is not (or no longer) caught up: drop every job and, if miners
+   * had work, disconnect them so they stop hashing it. They reconnect at once
+   * and get no job until the gate opens again.
+   */
+  function closeGate(entry, gate, net) {
+    const hadWork = Boolean(entry.last || entry.jobs.size);
+    entry.jobs.clear();
+    entry.last = null;
+    entry.sentAt = 0;
+    if (gateOpen || hadWork) {
+      stats.lastResult = `Stopped work: the ${net.label} node fell behind${gate.tipHeight ? ` (height ${gate.nodeHeight} of ~${gate.tipHeight})` : ""}. Miners wait until it catches up.`;
+    }
+    gateOpen = false;
+    if (hadWork) for (const socket of entry.sockets) socket.end();
+  }
+
   async function poll(address) {
     const entry = accounts.get(address);
     if (!entry || entry.polling) return;
@@ -236,7 +381,12 @@ export function createStratumBridge({
         stats.miningNetwork = net.key;
         stats.height = 0;
         stats.synced = false;
+        gateOpen = false;
       }
+      const t = tipState(net.key);
+      // The first check waits for the tip; later ones refresh in the background.
+      if (!t.refreshedAt) await refreshTips(net);
+      else refreshTips(net).catch(() => {});
       const reply = await call("GET", `/chain/mine/${address}`, undefined, net.page, { timeoutMs: templateTimeoutMs });
       const data = reply?.ok ? reply.result?.data : null;
       if (!reply?.ok) {
@@ -253,11 +403,26 @@ export function createStratumBridge({
         stats.synced = false;
         return;
       }
-      stats.synced = data.synced === true;
-      if (!stats.synced) {
-        stats.lastError = `The ${net.label} node is still syncing; work starts when it is synced.`;
+      const gate = gateFor(data, net);
+      stats.nodeHeight = gate.nodeHeight;
+      stats.tipHeight = gate.tipHeight;
+      stats.gate = gate.open ? "open" : gate.reason;
+      if (!gate.open) {
+        if (!closedSince) closedSince = Date.now();
+        const fellBack = gate.reason === "behind" || gate.reason === "fresh";
+        if (gateOpen && !fellBack && Date.now() - closedSince < gateGraceMs) {
+          // A blip at the tip: no new work this poll, miners keep their job.
+          return;
+        }
+        stats.synced = false;
+        stats.lastError = gateMessage(gate, net.label);
+        closeGate(entry, gate, net);
         return;
       }
+      closedSince = 0;
+      stats.synced = true;
+      gateOpen = true;
+      if (gate.nodeHeight > t.highWater) t.highWater = gate.nodeHeight;
       stats.lastError = "";
       const job = jobFromTemplate(data, net);
       stats.height = job.height;
@@ -277,6 +442,20 @@ export function createStratumBridge({
     } finally {
       entry.polling = false;
     }
+  }
+
+  /**
+   * For the HTTP relay (GET /chain/mine passthrough): null if the template may
+   * go to a miner, else the reason it may not.
+   * @param {any} result /chain/mine answer
+   * @param {{ key: string, label: string, page: string } | null} net
+   */
+  function templateBlocked(result, net) {
+    if (!net || !result?.data) return null;
+    const gate = gateFor(result.data, net);
+    if (gate.open) return null;
+    refreshTips(net).catch(() => {});
+    return gateMessage(gate, net.label);
   }
 
   function link(socket, address) {
@@ -604,5 +783,5 @@ export function createStratumBridge({
     };
   }
 
-  return { start, stop, status, setTailnet, reconcile };
+  return { start, stop, status, setTailnet, reconcile, templateBlocked };
 }

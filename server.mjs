@@ -9,7 +9,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
-import { createStratumBridge, isWarthogAddress, stratumPort } from "./stratum.mjs";
+import { createStratumBridge, headHeights, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
@@ -49,11 +49,29 @@ const MINING = createMiningRelay({
   token: randomBytes(24).toString("hex"),
   pageOrigin: `http://${PAGE_HOST}:${NODE_PORT}`,
   network: () => currentMiningNetwork()?.page || "",
+  // Same ready gate as stratum: no template until the node has caught up.
+  checkTemplate: (result) => STRATUM.templateBlocked(result, currentMiningNetwork()),
 });
 function currentMiningNetwork() {
   return resolveMiningNetwork(miningNetworkSetting, MINING.getPageNetwork());
 }
-const STRATUM = createStratumBridge({ call: MINING.call, getNetwork: currentMiningNetwork });
+const STRATUM = createStratumBridge({ call: MINING.call, getNetwork: currentMiningNetwork, getPublicTip: publicTipHeight });
+/**
+ * The network tip from its public node (the same node Hog's wallet uses), for
+ * the mining ready gate. 0 if it cannot be read.
+ * @param {string} key "defi" or "mainnet"
+ */
+async function publicTipHeight(key) {
+  const base = NETWORKS[key];
+  if (!base) return 0;
+  try {
+    const response = await fetch(`${base}/chain/head`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return 0;
+    return headHeights(await response.json()).height;
+  } catch {
+    return 0;
+  }
+}
 let miningError = "";
 // WASM node files Hog serves itself instead of the live site's. The bundled builds
 // (node-defi/ and node-mainnet/, see their READMEs) add only POST /chain/append so

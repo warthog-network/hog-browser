@@ -277,9 +277,11 @@ export function pageRelayScript(token) {
 }
 
 /**
- * @param {{ token: string, pageOrigin: string, network?: string, timeoutMs?: number, host?: string }} options
+ * @param {{ token: string, pageOrigin: string, network?: string, timeoutMs?: number, host?: string, checkTemplate?: (result: any) => string | null }} options
+ *   checkTemplate: the mining ready gate; a reason string withholds a
+ *   /chain/mine template (node not caught up with the network tip yet).
  */
-export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK, timeoutMs = 15000, host = "127.0.0.1" }) {
+export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK, timeoutMs = 15000, host = "127.0.0.1", checkTemplate = () => null }) {
   if (!token || String(token).length < 16) throw new Error("Mining relay needs a random token");
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1_000_000 });
   let page = null;
@@ -442,6 +444,13 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
       const status = reply.code === "timeout" ? 504 : reply.code === "node-error" ? 502 : 503;
       lastError = NOT_READY[reply.code] || "The node did not answer";
       return json(res, status, { code: status, error: lastError, ...(reply.error ? { detail: reply.error } : {}) });
+    }
+    if (route.kind === "mine") {
+      const blocked = checkTemplate(reply.result);
+      if (blocked) {
+        lastError = blocked;
+        return json(res, 503, { code: 503, error: blocked });
+      }
     }
     lastError = "";
     if (route.kind === "append") counters.submits += 1;

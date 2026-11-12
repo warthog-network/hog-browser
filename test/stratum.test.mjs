@@ -19,6 +19,8 @@ const ADDRESS = "56ed966df64571675f38be3b4219862dbbec8f0e69140de3";
 // A real DeFi testnet /chain/mine template (height 52139) from the in-tab node.
 const TEMPLATE = JSON.parse(readFileSync(new URL("./fixtures/template-defi.json", import.meta.url), "utf8"));
 const sha256 = (b) => createHash("sha256").update(b).digest();
+// The network tip as the public node reports it: the template's parent.
+const TIP = async () => TEMPLATE.height - 1;
 
 test("Warthog addresses need 48 hex characters and a valid checksum", () => {
   assert.equal(isWarthogAddress(ADDRESS), true);
@@ -109,7 +111,7 @@ test("BzMiner-style session: subscribe, authorize, notify, submit a block", asyn
     if (method === "GET") return { ok: true, result: { code: 0, data: tip } };
     return { ok: true, result: { code: 0 } };
   };
-  const bridge = createStratumBridge({ call, pollMs: 50 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50 });
   const port = await bridge.start(0);
   const c = client(port);
   try {
@@ -166,7 +168,7 @@ test("stratum rejects bad addresses, unauthorized submits, and node errors", asy
   const call = async (method) => (method === "GET"
     ? { ok: true, result: { code: 0, data: TEMPLATE } }
     : appendReply);
-  const bridge = createStratumBridge({ call, pollMs: 50 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50 });
   const port = await bridge.start(0);
   try {
     const bad = client(port);
@@ -204,7 +206,7 @@ test("stratum rejects bad addresses, unauthorized submits, and node errors", asy
 
 test("stratum waits for a synced node and listens on loopback only", async () => {
   const call = async () => ({ ok: true, result: { code: 0, data: { ...TEMPLATE, synced: false } } });
-  const bridge = createStratumBridge({ call, pollMs: 50 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50 });
   const port = await bridge.start(0);
   const c = client(port);
   try {
@@ -267,7 +269,7 @@ test("a block the node tab never answers for is pending, then counted from the c
     asked.push({ path, timeoutMs: options.timeoutMs });
     return { ok: false, code: "timeout" };
   };
-  const bridge = createStratumBridge({ call, pollMs: 50, reconcileMs: 30, appendTimeoutMs: 1234 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50, reconcileMs: 30, appendTimeoutMs: 1234 });
   const port = await bridge.start(0);
   const { c, submit } = await session(port);
   try {
@@ -309,7 +311,7 @@ test("a late append answer settles a pending block; unsettled ones give up in ti
     lateCallbacks.push(options.onLate);
     return { ok: false, code: "timeout" };
   };
-  const bridge = createStratumBridge({ call, pollMs: 50, reconcileMs: 30, reconcileGiveUpMs: 400, minerReplyMs: 150 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50, reconcileMs: 30, reconcileGiveUpMs: 400, minerReplyMs: 150 });
   const port = await bridge.start(0);
   const { c, submit } = await session(port);
   try {
