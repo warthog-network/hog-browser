@@ -128,6 +128,7 @@ function showPair(message = "") {
   const cfg = config();
   if (cfg.host && !$("pair-host").value) $("pair-host").value = cfg.host;
   $("pair-error").textContent = message;
+  $("app-version").textContent = cfg.version ? `Hog phone app ${cfg.version}` : "";
 }
 
 let scannedIp = "";
@@ -309,7 +310,7 @@ function paintFiles(data) {
       ico.textContent = "";
       ico.append(img);
     }
-    list.append(el("li", { onclick: () => (e.type === "dir" ? openDir(rel) : fileSheet(e, rel)) },
+    list.append(el("li", { onclick: () => (e.type === "dir" ? openDir(rel) : e.kind === "video" && native ? native.play(files.root, rel, e.name) : fileSheet(e, rel)) },
       ico,
       el("div", { class: "f-main" },
         el("span", { class: "f-name", text: e.name }),
@@ -368,14 +369,18 @@ function fileSheet(e, rel) {
   if (e.type !== "dir") {
     const src = rawUrl(files.root, rel);
     if (e.kind === "image") preview.append(el("img", { src, alt: e.name }));
-    else if (e.kind === "video") preview.append(el("video", { src, controls: true, playsinline: true, preload: "metadata" }));
+    else if (e.kind === "video" && native) preview.append(el("button", { class: "play-big", type: "button", "aria-label": `Play ${e.name}`, onclick: () => { closeSheet(); native.play(files.root, rel, e.name); } }, el("span", { class: "play-tri" }), el("span", { text: "Play" })));
+    else if (e.kind === "video") preview.append(el("button", { class: "play-big", type: "button" }, el("span", { class: "play-tri" }), el("span", { text: "Play" })));
     else if (e.kind === "audio") preview.append(el("audio", { src, controls: true }));
     else if (e.kind === "text" && native) {
       const pre = el("pre", { text: "Loading…" });
       preview.append(pre);
       fetch(src, { headers: { range: "bytes=0-199999" } }).then((r) => r.text()).then((t) => { pre.textContent = t; }).catch(() => { pre.textContent = "Could not load a preview."; });
     } else if (e.kind === "text") preview.append(el("pre", { text: demo.text }));
-    else preview.append(el("p", { class: "note", text: "No preview for this kind of file. Download or share it." }));
+    else {
+      preview.append(el("p", { class: "note", text: "No preview for this kind of file. Download or share it." }));
+      if (native && e.kind !== "archive") preview.append(el("button", { class: "ghost", type: "button", text: "Try in video player", onclick: () => { closeSheet(); native.play(files.root, rel, e.name); } }));
+    }
   }
   const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
   sheet(

@@ -193,4 +193,8 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); text-tran
   background: #1b1c20; border: 1px solid var(--line-strong); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); font-size: 14px;
 }
 .toast.err { border-color: rgba(224, 122, 98, 0.6); }
+.app-version { text-align: center; font-family: "Share Tech Mono", monospace; opacity: 0.8; }
+.play-big { display: grid; justify-items: center; gap: 8px; background: none; border: 0; color: var(--gold); padding: 28px; font-family: "Orbitron", sans-serif; letter-spacing: 0.1em; }
+.play-tri { width: 64px; height: 64px; border-radius: 50%; background: radial-gradient(circle at 50% 40%, rgba(192, 132, 252, 0.45), rgba(3, 90, 166, 0.5) 65%); position: relative; }
+.play-tri::after { content: ""; position: absolute; inset: 18px 16px 18px 24px; background: var(--gold); clip-path: polygon(0 0, 100% 50%, 0 100%); }
 .empty { padding: 28px 12px; text-align: center; color: var(--muted); }

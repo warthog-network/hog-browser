@@ -268,6 +268,15 @@ class MainActivity : Activity() {
             io.execute { shareFile(root, path, name) }
         }
 
+        /** Native player for videos; the token stays on this side. */
+        @JavascriptInterface
+        fun play(root: String, path: String, name: String) = main.post {
+            startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
+                .putExtra(PlayerActivity.EXTRA_ROOT, root)
+                .putExtra(PlayerActivity.EXTRA_PATH, path)
+                .putExtra(PlayerActivity.EXTRA_NAME, name))
+        }
+
         @JavascriptInterface
         fun openUrl(url: String) = main.post { openExternal(url) }
 
