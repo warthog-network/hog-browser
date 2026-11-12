@@ -45,6 +45,7 @@ class PlayerActivity : Activity() {
     private lateinit var view: PlayerView
     private lateinit var overlay: LinearLayout
     private lateinit var message: TextView
+    private lateinit var keep: Button
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var title = ""
@@ -178,11 +179,11 @@ class PlayerActivity : Activity() {
                 setOnClickListener { startActivity(jellyfin.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); finish() }
             })
         }
-        row.addView(Button(this).apply {
+        keep = Button(this).apply {
             text = "Keep watching"
             setOnClickListener { overlay.visibility = View.GONE }
-            tag = "keep"
-        })
+        }
+        row.addView(keep)
         row.addView(Button(this).apply { text = "Close"; setOnClickListener { finish() } })
         box.addView(row)
         return box
@@ -190,7 +191,7 @@ class PlayerActivity : Activity() {
 
     private fun showError(text: String, keepPlaying: Boolean = false) {
         message.text = text
-        overlay.findViewWithTag<View>("keep")?.visibility = if (keepPlaying) View.VISIBLE else View.GONE
+        keep.visibility = if (keepPlaying) View.VISIBLE else View.GONE
         overlay.visibility = View.VISIBLE
     }
 
