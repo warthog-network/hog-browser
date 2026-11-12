@@ -61,6 +61,8 @@ async function run({ app, win, pages, PORT, NODE_PORT, stopServer }) {
   try {
     await until("chrome loaded", () => chrome("document.readyState === 'complete' && !!document.getElementById('tabstrip')"));
     ok(`chrome window loads http://127.0.0.1:${PORT}/`);
+    await sleep(1500);
+    await chrome("document.getElementById('boot-flash')?.click(), true"); // skip the intro video
     const env = await chrome("({ desktop: window.__hogDesktop === true, platform: window.__hogPlatform, bridge: typeof window.webkit?.messageHandlers?.hogwin?.postMessage, windows: document.documentElement.classList.contains('hog-windows') })");
     if (!env.desktop || env.bridge !== "function") throw new Error(`desktop bridge missing: ${JSON.stringify(env)}`);
     if (process.platform === "win32" && !env.windows) throw new Error("hog-windows class missing");
@@ -129,7 +131,7 @@ async function run({ app, win, pages, PORT, NODE_PORT, stopServer }) {
     const frame = await until("node frame", () => win().webContents.mainFrame.framesInSubtree.find(isNodeFrame), 30_000)
       .catch((e) => { console.error(win().webContents.mainFrame.framesInSubtree.map((f) => f.url)); throw e; });
     const probe = await until("node page", async () => {
-      const r = await within("node frame probe", frame.executeJavaScript("({ sab: typeof SharedArrayBuffer, ready: document.readyState, url: location.href, start: [...document.querySelectorAll('button')].some((b) => /start node/i.test(b.textContent)) })"), 5000);
+      const r = await within("node frame probe", frame.executeJavaScript("({ sab: typeof SharedArrayBuffer, ready: document.readyState, url: location.href, start: [...document.querySelectorAll('button')].some((b) => /start node|stop node/i.test(b.textContent)) })"), 5000);
       return r.ready === "complete" && r.start ? r : null;
     }, 60_000);
     if (probe.sab !== "function") throw new Error(`node frame has no SharedArrayBuffer: ${JSON.stringify(probe)}`);
@@ -148,8 +150,11 @@ async function run({ app, win, pages, PORT, NODE_PORT, stopServer }) {
       const click = (re) => within("node click", frame.executeJavaScript(`(() => { const b = [...document.querySelectorAll('button')].find((x) => ${re}.test(x.textContent.trim())); if (b) b.click(); return !!b; })()`), 5000);
       if (!(await click("/^DeFi testnet$/i"))) throw new Error("no DeFi testnet button in the node page");
       await sleep(1500);
-      if (!(await click("/^Start node$/i"))) throw new Error("no Start node button in the node page");
-      ok("node page: DeFi testnet, Start node clicked");
+      // A node that ran before starts again by itself (then there is no Start button).
+      const clicked = await click("/^Start node$/i");
+      const running = clicked || (await within("node running", frame.executeJavaScript("[...document.querySelectorAll('button')].some((b) => /stop node/i.test(b.textContent))"), 5000));
+      if (!running) throw new Error("node page has neither Start node nor Stop node");
+      ok(`node page: DeFi testnet, ${clicked ? "Start node clicked" : "node already running"}`);
       // A connected miner makes the stratum bridge poll the node for work.
       const keeper = net.connect(PORT_STRATUM(), "127.0.0.1", () => {
         keeper.write('{"id":1,"method":"mining.subscribe","params":["smoke/1.0"]}\n');
