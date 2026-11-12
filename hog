@@ -283,7 +283,7 @@ EDGE_GRIP_SCRIPT = r"""
       "transition: width .18s ease, background .18s ease; }",
       "button.grip.tabs { left: 0; right: auto; border-radius: 0 8px 8px 0; }",
       "button.grip.wallet { left: auto; right: 0; border-radius: 8px 0 0 8px; }",
-      "button.grip.hot { width: 112px; background: #221a3d; border: 1px solid rgba(255,255,255,.16);",
+      "button.grip.hot { width: 112px; background: #111b2e; border: 1px solid rgba(192,132,252,.24);",
       "box-shadow: 0 8px 18px #00000055; }",
       "button.grip.tabs.hot { left: 2px; right: auto; border-radius: 0 999px 999px 0; border-left: 0; justify-content: flex-start; padding: 0 12px; }",
       "button.grip.wallet.hot { left: auto; right: 2px; border-radius: 999px 0 0 999px; border-right: 0; justify-content: flex-end; padding: 0 12px; }",
@@ -296,8 +296,8 @@ EDGE_GRIP_SCRIPT = r"""
       ".label { display: none; white-space: nowrap; }",
       "button.grip.hot:not(.drag) .label { display: block; }",
       "#menu { position: absolute; inset: 0; z-index: 2147483647; pointer-events: none; }",
-      ".panel { position: absolute; box-sizing: border-box; background: #140f26; color: #f4f1ff;",
-      "border: 1px solid rgba(255,79,216,.38); border-radius: 14px; box-shadow: 0 18px 40px -18px #000, 0 0 26px -12px rgba(255,79,216,.6);",
+      ".panel { position: absolute; box-sizing: border-box; background: #0d1326; color: #f8fafc;",
+      "border: 1px solid rgba(192,132,252,.24); border-radius: 14px; box-shadow: 0 18px 40px -18px #000, 0 0 24px -14px rgba(192,132,252,.6);",
       "overflow: hidden; pointer-events: auto; font: 13px/1.3 'Segoe UI','Helvetica Neue',sans-serif; }",
       ".panel.suggestions { padding: 6px; }",
       ".panel.history { padding: 14px; }",
@@ -308,19 +308,19 @@ EDGE_GRIP_SCRIPT = r"""
       ".panel button.item { display: block; width: 100%; text-align: left; background: transparent;",
       "border-radius: 10px; padding: 8px 10px; }",
       ".panel button.item span, .panel button.item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-      ".panel button.item small { color: #bdb5d8; font-size: 11px; margin-top: 2px; }",
-      ".panel button.item:hover { background: rgba(62,240,255,.09); }",
+      ".panel button.item small { color: #a7b0c6; font-size: 11px; margin-top: 2px; }",
+      ".panel button.item:hover { background: rgba(192,132,252,.08); }",
       ".panel .head { display: flex; justify-content: space-between; align-items: center; }",
       ".panel .head strong { font: 600 13px/1 'Segoe UI',sans-serif; }",
       ".panel button.clear { color: #a1a1aa; font-size: 12px; border-radius: 8px; padding: 4px 8px; }",
       ".panel button.clear:hover { color: #f4f4f5; background: #ffffff12; }",
-      ".panel p { margin: 8px 4px; color: #bdb5d8; }",
+      ".panel p { margin: 8px 4px; color: #a7b0c6; }",
       ".panel.settings { padding: 8px; }",
       ".panel.settings .list { display: flex; flex-direction: column; gap: 8px; margin: 0; max-height: none; }",
       ".panel.settings button.item span, .panel.settings button.item small { overflow: visible; text-overflow: clip; white-space: normal; }",
-      ".panel.settings button.item.amber { box-shadow: inset 3px 0 0 #e79300; }",
-      ".panel.settings button.item.flare { box-shadow: inset 3px 0 0 #f25c05; }",
-      ".panel.settings button.item.current { background: rgba(62,240,255,.09); }"
+      ".panel.settings button.item.amber { box-shadow: inset 2px 0 0 #c084fc; }",
+      ".panel.settings button.item.flare { box-shadow: inset 2px 0 0 #035aa6; }",
+      ".panel.settings button.item.current { background: rgba(192,132,252,.12); }"
     ].join("");
     try {
       var sheet = new CSSStyleSheet();
@@ -2297,7 +2297,7 @@ class Hog(Gtk.Application):
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
         view = WebKit2.WebView.new_with_context(context)
         background = Gdk.RGBA()
-        background.parse("#0b0816")
+        background.parse("#070a18")
         view.set_background_color(background)
         settings = view.get_settings()
         settings.set_enable_javascript(True)

@@ -867,7 +867,8 @@ function bmFaviconUrl(url) {
   return `/api/favicon?url=${encodeURIComponent(url)}`;
 }
 
-const BM_TILE_COLORS = ["#ff4fd8", "#3ef0ff", "#fdb913", "#9b7bff", "#3dff9a", "#ff7a3d"];
+// Letter badges use the theme accents only: site purple, brand blue (lifted for dark), brand gray.
+const BM_TILE_COLORS = ["#c084fc", "#7fb2e5", "#e9e9e9"];
 
 function bmLetterTile(item, className) {
   const host = bmHost(item.url);
