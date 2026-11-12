@@ -11,6 +11,7 @@
 // Binds 127.0.0.1 only; it is started and stopped with the mining relay.
 import { createServer } from "node:net";
 import { createHash, randomBytes } from "node:crypto";
+import { MINING_NETWORKS } from "./mining.mjs";
 
 export const DEFAULT_STRATUM_PORT = 3456;
 const POLL_MS = 1000;
@@ -55,10 +56,11 @@ function hexBytes(value, size) {
 }
 
 /**
- * Turn a /chain/mine template into a stratum job.
+ * Turn a /chain/mine template into a stratum job for one network.
  * @param {{ header: string, body: string, merklePrefix: string, height: number, difficulty: number }} t
+ * @param {{ key: string, page: string, lengthPrefixedBody: boolean }} [network]
  */
-export function jobFromTemplate(t) {
+export function jobFromTemplate(t, network = MINING_NETWORKS.defi) {
   const header = Buffer.from(String(t.header || ""), "hex");
   const body = Buffer.from(String(t.body || ""), "hex");
   const merklePrefix = Buffer.from(String(t.merklePrefix || ""), "hex");
@@ -67,6 +69,9 @@ export function jobFromTemplate(t) {
   }
   return {
     id: sha256(header).toString("hex"),
+    network: network.key,
+    page: network.page,
+    lengthPrefixedBody: Boolean(network.lengthPrefixedBody),
     height: t.height,
     difficulty: Number(t.difficulty) || 1,
     header,
@@ -77,7 +82,7 @@ export function jobFromTemplate(t) {
     version: header.subarray(68, 72).toString("hex"),
     ntime: header.subarray(72, 76).toString("hex"),
     // Same work, ignoring the timestamp: new tip, new transactions or new target change it.
-    workKey: `${header.subarray(0, 36).toString("hex")}:${merklePrefix.toString("hex")}:${body.toString("hex")}`,
+    workKey: `${network.key}:${header.subarray(0, 36).toString("hex")}:${merklePrefix.toString("hex")}:${body.toString("hex")}`,
   };
 }
 
@@ -94,23 +99,33 @@ export function solvedBlock(job, extra2prefix, extranonce2, ntime, nonce) {
   sha256(Buffer.concat([job.merklePrefix, body.subarray(0, 10)])).copy(header, 36);
   ntime.copy(header, 72);
   nonce.copy(header, 76);
-  // POST /chain/append reads the body as a length-prefixed blob (uint32, big-endian).
-  const length = Buffer.alloc(4);
-  length.writeUInt32BE(body.length, 0);
-  return { height: job.height, header: header.toString("hex"), body: Buffer.concat([length, body]).toString("hex") };
+  // Node 0.10.x (DeFi testnet) reads the body as a length-prefixed blob (uint32,
+  // big-endian); node 0.9.x (mainnet) reads raw hex.
+  let out = body;
+  if (job.lengthPrefixedBody) {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(body.length, 0);
+    out = Buffer.concat([length, body]);
+  }
+  return { height: job.height, header: header.toString("hex"), body: out.toString("hex") };
 }
 
 /**
- * @param {{ call: (method: string, path: string, body?: string) => Promise<any>, host?: string, pollMs?: number }} options
+ * @param {{
+ *   call: (method: string, path: string, body?: string, network?: string) => Promise<any>,
+ *   getNetwork?: () => ({ key: string, page: string, label: string, lengthPrefixedBody: boolean } | null),
+ *   host?: string,
+ *   pollMs?: number,
+ * }} options
  */
-export function createStratumBridge({ call, host = "127.0.0.1", pollMs = POLL_MS }) {
+export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.defi, host = "127.0.0.1", pollMs = POLL_MS }) {
   let server = null;
   let listenPort = 0;
   let prefixCounter = randomBytes(4).readUInt32LE(0);
   /** @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, last: any, polling: boolean, timer: any }>} */
   const accounts = new Map();
   const sockets = new Set();
-  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, height: 0, lastResult: "", lastError: "", synced: false };
+  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "" };
 
   function send(socket, message) {
     if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`);
@@ -125,12 +140,26 @@ export function createStratumBridge({ call, host = "127.0.0.1", pollMs = POLL_MS
     if (!entry || entry.polling) return;
     entry.polling = true;
     try {
-      const reply = await call("GET", `/chain/mine/${address}`);
+      const net = getNetwork();
+      if (!net) {
+        stats.lastError = "Start the node tab (Mainnet or DeFi testnet) so Hog knows which network to mine.";
+        stats.synced = false;
+        stats.miningNetwork = "";
+        return;
+      }
+      if (stats.miningNetwork !== net.key) {
+        stats.miningNetwork = net.key;
+        stats.height = 0;
+        stats.synced = false;
+      }
+      const reply = await call("GET", `/chain/mine/${address}`, undefined, net.page);
       const data = reply?.ok ? reply.result?.data : null;
       if (!reply?.ok) {
         stats.lastError = reply?.code === "no-page"
           ? "Open the DeFi testnet node tab and press Start node."
-          : reply?.code === "not-running" ? "Press Start node in the node tab." : `Node tab: ${reply?.code || "no answer"}`;
+          : reply?.code === "not-running" ? "Press Start node in the node tab."
+            : reply?.code === "wrong-network" ? `The node tab is not running ${net.label}. Switch it, or pick its network here.`
+              : `Node tab: ${reply?.code || "no answer"}`;
         stats.synced = false;
         return;
       }
@@ -141,15 +170,15 @@ export function createStratumBridge({ call, host = "127.0.0.1", pollMs = POLL_MS
       }
       stats.synced = data.synced === true;
       if (!stats.synced) {
-        stats.lastError = "The node tab is still syncing; work starts when it is synced.";
+        stats.lastError = `The ${net.label} node is still syncing; work starts when it is synced.`;
         return;
       }
       stats.lastError = "";
-      const job = jobFromTemplate(data);
+      const job = jobFromTemplate(data, net);
       stats.height = job.height;
       if (entry.jobs.has(job.id)) return;
       if (entry.last && entry.last.workKey === job.workKey && Date.now() - entry.sentAt < REFRESH_MS) return;
-      const clean = !entry.last || entry.last.prevHash !== job.prevHash;
+      const clean = !entry.last || entry.last.prevHash !== job.prevHash || entry.last.network !== job.network;
       if (clean) entry.jobs.clear();
       entry.jobs.set(job.id, job);
       while (entry.jobs.size > MAX_JOBS) entry.jobs.delete(entry.jobs.keys().next().value);
@@ -203,11 +232,11 @@ export function createStratumBridge({ call, host = "127.0.0.1", pollMs = POLL_MS
     if (!en2 || !ntime || !nonce) return send(socket, { id, result: null, error: [20, "Bad share format", null] });
     stats.shares += 1;
     const block = solvedBlock(job, socket.extra2prefix, en2, ntime, nonce);
-    const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: socket.account.worker }));
+    const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: socket.account.worker }), job.page);
     const result = reply?.ok ? reply.result : null;
     if (result && result.code === 0) {
       stats.blocks += 1;
-      stats.lastResult = `Block ${job.height} accepted`;
+      stats.lastResult = `${MINING_NETWORKS[job.network]?.label || job.network} block ${job.height} accepted`;
       send(socket, { id, result: true, error: null });
       poll(socket.account.address);
       return;

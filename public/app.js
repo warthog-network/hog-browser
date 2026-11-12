@@ -6898,7 +6898,7 @@ bootFlash();
 window.__hogReady = true;
 
 
-// ---------- Solo mining (BzMiner -> stratum 127.0.0.1:3456 -> node tab) ----------
+// ---------- Solo mining (BzMiner -> stratum 127.0.0.1:3456 -> node tab, mainnet or DeFi testnet) ----------
 const MINING_ADDRESS_RE = /^[0-9a-fA-F]{48}$/;
 let miningAddressDirty = false;
 
@@ -6919,7 +6919,25 @@ function paintMining(state) {
   button.setAttribute("aria-pressed", on ? "true" : "false");
   button.textContent = on ? "Turn off" : "Turn on";
   if (state.command) setText("mining-command", state.command);
-  setText("mining-source", state.defiNodeSource ? `DeFi node build: ${state.defiNodeSource}` : "");
+  const sources = [];
+  if (state.mainnetNodeSource) sources.push(`Mainnet node build: ${state.mainnetNodeSource}.`);
+  if (state.defiNodeSource) sources.push(`DeFi node build: ${state.defiNodeSource}.`);
+  setText("mining-source", sources.join(" "));
+  const setting = state.networkSetting || "auto";
+  for (const radio of document.querySelectorAll('input[name="mining-network"]')) {
+    if (document.activeElement !== radio) radio.checked = radio.value === setting;
+  }
+  const label = state.miningNetworkLabel || "";
+  setText("mining-network-eyebrow", label ? `Network: ${label}` : "Network: follows the node tab");
+  setText("mining-stat-network", label || "—");
+  const tabNet = state.pageNetwork === "official1" ? "Mainnet" : state.pageNetwork === "defi" ? "DeFi testnet" : "";
+  setText("mining-network-note", setting === "auto"
+    ? (label ? `Following the node tab: ${label}.` : "Start the node tab and Hog mines on its network.")
+    : tabNet && tabNet !== label
+      ? `The node tab is running ${tabNet}. Switch it to ${label}, or pick Follow node tab.`
+      : `Pinned to ${label}.`);
+  const card = $("mining-card");
+  if (card) card.dataset.network = state.miningNetwork || "";
   const input = $("mining-address");
   if (input && !miningAddressDirty && document.activeElement !== input) input.value = state.address || "";
   if (!miningAddressDirty) {
@@ -6927,9 +6945,11 @@ function paintMining(state) {
   }
   const tab = !state.pageConnected
     ? "Not open"
-    : state.pageNetwork && state.pageNetwork !== "defi"
-      ? `On ${state.pageNetwork}`
-      : state.synced ? "Synced" : state.pageNetwork === "defi" ? "Running" : "Open, not started";
+    : !state.pageNetwork
+      ? "Open, not started"
+      : state.miningNetwork && tabNet !== label
+        ? `On ${tabNet || state.pageNetwork}`
+        : state.synced ? "Synced" : "Syncing";
   setText("mining-stat-node", tab);
   setText("mining-stat-height", state.height ? Number(state.height).toLocaleString() : "—");
   setText("mining-stat-miners", String(state.miners || 0));
@@ -6942,7 +6962,7 @@ function paintMining(state) {
     status.textContent = "On, but the stratum port could not open.";
   } else {
     const miners = state.miners ? `${state.miners} miner${state.miners === 1 ? "" : "s"} connected.` : "Waiting for BzMiner.";
-    status.textContent = `Stratum on 127.0.0.1:${state.stratumPort}. ${miners}`;
+    status.textContent = `Stratum on 127.0.0.1:${state.stratumPort}${label ? ` for ${label}` : ""}. ${miners}`;
   }
   error.textContent = state.error || state.lastError || "";
 }
@@ -7033,6 +7053,18 @@ async function saveMiningAddress() {
       setTimeout(() => { copy.textContent = "Copy"; }, 1500);
     });
   }
+  for (const radio of document.querySelectorAll('input[name="mining-network"]')) {
+    radio.addEventListener("change", async () => {
+      if (!radio.checked) return;
+      try {
+        paintMining(await postMining({ network: radio.value }));
+      } catch (err) {
+        setText("mining-error", err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+  const openMainnet = $("mining-open-mainnet");
+  if (openMainnet) openMainnet.addEventListener("click", () => openUrl("https://browser-node.netlify.app/"));
   const open = $("mining-open-node");
   if (open) open.addEventListener("click", () => openUrl("https://browser-node.netlify.app/?network=defi"));
   const dash = $("mining-dashboard");

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { connect } from "node:net";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   createStratumBridge,
   isWarthogAddress,
@@ -14,7 +15,7 @@ import { bzminerCommand } from "../mining.mjs";
 
 const ADDRESS = "56ed966df64571675f38be3b4219862dbbec8f0e69140de3";
 // A real DeFi testnet /chain/mine template (height 52139) from the in-tab node.
-const TEMPLATE = {"header":"07d6386d1af2c69fa65f0cc7a7c755d6491b9d5d9ca06854c917709d1b80eec20762d2efc84928ea7124c344a7a8e04afbcadbedf96e18a1ff4cd143b3cd4c2fa88dfb8a000000046af5b3af00000000","body":"00000000000000000000000000000000000000020000000011e1a30000000000000000000000","merklePrefix":"d3ea2abf1091dc3c77a2e3e24c92d3f09bb3d0c88951789e58de25a32bbe21a5","height":52139,"difficulty":986669494.4732605,"synced":true};
+const TEMPLATE = JSON.parse(readFileSync(new URL("./fixtures/template-defi.json", import.meta.url), "utf8"));
 const sha256 = (b) => createHash("sha256").update(b).digest();
 
 test("Warthog addresses need 48 hex characters and a valid checksum", () => {
@@ -32,7 +33,7 @@ test("stratum port defaults to 3456 and BzMiner gets a stratum command", () => {
   assert.equal(stratumPort(undefined), 3456);
   assert.equal(stratumPort("3466"), 3466);
   assert.throws(() => stratumPort("nope"), /HOG_STRATUM_PORT/);
-  assert.equal(bzminerCommand(3456, ADDRESS), `./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w ${ADDRESS} --worker rig1`);
+  assert.equal(bzminerCommand(3456, ADDRESS), `./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w ${ADDRESS} -r rig1`);
 });
 
 test("jobs carry the same fields as the Warthog node's mining.notify", () => {

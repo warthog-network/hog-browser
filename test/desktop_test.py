@@ -560,9 +560,15 @@ class SettingsUiTest(unittest.TestCase):
             self.assertIn(f'id="{el}"', html)
         self.assertIn("stratum+tcp://127.0.0.1:3456", html)
         self.assertIn("postMining({ address: value })", app)
+        for value in ("auto", "mainnet", "defi"):
+            self.assertIn(f'name="mining-network" value="{value}"', html)
+        self.assertIn('id="mining-open-mainnet"', html)
+        self.assertIn('id="mining-stat-network"', html)
+        self.assertIn("postMining({ network: radio.value })", app)
         deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
         self.assertIn('"${HB}/stratum.mjs"', deb)
         self.assertIn('cp -a "${HB}/node-defi" "${APP}/"', deb)
+        self.assertIn('cp -a "${HB}/node-mainnet" "${APP}/"', deb)
 
     def test_settings_nav_has_no_ai_page(self):
         root = Path(__file__).resolve().parents[1]

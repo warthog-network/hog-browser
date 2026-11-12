@@ -20,6 +20,34 @@ import { WebSocketServer, WebSocket } from "ws";
 export const MINING_WS_PATH = "/__hog/mining";
 export const DEFAULT_MINING_PORT = 3100;
 export const MINING_NETWORK = "defi";
+
+/**
+ * Networks Hog can mine on. `page` is what the node tab reports (it loads
+ * /node/defi/wart-node.js for DeFi testnet and /node/wart-node.js for mainnet,
+ * which the node site calls Official1). `lengthPrefixedBody` is how that
+ * node version reads the block body in POST /chain/append: 0.10.x reads a
+ * uint32 length first, 0.9.x reads raw hex.
+ */
+export const MINING_NETWORKS = {
+  defi: { key: "defi", page: "defi", label: "DeFi testnet", lengthPrefixedBody: true },
+  mainnet: { key: "mainnet", page: "official1", label: "Mainnet", lengthPrefixedBody: false },
+};
+
+/** @param {string} page network name the node tab reports */
+export function networkFromPage(page) {
+  return Object.values(MINING_NETWORKS).find((n) => n.page === page) || null;
+}
+
+/**
+ * Which network to mine on: "defi" or "mainnet" explicitly, or "auto" to
+ * follow whatever the node tab is running.
+ * @param {string} setting
+ * @param {string} pageNetwork
+ */
+export function resolveMiningNetwork(setting, pageNetwork) {
+  if (setting === "defi" || setting === "mainnet") return MINING_NETWORKS[setting];
+  return networkFromPage(pageNetwork);
+}
 const MAX_APPEND_BODY = 256_000;
 const HELLO_MS = 5000;
 
@@ -64,7 +92,9 @@ export function miningRoute(method, rawUrl) {
 
 /** BzMiner command shown in Settings: stratum to Hog's local stratum port. */
 export function bzminerCommand(port = 3456, wallet = "<48-hex-wallet>", worker = "rig1") {
-  return `./bzminer -a warthog -p stratum+tcp://127.0.0.1:${port} -w ${wallet} --worker ${worker}`;
+  // BzMiner v24 takes the worker (rig) name with -r; it has no --worker flag.
+  // The worker name carries the network so the command says where it mines.
+  return `./bzminer -a warthog -p stratum+tcp://127.0.0.1:${port} -w ${wallet} -r ${worker}`;
 }
 
 function sameToken(a, b) {
@@ -119,7 +149,17 @@ export function pageRelayScript(token) {
     var ws;
     try { ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + PATH); }
     catch (e) { setTimeout(connect, 3000); return; }
-    ws.onopen = function () { ws.send(JSON.stringify({ type: "hello", token: TOKEN })); };
+    var beat = null;
+    function report() {
+      var mod = window.wartNode || window.Module;
+      var running = !!(mod && typeof mod.virtual_get === "function");
+      try { ws.send(JSON.stringify({ type: "status", network: running ? network() : "" })); } catch (e) {}
+    }
+    ws.onopen = function () {
+      ws.send(JSON.stringify({ type: "hello", token: TOKEN }));
+      report();
+      beat = setInterval(report, 2000);
+    };
     ws.onmessage = function (event) {
       var msg;
       try { msg = JSON.parse(event.data); } catch (e) { return; }
@@ -142,7 +182,7 @@ export function pageRelayScript(token) {
         reply({ ok: true, result: result });
       }, function (e) { reply({ ok: false, code: "node-error", error: String(e && e.message || e) }); });
     };
-    ws.onclose = function () { setTimeout(connect, 3000); };
+    ws.onclose = function () { if (beat) clearInterval(beat); beat = null; setTimeout(connect, 3000); };
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
   }
   connect();
@@ -214,6 +254,10 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
           }
           return;
         }
+        if (msg?.type === "status") {
+          if (typeof msg.network === "string") pageNetwork = msg.network;
+          return;
+        }
         if (msg?.type !== "rpc-result") return;
         if (typeof msg.network === "string") pageNetwork = msg.network;
         const entry = pending.get(msg.id);
@@ -232,7 +276,14 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
   }
 
   /** @returns {Promise<any>} reply from the page (or a synthetic not-ready reply) */
-  function call(method, path, body) {
+  /**
+   * @param {string} method
+   * @param {string} path
+   * @param {string} [body]
+   * @param {string} [net] network the node tab must be running (page name); default is the relay's
+   */
+  function call(method, path, body, net) {
+    const want = net === undefined ? (typeof network === "function" ? network() : network) : net;
     if (!page || page.readyState !== WebSocket.OPEN) {
       return Promise.resolve({ ok: false, code: "no-page" });
     }
@@ -244,14 +295,14 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
         resolve({ ok: false, code: "timeout" });
       }, method === "POST" ? timeoutMs * 3 : timeoutMs);
       pending.set(id, { resolve, timer });
-      page.send(JSON.stringify({ type: "rpc", id, method, path, body, network }));
+      page.send(JSON.stringify({ type: "rpc", id, method, path, body, network: want || "" }));
     });
   }
 
   const NOT_READY = {
     "no-page": "Hog's Warthog node tab is not open. Open the node tab, pick DeFi testnet, and start the node.",
     "not-running": "The Warthog node tab is open but the node is not running yet. Press Start in the node tab.",
-    "wrong-network": `The node tab is running a different network. Switch it to ${network === "defi" ? "DeFi testnet" : network}.`,
+    "wrong-network": "The node tab is running a different network than the one picked for mining. Switch the node tab, or pick that network in Settings > Solo mining.",
     "page-closed": "The Warthog node tab closed while answering.",
     timeout: "The in-tab node did not answer within the time limit.",
     "node-error": "The in-tab node failed to answer.",
@@ -331,7 +382,7 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
       port: listenPort,
       pageConnected: Boolean(page && page.readyState === WebSocket.OPEN),
       pageNetwork,
-      network,
+      ...(typeof network === "function" ? {} : { network }),
       lastError,
       ...counters,
     };
@@ -343,5 +394,6 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
     wss.close();
   }
 
-  return { token, handleUpgrade, call, start, stop, status, close };
+  const getPageNetwork = () => (page && page.readyState === WebSocket.OPEN ? pageNetwork : "");
+  return { token, handleUpgrade, call, start, stop, status, close, getPageNetwork };
 }

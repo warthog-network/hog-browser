@@ -8,7 +8,7 @@ import { BlockList, isIP } from "node:net";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { bzminerCommand, createMiningRelay, miningPort, pageRelayScript } from "./mining.mjs";
+import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
 import { createStratumBridge, isWarthogAddress, stratumPort } from "./stratum.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
@@ -41,49 +41,85 @@ let siteCursor = SITE_PORT_MIN;
 
 // ---------- Solo mining (BzMiner -> 127.0.0.1:HOG_MINING_PORT -> node tab) ----------
 const MINING_STATE_FILE = join(homedir(), ".local/share/hog-browser/mining.json");
+// "auto" follows the network the node tab is running; "defi" / "mainnet" pin it.
+let miningNetworkSetting = "auto";
+const MINING_NETWORK_SETTINGS = new Set(["auto", "defi", "mainnet"]);
 const MINING = createMiningRelay({
   token: randomBytes(24).toString("hex"),
   pageOrigin: `http://${PAGE_HOST}:${NODE_PORT}`,
+  network: () => currentMiningNetwork()?.page || "",
 });
-const STRATUM = createStratumBridge({ call: MINING.call });
+function currentMiningNetwork() {
+  return resolveMiningNetwork(miningNetworkSetting, MINING.getPageNetwork());
+}
+const STRATUM = createStratumBridge({ call: MINING.call, getNetwork: currentMiningNetwork });
 let miningError = "";
-// DeFi WASM node files Hog serves itself instead of the live site's. The bundled
-// build (node-defi/, see its README) adds POST /chain/append so solved blocks from
-// a local miner reach the in-tab node. HOG_DEFI_NODE_DIR overrides it; set it to
-// an empty string to load the live site's files.
+// WASM node files Hog serves itself instead of the live site's. The bundled builds
+// (node-defi/ and node-mainnet/, see their READMEs) add only POST /chain/append so
+// solved blocks from a local miner reach the in-tab node. HOG_DEFI_NODE_DIR and
+// HOG_MAINNET_NODE_DIR override them; set one to an empty string to load the live
+// site's files for that network.
 const BUNDLED_DEFI_NODE_DIR = fileURLToPath(new URL("./node-defi/", import.meta.url));
-const DEFI_NODE_DIR = process.env.HOG_DEFI_NODE_DIR ?? (existsSync(join(BUNDLED_DEFI_NODE_DIR, "wart-node.wasm")) ? BUNDLED_DEFI_NODE_DIR : "");
-const DEFI_NODE_FILES = new Set(["wart-node.js", "wart-node.wasm"]);
+const BUNDLED_MAINNET_NODE_DIR = fileURLToPath(new URL("./node-mainnet/", import.meta.url));
+function nodeDir(envValue, bundled) {
+  return envValue ?? (existsSync(join(bundled, "wart-node.wasm")) ? bundled : "");
+}
+const DEFI_NODE_DIR = nodeDir(process.env.HOG_DEFI_NODE_DIR, BUNDLED_DEFI_NODE_DIR);
+const MAINNET_NODE_DIR = nodeDir(process.env.HOG_MAINNET_NODE_DIR, BUNDLED_MAINNET_NODE_DIR);
+const NODE_FILES = new Set(["wart-node.js", "wart-node.wasm"]);
 
 /**
- * Map /node/defi/<file> on the node site to a local file, if Hog has one.
+ * Map the node site's WASM files to a local file, if Hog has one:
+ * /node/defi/<file> is DeFi testnet, /node/<file> is mainnet (Official1).
  * @param {string} origin
  * @param {string} pathname
- * @param {string} dir
+ * @param {{ defi?: string, mainnet?: string }} dirs
  */
-export function localDefiNodeFile(origin, pathname, dir = DEFI_NODE_DIR) {
-  if (!dir || origin !== NODE_ORIGIN) return "";
-  const match = /^\/node\/defi\/([^/]+)$/.exec(String(pathname || ""));
-  if (!match || !DEFI_NODE_FILES.has(match[1])) return "";
-  const file = join(dir, match[1]);
+export function localNodeFile(origin, pathname, dirs = { defi: DEFI_NODE_DIR, mainnet: MAINNET_NODE_DIR }) {
+  if (origin !== NODE_ORIGIN) return "";
+  const path = String(pathname || "");
+  let dir = "";
+  let name = "";
+  let match = /^\/node\/defi\/([^/]+)$/.exec(path);
+  if (match) {
+    dir = dirs.defi || "";
+    name = match[1];
+  } else if ((match = /^\/node\/([^/]+)$/.exec(path))) {
+    dir = dirs.mainnet || "";
+    name = match[1];
+  }
+  if (!dir || !NODE_FILES.has(name)) return "";
+  const file = join(dir, name);
   return existsSync(file) ? file : "";
+}
+
+/** Back-compat for the DeFi-only helper. */
+export function localDefiNodeFile(origin, pathname, dir = DEFI_NODE_DIR) {
+  if (!/^\/node\/defi\//.test(String(pathname || ""))) return "";
+  return localNodeFile(origin, pathname, { defi: dir, mainnet: "" });
+}
+
+function nodeSource(dir, bundled, livePath) {
+  if (!dir) return `live site: ${NODE_ORIGIN}${livePath} (cannot accept mined blocks)`;
+  return dir === bundled ? "bundled with Hog (accepts mined blocks)" : `local: ${dir}`;
 }
 
 function readMiningState() {
   try {
     const saved = JSON.parse(readFileSync(MINING_STATE_FILE, "utf8"));
     return {
+      network: MINING_NETWORK_SETTINGS.has(saved?.network) ? saved.network : "auto",
       enabled: saved?.enabled === true,
       address: isWarthogAddress(saved?.address) ? String(saved.address).toLowerCase() : "",
     };
   } catch {
-    return { enabled: false, address: "" };
+    return { enabled: false, address: "", network: "auto" };
   }
 }
 
 function saveMiningState(state) {
   mkdirSync(join(homedir(), ".local/share/hog-browser"), { recursive: true });
-  writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(state.enabled), address: state.address || "" })}\n`);
+  writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(state.enabled), address: state.address || "", network: state.network || "auto" })}\n`);
 }
 
 function miningStatus(enabled) {
@@ -96,6 +132,7 @@ function miningStatus(enabled) {
     miningError = error instanceof Error ? error.message : String(error);
   }
   const status = MINING.status();
+  const net = currentMiningNetwork();
   return {
     ok: true,
     enabled: Boolean(enabled),
@@ -104,8 +141,13 @@ function miningStatus(enabled) {
     configuredPort: port,
     configuredStratumPort: sport,
     address: miningAddress,
-    command: bzminerCommand(sport || 3456, miningAddress || undefined),
-    defiNodeSource: DEFI_NODE_DIR ? (DEFI_NODE_DIR === BUNDLED_DEFI_NODE_DIR ? "bundled with Hog (accepts mined blocks)" : `local: ${DEFI_NODE_DIR}`) : `live site: ${NODE_ORIGIN}/node/defi/ (cannot accept mined blocks)`,
+    networkSetting: miningNetworkSetting,
+    miningNetwork: net?.key || "",
+    miningNetworkLabel: net?.label || "",
+    networks: Object.values(MINING_NETWORKS).map(({ key, label }) => ({ key, label })),
+    command: bzminerCommand(sport || 3456, miningAddress || undefined, net ? `hog-${net.key}` : "rig1"),
+    defiNodeSource: nodeSource(DEFI_NODE_DIR, BUNDLED_DEFI_NODE_DIR, "/node/defi/"),
+    mainnetNodeSource: nodeSource(MAINNET_NODE_DIR, BUNDLED_MAINNET_NODE_DIR, "/node/"),
     error: miningError,
   };
 }
@@ -1326,7 +1368,7 @@ async function handleSite(runtime, site, req, res) {
     send(res, 200, req.method === "HEAD" ? "" : html, "text/html; charset=utf-8", SITE_HEADERS);
     return;
   }
-  const localFile = localDefiNodeFile(site.origin, url.pathname);
+  const localFile = localNodeFile(site.origin, url.pathname);
   let asset = localFile
     ? { body: await readFile(localFile), type: localFile.endsWith(".wasm") ? "application/wasm" : "text/javascript" }
     : await fetchAsset(new URL(key, site.origin));
@@ -1392,12 +1434,19 @@ async function handle(req, res, runtime) {
         }
         miningAddress = address;
       }
+      if (payload.network !== undefined) {
+        if (!MINING_NETWORK_SETTINGS.has(payload.network)) {
+          send(res, 400, { ok: false, error: "network must be auto, defi or mainnet" });
+          return;
+        }
+        miningNetworkSetting = payload.network;
+      }
       if (payload.enabled !== undefined && typeof payload.enabled !== "boolean") throw new Error("enabled must be true or false");
       if (typeof payload.enabled === "boolean" && payload.enabled !== miningEnabled) {
         miningEnabled = payload.enabled;
         await setMining(miningEnabled);
       }
-      if (runtime.persistSites) saveMiningState({ enabled: miningEnabled, address: miningAddress });
+      if (runtime.persistSites) saveMiningState({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting });
       send(res, 200, miningStatus(miningEnabled));
       return;
     }
@@ -1512,7 +1561,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const server = await startServer(PORT, { persistSites: true });
-  ({ enabled: miningEnabled, address: miningAddress } = readMiningState());
+  ({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting } = readMiningState());
   if (miningEnabled) await setMining(true);
   if (process.env.HOG_MINING === "1" && !miningEnabled) {
     miningEnabled = true;

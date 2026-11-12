@@ -443,7 +443,14 @@
             <h1>Mine to your node tab</h1>
             <p class="lede">Hog runs a local stratum port that BzMiner mines to like a Warthog node. Work comes from the node in Hog's node tab, and solved blocks go back into it and out to the network. Only this computer can connect.</p>
             <section id="mining-card" class="connect-card" aria-label="Solo mining">
-              <p class="eyebrow">DeFi testnet</p>
+              <p class="eyebrow" id="mining-network-eyebrow">Network: follows the node tab</p>
+              <div class="mining-network-row" role="radiogroup" aria-label="Network to mine">
+                <span class="mining-network-label">Mine on</span>
+                <label><input type="radio" name="mining-network" value="auto" checked> Follow node tab</label>
+                <label><input type="radio" name="mining-network" value="mainnet"> Mainnet</label>
+                <label><input type="radio" name="mining-network" value="defi"> DeFi testnet</label>
+              </div>
+              <p id="mining-network-note" class="note mining-network-note" role="status"></p>
               <div class="engine-row default-browser-row">
                 <div class="default-browser-copy">
                   <strong>Local mining port</strong>
@@ -453,6 +460,7 @@
                 <button type="button" id="mining-toggle" aria-pressed="false">Turn on</button>
               </div>
               <dl id="mining-stats" class="mining-stats" aria-label="Mining status">
+                <div><dt>Network</dt><dd id="mining-stat-network">—</dd></div>
                 <div><dt>Node tab</dt><dd id="mining-stat-node">—</dd></div>
                 <div><dt>Height</dt><dd id="mining-stat-height">—</dd></div>
                 <div><dt>Miners</dt><dd id="mining-stat-miners">0</dd></div>
@@ -460,7 +468,7 @@
                 <div><dt>Rejected</dt><dd id="mining-stat-rejected">0</dd></div>
               </dl>
               <p id="mining-last" class="note"></p>
-              <p class="note">1. Open the node tab on DeFi testnet and press Start node. Leave it open while you mine. <button type="button" id="mining-open-node" class="tiny">Open DeFi node tab</button></p>
+              <p class="note">1. Open the node tab, pick Official1 (mainnet) or DeFi testnet, and press Start node. Leave it open while you mine; work starts once it is synced. <button type="button" id="mining-open-mainnet" class="tiny">Open mainnet node tab</button> <button type="button" id="mining-open-node" class="tiny">Open DeFi node tab</button></p>
               <label class="mining-address-label" for="mining-address">2. Your Warthog address (blocks pay here)</label>
               <div class="mining-address-row">
                 <input id="mining-address" class="mono" autocomplete="off" spellcheck="false" maxlength="48" placeholder="48 hex characters" aria-describedby="mining-address-note">
@@ -469,10 +477,10 @@
               <p id="mining-address-note" class="note" role="status"></p>
               <p class="note">3. Run BzMiner (it uses the GPU and the CPU together; do not add <code>--nvidia</code> on its own):</p>
               <div class="mining-address-row">
-                <code id="mining-command" class="mono">./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w &lt;48-hex-wallet&gt; --worker rig1</code>
+                <code id="mining-command" class="mono">./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w &lt;48-hex-wallet&gt; -r rig1</code>
                 <button type="button" id="mining-command-copy" class="tiny">Copy</button>
               </div>
-              <p class="note">Hashrate shows in BzMiner's own dashboard: <a id="mining-dashboard" href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. Every block found here is a whole block reward on DeFi testnet.</p>
+              <p class="note">Hashrate shows in BzMiner's own dashboard: <a id="mining-dashboard" href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. This is solo mining: every block found is a whole block reward on that network, and on mainnet a single rig may go a long time between blocks.</p>
               <p id="mining-source" class="note"></p>
             </section>
           </div>

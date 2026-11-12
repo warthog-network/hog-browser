@@ -80,7 +80,7 @@ test("mining helpers validate accounts, routes, and port", () => {
   assert.equal(miningPort(undefined), 3100);
   assert.equal(miningPort("3200"), 3200);
   assert.throws(() => miningPort("nope"));
-  assert.equal(bzminerCommand(3100), "./bzminer -a warthog -p stratum+tcp://127.0.0.1:3100 -w <48-hex-wallet> --worker rig1");
+  assert.equal(bzminerCommand(3100), "./bzminer -a warthog -p stratum+tcp://127.0.0.1:3100 -w <48-hex-wallet> -r rig1");
   const script = pageRelayScript(TOKEN);
   assert.match(script, /virtual_post/);
   assert.match(script, new RegExp(TOKEN));

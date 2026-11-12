@@ -99,6 +99,7 @@ cp -a \
 
 cp -a "${HB}/public" "${APP}/"
 cp -a "${HB}/node-defi" "${APP}/"
+cp -a "${HB}/node-mainnet" "${APP}/"
 cp -a "${HB}/node_modules" "${APP}/"
 
 find "${APP}" -type d -name '__pycache__' -prune -exec rm -rf {} +
