@@ -67,7 +67,7 @@ test("node files map to the patched builds per network", () => {
 });
 
 test("config starts off with no address", () => {
-  assert.deepEqual(readConfig(mkdtempSync(join(tmpdir(), "whelper-"))), { enabled: false, address: "", network: "auto" });
+  assert.deepEqual(readConfig(mkdtempSync(join(tmpdir(), "whelper-"))), { enabled: false, address: "", network: "auto", tailnet: false });
 });
 
 test("page server: injected node page, patched WASM, isolation headers, loopback only", async () => {
@@ -158,6 +158,41 @@ test("control API: token and origin locked; turning on starts stratum on 127.0.0
     assert.equal(reply.result[2], 6);
     const off = await (await fetch(`${base}/api/settings`, { method: "POST", headers, body: JSON.stringify({ enabled: false }) })).json();
     assert.equal(off.stratumListening, false);
+  } finally {
+    await helper.close();
+  }
+});
+
+test("helper tailnet toggle: off by default, listens on the tailnet address when on, remote commands shown", async () => {
+  // 127.0.0.3 stands in for this computer's Tailscale address.
+  const { helper, controlPort, stratumPort } = await startHelper({
+    findTailnet: () => [{ name: "tailscale0", address: "127.0.0.3", family: 4 }],
+    magicDns: async () => "hog.tail314642.ts.net",
+  });
+  const base = `http://127.0.0.1:${controlPort}`;
+  const headers = { "x-helper-token": helper.controlToken, "content-type": "application/json" };
+  const post = async (body) => (await fetch(`${base}/api/settings`, { method: "POST", headers, body: JSON.stringify(body) })).json();
+  try {
+    let s = await post({ address: ADDRESS, network: "defi", enabled: true });
+    assert.equal(s.allowTailnet, false);
+    assert.deepEqual(s.tailnetListening, []);
+    assert.equal((await fetch(`${base}/api/settings`, { method: "POST", headers, body: JSON.stringify({ tailnet: "yes" }) })).status, 400);
+    s = await post({ tailnet: true });
+    assert.deepEqual(s.tailnetListening, ["127.0.0.3"]);
+    await fetch(`${base}/api/status`, { headers });
+    await new Promise((r) => setTimeout(r, 20));
+    s = await (await fetch(`${base}/api/status`, { headers })).json();
+    assert.equal(s.remoteCommand, `./bzminer -a warthog -p stratum+tcp://hog.tail314642.ts.net:${stratumPort} -w ${ADDRESS} -r rig2-defi`);
+    assert.equal(s.remoteCommandIp, `./bzminer -a warthog -p stratum+tcp://127.0.0.3:${stratumPort} -w ${ADDRESS} -r rig2-defi`);
+    assert.match(s.remoteCommandWindows, /^bzminer\.exe /);
+    const served = await new Promise((resolve) => {
+      const sock = connect(stratumPort, "127.0.0.3", () => sock.write('{"id":1,"method":"mining.subscribe","params":[]}\n'));
+      sock.on("data", () => { resolve(true); sock.destroy(); });
+      sock.on("error", () => resolve(false));
+    });
+    assert.equal(served, true);
+    s = await post({ tailnet: false });
+    assert.deepEqual(s.tailnetListening, []);
   } finally {
     await helper.close();
   }

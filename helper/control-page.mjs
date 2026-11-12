@@ -72,12 +72,28 @@ ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
 </div>
 
 <div class="card">
+  <div class="row"><label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="tailnet" style="min-width:0;flex:none"> <b style="color:#bba36a">Allow rigs on my tailnet</b></label><span id="tailnet-pill" class="pill-idle">off</span></div>
+  <div class="msg" id="tailnet-note" style="color:#8d887f">Off: only BzMiner on this computer can connect. On: other computers on your Tailscale network can mine here too. The helper listens on its Tailscale address only (never your LAN or the internet) and refuses anyone outside the tailnet.</div>
+  <div id="remote" hidden>
+    <div class="row" style="margin-top:6px"><span class="label">Other rig (Linux)</span><button class="ghost" id="copy-remote">Copy</button></div>
+    <div class="mono" id="remote-cmd" style="margin-top:4px"></div>
+    <div class="row" style="margin-top:6px"><span class="label">Windows</span></div>
+    <div class="mono" id="remote-cmd-win" style="margin-top:4px"></div>
+    <div class="msg" id="remote-ip" style="color:#8d887f"></div>
+    <div class="msg" style="color:#8d887f">Give each rig its own <code>-r</code> name so it shows up separately below.</div>
+  </div>
+</div>
+
+<div class="card">
   <div class="stats">
     <div>Network <b id="s-net">-</b></div><div>Height <b id="s-height">-</b></div>
     <div>Miners <b id="s-miners">0</b></div><div>Jobs <b id="s-jobs">0</b></div>
     <div>Blocks found <b id="s-blocks">0</b></div><div>Rejected <b id="s-rejected">0</b></div>
   </div>
   <div class="msg" id="last"></div>
+  <table id="workers" hidden style="width:100%;border-collapse:collapse;margin-top:8px;font-size:12px">
+    <thead><tr style="color:#bba36a;text-align:left"><th>Rig (-r)</th><th>From</th><th>Online</th><th>Shares</th><th>Blocks</th><th>Rejected</th></tr></thead><tbody></tbody>
+  </table>
 </div>
 </div>
 <script>
@@ -107,6 +123,28 @@ ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
     $("s-miners").textContent = s.miners; $("s-jobs").textContent = s.jobs;
     $("s-blocks").textContent = s.blocks; $("s-rejected").textContent = s.rejected;
     $("last").textContent = s.lastResult || "";
+    $("tailnet").checked = !!s.allowTailnet;
+    var tl = s.tailnetListening || [];
+    pill($("tailnet-pill"), tl.length ? "pill-ok" : (s.allowTailnet && (s.tailnetError || !s.tailnetAvailable) ? "pill-bad" : "pill-idle"),
+      tl.length ? "on " + tl[0] + ":" + s.stratumPort : (s.allowTailnet ? (s.tailnetAvailable ? (s.stratumListening ? "error" : "waits for stratum") : "no Tailscale") : "off"));
+    if (s.allowTailnet && s.tailnetError) { $("tailnet-note").textContent = s.tailnetError; }
+    else if (s.allowTailnet && !s.tailnetAvailable) { $("tailnet-note").textContent = "This computer has no Tailscale address. Start Tailscale, then turn this off and on."; }
+    else if (s.allowTailnet) { $("tailnet-note").textContent = "Rigs on your tailnet can connect" + (s.refused ? ". Refused " + s.refused + " connection(s) from outside the tailnet." : "."); }
+    $("remote").hidden = !(s.allowTailnet && s.remoteCommand);
+    $("remote-cmd").textContent = s.remoteCommand || "";
+    $("remote-cmd-win").textContent = s.remoteCommandWindows || "";
+    $("remote-ip").textContent = s.remoteCommandIp ? "If that rig does not use MagicDNS, use the IP: " + s.remoteCommandIp : "";
+    var rows = s.workers || [];
+    $("workers").hidden = !rows.length;
+    var tb = $("workers").querySelector("tbody");
+    while (tb.firstChild) tb.removeChild(tb.firstChild);
+    rows.forEach(function (w) {
+      var tr = document.createElement("tr");
+      [w.worker || "(no -r name)", w.remote ? w.source : "this computer", w.connected ? "yes" : "no", w.shares, w.blocks, w.rejected].forEach(function (v) {
+        var td = document.createElement("td"); td.textContent = String(v); td.style.padding = "2px 6px"; tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
     var m = $("msg"); m.className = "msg" + (s.error || s.lastError ? " err" : "");
     m.textContent = s.error || (s.stratumListening && s.miners ? s.lastError : "") || "";
   }
@@ -119,6 +157,10 @@ ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
   $("toggle").onclick = function () {
     api("/api/settings", { enabled: !(current && current.enabled) }).then(render, function (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; });
   };
+  $("tailnet").onchange = function () {
+    api("/api/settings", { tailnet: $("tailnet").checked }).then(render, function (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; });
+  };
+  $("copy-remote").onclick = function () { navigator.clipboard.writeText($("remote-cmd").textContent).then(function () { $("copy-remote").textContent = "Copied"; setTimeout(function () { $("copy-remote").textContent = "Copy"; }, 1200); }); };
   $("copy").onclick = function () { navigator.clipboard.writeText($("command").textContent).then(function () { $("copy").textContent = "Copied"; setTimeout(function () { $("copy").textContent = "Copy"; }, 1200); }); };
   refresh(); setInterval(refresh, 2000);
 })();

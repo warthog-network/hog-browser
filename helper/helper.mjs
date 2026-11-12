@@ -29,6 +29,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { MINING_NETWORKS, bzminerCommand, createMiningRelay, pageRelayScript, resolveMiningNetwork } from "../mining.mjs";
 import { createStratumBridge, isWarthogAddress } from "../stratum.mjs";
 import { controlPage } from "./control-page.mjs";
+import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "../tailnet.mjs";
 
 export const VERSION = "0.1.0";
 export const NODE_ORIGIN = "https://browser-node.netlify.app";
@@ -140,9 +141,10 @@ export function readConfig(dir = configDir()) {
       enabled: saved?.enabled === true,
       address: isWarthogAddress(saved?.address) ? String(saved.address).toLowerCase() : "",
       network: NETWORK_SETTINGS.has(saved?.network) ? saved.network : "auto",
+      tailnet: saved?.tailnet === true,
     };
   } catch {
-    return { enabled: false, address: "", network: "auto" };
+    return { enabled: false, address: "", network: "auto", tailnet: false };
   }
 }
 
@@ -255,7 +257,16 @@ export function createHelper(opts = {}) {
   function network() {
     return resolveMiningNetwork(state.network, relay.getPageNetwork());
   }
-  const stratum = createStratumBridge({ call: relay.call, getNetwork: network });
+  const findTailnet = opts.findTailnet ?? tailnetAddresses;
+  const stratum = createStratumBridge({ call: relay.call, getNetwork: network, findTailnet });
+  let dnsName = "";
+  let dnsFor = "";
+  function refreshDnsName() {
+    const ip = findTailnet().find((a) => a.family === 4)?.address || "";
+    if (!ip || ip === dnsFor) return;
+    dnsFor = ip;
+    (opts.magicDns ?? magicDnsName)(ip).then((name) => { if (dnsFor === ip) dnsName = name; }, () => {});
+  }
 
   async function fetchAsset(pathAndQuery) {
     const cached = assets.get(pathAndQuery);
@@ -309,7 +320,25 @@ export function createHelper(opts = {}) {
       nodeBuilds: { defi: Boolean(nodeDirs.defi), mainnet: Boolean(nodeDirs.mainnet) },
       configuredStratumPort: stratumPort,
       command: bzminerCommand(sport, state.address || undefined, net ? `brave-${net.key}` : "rig1"),
+      ...tailnetInfo(sport, net),
       error,
+    };
+  }
+
+  function tailnetInfo(port, net) {
+    const ipv4 = findTailnet().find((a) => a.family === 4)?.address || "";
+    const host = dnsName || ipv4;
+    const rig = rigNameSuggestion(net?.key || "defi");
+    const cmd = (h) => bzminerCommand(port, state.address || undefined, rig).replace("127.0.0.1", h);
+    return {
+      allowTailnet: state.tailnet,
+      tailnetAddress: ipv4,
+      tailnetDnsName: dnsName,
+      tailnetAvailable: Boolean(ipv4),
+      remoteRigName: rig,
+      remoteCommand: host ? cmd(host) : "",
+      remoteCommandIp: ipv4 && dnsName ? cmd(ipv4) : "",
+      remoteCommandWindows: host ? cmd(host).replace(/^\.\/bzminer/, "bzminer.exe") : "",
     };
   }
 
@@ -320,7 +349,7 @@ export function createHelper(opts = {}) {
       return;
     }
     try {
-      await stratum.start(stratumPort);
+      await stratum.start(stratumPort, { tailnet: state.tailnet });
     } catch (e) {
       error = e?.code === "EADDRINUSE"
         ? `Port ${stratumPort} is in use (is Hog's solo mining on?). Turn that off, or start the helper with --stratum-port.`
@@ -343,7 +372,10 @@ export function createHelper(opts = {}) {
     // Only the control page may call the API: same origin and the per-launch token.
     if (String(req.headers.origin || controlOrigin) !== controlOrigin) return send(res, 403, "Origin not allowed");
     if (!sameToken(req.headers["x-helper-token"], controlToken)) return send(res, 403, "Bad token");
-    if (req.method === "GET" && url.pathname === "/api/status") return send(res, 200, JSON.stringify(status()), "application/json");
+    if (req.method === "GET" && url.pathname === "/api/status") {
+      refreshDnsName();
+      return send(res, 200, JSON.stringify(status()), "application/json");
+    }
     if (req.method === "POST" && url.pathname === "/api/settings") {
       if (!/application\/json/i.test(String(req.headers["content-type"] || ""))) return send(res, 415, "JSON only");
       const body = await readJson(req);
@@ -357,6 +389,11 @@ export function createHelper(opts = {}) {
       if (body.network !== undefined) {
         if (!NETWORK_SETTINGS.has(body.network)) return send(res, 400, JSON.stringify({ ok: false, error: "network must be auto, defi or mainnet" }), "application/json");
         state.network = body.network;
+      }
+      if (body.tailnet !== undefined) {
+        if (typeof body.tailnet !== "boolean") return send(res, 400, JSON.stringify({ ok: false, error: "tailnet must be true or false" }), "application/json");
+        state.tailnet = body.tailnet;
+        await stratum.setTailnet(state.tailnet);
       }
       if (body.enabled !== undefined) {
         if (typeof body.enabled !== "boolean") return send(res, 400, JSON.stringify({ ok: false, error: "enabled must be true or false" }), "application/json");
@@ -415,6 +452,8 @@ export function createHelper(opts = {}) {
     log(`  Node page (open in Brave): ${pageOrigin}/?network=defi  or  ${pageOrigin}/?network=mainnet`);
     log(`  Control page:              ${controlOrigin}/`);
     log(`  Stratum for BzMiner:       ${state.enabled ? `stratum+tcp://${HOST}:${stratumPort}` : "off (turn it on in the control page)"}`);
+    for (const h of stratum.status().tailnetListening) log(`  Stratum for tailnet rigs:  ${h}:${stratumPort}`);
+    if (state.enabled && stratum.status().tailnetError) log(`  ${stratum.status().tailnetError}`);
     if (!nodeDirs.defi || !nodeDirs.mainnet) log("  Warning: a patched node build is missing; that network cannot accept mined blocks.");
   }
 

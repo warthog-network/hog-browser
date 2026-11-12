@@ -39,6 +39,18 @@ separate from browser-node.netlify.app: the first start syncs from scratch
    `./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w <address> -r brave-defi`
    Don't use `--nvidia` alone: Warthog (Janushash) needs the CPU half too.
 
+### Rigs on your tailnet (opt-in)
+
+Tick **Allow rigs on my tailnet** in the control page to let other computers on
+your Tailscale network mine here too. The helper then also listens on this
+computer's Tailscale address(es) (100.64.0.0/10, fd7a:115c:a1e0::/48), never
+on 0.0.0.0, a LAN or a public address, and drops any connection that is not
+loopback or from the tailnet. The page shows the command for the other rig with
+this computer's MagicDNS name (and the IP as a fallback), e.g.
+`./bzminer -a warthog -p stratum+tcp://<name>.<tailnet>.ts.net:3456 -w <address> -r rig2-defi`
+(`bzminer.exe ...` on Windows). Give each rig its own `-r` name; the control
+page lists every rig with its shares, blocks and rejects.
+
 Options: `--page-port`, `--control-port`, `--stratum-port`, `--no-open`.
 If Hog's own solo mining is on, it already holds port 3456: turn one off or
 pass `--stratum-port`.
