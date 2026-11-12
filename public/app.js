@@ -443,9 +443,15 @@ function showBrowserSettings() {
 }
 
 const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale", "mining"];
+// Hog for Windows (Electron) has no Docker, Tailscale, Jellyfin or library
+// control yet: those pages and buttons are Linux only and stay hidden there.
+const HOG_WINDOWS = window.__hogPlatform === "win32";
+const LINUX_ONLY_SECTIONS = new Set(["files", "containers", "networks", "tailscale"]);
+if (HOG_WINDOWS) document.documentElement.classList.add("hog-windows");
 
 function normalizeSettingsPage(page) {
-  if (page === "docker") return "containers";
+  if (page === "docker") page = "containers";
+  if (HOG_WINDOWS && (LINUX_ONLY_SECTIONS.has(page) || !SETTINGS_SECTIONS.includes(page))) return "general";
   return SETTINGS_SECTIONS.includes(page) ? page : "containers";
 }
 

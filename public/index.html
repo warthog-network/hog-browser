@@ -39,10 +39,10 @@
           <ul>
             <li><button type="button" role="menuitem" data-settings="bookmarks"><span>Bookmarks</span><small>Folders, favorites, import and export · Ctrl+Shift+O</small></button></li>
             <li><button type="button" role="menuitem" data-settings="general"><span>General</span><small>Updates and default browser</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
-            <li><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
+            <li data-linux-only><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
+            <li data-linux-only><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
+            <li data-linux-only><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
+            <li data-linux-only><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
             <li><button type="button" role="menuitem" data-settings="mining"><span>Solo mining</span><small>BzMiner to the node tab (DeFi testnet)</small></button></li>
           </ul>
         </div>
@@ -109,7 +109,7 @@
             <ol id="fav-grid" class="fav-grid" aria-describedby="favs-hint"></ol>
             <p id="favs-hint" class="note favs-hint">Drag a tile to reorder, or use its arrows. ✎ edits, × takes it off Favorites. It stays in Bookmarks.</p>
           </section>
-          <div class="toolbox">
+          <div class="toolbox" data-linux-only>
             <p class="eyebrow">Toolbox</p>
             <div class="shortcuts toolbox-shortcuts">
               <button type="button" data-settings="containers">Containers</button>
@@ -197,10 +197,10 @@
           <div class="settings-shell">
             <nav id="settings-nav" class="settings-nav" aria-label="Settings">
               <button type="button" data-settings="general"><span>General</span><small>Updates and browser</small></button>
-              <button type="button" data-settings="files"><span>Files</span><small>Library</small></button>
-              <button type="button" data-settings="containers"><span>Containers</span><small>Images and logs</small></button>
-              <button type="button" data-settings="networks"><span>Networks</span><small>Docker networks</small></button>
-              <button type="button" data-settings="tailscale"><span>Tailscale</span><small>Phone access</small></button>
+              <button type="button" data-linux-only data-settings="files"><span>Files</span><small>Library</small></button>
+              <button type="button" data-linux-only data-settings="containers"><span>Containers</span><small>Images and logs</small></button>
+              <button type="button" data-linux-only data-settings="networks"><span>Networks</span><small>Docker networks</small></button>
+              <button type="button" data-linux-only data-settings="tailscale"><span>Tailscale</span><small>Phone access</small></button>
               <button type="button" data-settings="mining"><span>Solo mining</span><small>BzMiner</small></button>
             </nav>
             <div class="settings-panes">
@@ -228,7 +228,7 @@
               </div>
               <pre id="hog-update-log" class="mono" hidden></pre>
             </section>
-            <section id="default-browser-card" class="connect-card" aria-label="Default browser">
+            <section id="default-browser-card" data-linux-only class="connect-card" aria-label="Default browser">
               <p class="eyebrow">Browser</p>
               <div class="engine-row default-browser-row">
                 <div class="default-browser-copy">

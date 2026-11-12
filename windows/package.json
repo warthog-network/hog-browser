@@ -1,0 +1,38 @@
+{
+  "name": "hog-browser-windows",
+  "productName": "Hog",
+  "version": "0.1.26",
+  "private": true,
+  "description": "Hog for Windows: a small browser with a Warthog wallet, an in-tab node and solo mining.",
+  "author": "Warthog Network",
+  "license": "MIT",
+  "main": "main.cjs",
+  "scripts": {
+    "stage": "node stage.mjs",
+    "start": "node stage.mjs && electron .",
+    "smoke": "node stage.mjs && electron . --smoke",
+    "test": "node --test test/*.test.cjs",
+    "dist": "node stage.mjs && electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "45.3.1",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "org.hog.Browser",
+    "productName": "Hog",
+    "artifactName": "Hog-Setup-${version}-x64.${ext}",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.cjs", "smoke.cjs", "preload-chrome.cjs", "gen/preload-page.cjs", "lib/**", "package.json"],
+    "extraResources": [{ "from": "stage/hog", "to": "hog" }],
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "icon": "build/icon.png" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Hog"
+    },
+    "publish": null
+  }
+}

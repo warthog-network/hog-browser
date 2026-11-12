@@ -1,0 +1,104 @@
+name: Hog for Windows
+
+on:
+  push:
+    branches: ["windows"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-tests:
+    # The Windows port shares server.mjs and public/ with the Linux app: keep it green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Linux app tests
+        run: |
+          npm test
+          python3 -m unittest discover -s test -p '*_test.py'
+      - name: Windows shell unit tests (on Linux)
+        working-directory: windows
+        run: node stage.mjs && node --test test/*.test.cjs
+
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            windows/package-lock.json
+      - name: Install (project only)
+        run: |
+          npm ci
+          npm run build
+      - name: Install Windows app deps (project only)
+        working-directory: windows
+        run: npm ci
+      - name: Unit tests on Windows
+        working-directory: windows
+        run: |
+          node stage.mjs
+          node --test test/*.test.cjs
+      - name: Mining tests on Windows (stratum, tailnet, relay)
+        run: node --test test/mining.test.mjs test/stratum.test.mjs test/tailnet.test.mjs
+      - name: Build NSIS installer
+        working-directory: windows
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --win nsis --x64 --publish never
+      - name: Installer size and checksum
+        shell: bash
+        working-directory: windows/dist
+        run: |
+          ls -la *.exe
+          sha256sum Hog-Setup-*.exe | tee SHA256SUMS
+      - name: Silent install (per user)
+        shell: pwsh
+        working-directory: windows/dist
+        run: |
+          $setup = Get-ChildItem Hog-Setup-*.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          "installer exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { exit 1 }
+          Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter Hog.exe | Select-Object -ExpandProperty FullName
+      - name: Smoke test the installed app
+        shell: bash
+        timeout-minutes: 20
+        env:
+          HOG_SMOKE_OUT: ${{ runner.temp }}\hog-smoke
+          HOG_SMOKE_NODE_MINUTES: "10"
+        run: |
+          exe=$(find "$LOCALAPPDATA/Programs" -name Hog.exe | head -1)
+          echo "running $exe --smoke"
+          set +e
+          "$exe" --smoke 2>&1 | grep -v -E "ERROR:|WARNING:"
+          code=${PIPESTATUS[0]}
+          cat "$HOG_SMOKE_OUT/smoke.json" || true
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hog-windows-smoke
+          path: ${{ runner.temp }}\hog-smoke
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hog-Setup-windows-x64
+          path: |
+            windows/dist/Hog-Setup-*.exe
+            windows/dist/SHA256SUMS
+          if-no-files-found: error

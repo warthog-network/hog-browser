@@ -1734,3 +1734,6 @@ h3 { margin: 8px 0; font-size: 18px; }
   .wallet, .pane, .tabbar, #wallet-edge, #tabs-edge { transition: none; }
 }
 
+
+/* Hog for Windows: Linux-only controls (Docker, Tailscale, Jellyfin, library). */
+.hog-windows [data-linux-only] { display: none !important; }

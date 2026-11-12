@@ -8,7 +8,7 @@ import { BlockList, isIP } from "node:net";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
+import { MINING_NETWORKS, bzminerCommand, bzminerForOs, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
 import { createStratumBridge, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
 
@@ -24,7 +24,13 @@ const SITE_PORT_MAX = 44109;
 const NODE_ORIGIN = "https://browser-node.netlify.app";
 // HOG_NODE_PORT is for headless/dev runs next to an installed Hog; the hog window expects 43100.
 const NODE_PORT = Number(process.env.HOG_NODE_PORT || 43100);
-const SITE_PORT_FILE = join(homedir(), ".local/share/hog-browser/site-ports.json");
+// Hog's data folder. Linux: ~/.local/share/hog-browser (as before). Hog for
+// Windows passes HOG_SERVER_DATA (%APPDATA%\\hog-browser by default).
+const DATA_DIR = process.env.HOG_SERVER_DATA
+  || (process.platform === "win32"
+    ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "hog-browser")
+    : join(homedir(), ".local/share/hog-browser"));
+const SITE_PORT_FILE = join(DATA_DIR, "site-ports.json");
 const GLUE_PREFIX = readFileSync(fileURLToPath(new URL("./opfs-polyfill.js", import.meta.url)));
 const OPFS_LOCK_MS = 60_000;
 const opfsLocks = new Map();
@@ -41,7 +47,7 @@ const SITE_HEADERS = {
 let siteCursor = SITE_PORT_MIN;
 
 // ---------- Solo mining (BzMiner -> 127.0.0.1:HOG_MINING_PORT -> node tab) ----------
-const MINING_STATE_FILE = join(homedir(), ".local/share/hog-browser/mining.json");
+const MINING_STATE_FILE = join(DATA_DIR, "mining.json");
 // "auto" follows the network the node tab is running; "defi" / "mainnet" pin it.
 let miningNetworkSetting = "auto";
 const MINING_NETWORK_SETTINGS = new Set(["auto", "defi", "mainnet"]);
@@ -120,7 +126,7 @@ function readMiningState() {
 }
 
 function saveMiningState(state) {
-  mkdirSync(join(homedir(), ".local/share/hog-browser"), { recursive: true });
+  mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(state.enabled), address: state.address || "", network: state.network || "auto", tailnet: Boolean(state.tailnet) })}\n`);
 }
 
@@ -151,7 +157,7 @@ export function tailnetMiningInfo({ allow, listening, port, wallet, network, dns
     remoteRigName: rig,
     remoteCommand: host ? bzminerCommand(port, wallet, rig).replace("127.0.0.1", host) : "",
     remoteCommandIp: ipv4 && dnsName ? bzminerCommand(port, wallet, rig).replace("127.0.0.1", ipv4) : "",
-    remoteCommandWindows: host ? bzminerCommand(port, wallet, rig).replace("127.0.0.1", host).replace(/^\.\/bzminer/, "bzminer.exe") : "",
+    remoteCommandWindows: host ? bzminerForOs(bzminerCommand(port, wallet, rig).replace("127.0.0.1", host), "win32") : "",
   };
 }
 
@@ -178,7 +184,7 @@ function miningStatus(enabled) {
     miningNetwork: net?.key || "",
     miningNetworkLabel: net?.label || "",
     networks: Object.values(MINING_NETWORKS).map(({ key, label }) => ({ key, label })),
-    command: bzminerCommand(sport || 3456, miningAddress || undefined, net ? `hog-${net.key}` : "rig1"),
+    command: bzminerForOs(bzminerCommand(sport || 3456, miningAddress || undefined, net ? `hog-${net.key}` : "rig1")),
     defiNodeSource: nodeSource(DEFI_NODE_DIR, BUNDLED_DEFI_NODE_DIR, "/node/defi/"),
     mainnetNodeSource: nodeSource(MAINNET_NODE_DIR, BUNDLED_MAINNET_NODE_DIR, "/node/"),
     ...tailnetMiningInfo({
@@ -1017,7 +1023,7 @@ function createRuntime({ persistSites = false } = {}) {
       if (!persistSites) return;
       const data = {};
       for (const [origin, site] of sites) data[origin] = site.port;
-      mkdirSync(join(homedir(), ".local/share/hog-browser"), { recursive: true });
+      mkdirSync(DATA_DIR, { recursive: true });
       writeFileSync(SITE_PORT_FILE, `${JSON.stringify(data)}\n`);
     },
     ensureSite(origin) {
@@ -1187,7 +1193,7 @@ function opfsFail(status, message) {
 }
 
 function opfsRootFor(origin) {
-  const base = process.env.HOG_OPFS_ROOT || join(homedir(), ".local/share/hog-browser/opfs");
+  const base = process.env.HOG_OPFS_ROOT || join(DATA_DIR, "opfs");
   const safe = String(origin || "site").replace(/[^a-zA-Z0-9.-]+/g, "_").slice(0, 120);
   return join(base, safe);
 }
@@ -1607,7 +1613,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
   });
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain = process.env.HOG_SERVER_MAIN === "1" || (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]);
 if (isMain) {
   const server = await startServer(PORT, { persistSites: true });
   ({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting, tailnet: miningTailnet } = readMiningState());
