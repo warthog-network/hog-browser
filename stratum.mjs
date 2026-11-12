@@ -208,6 +208,49 @@ export function solvedBlock(job, extra2prefix, extranonce2, ntime, nonce) {
   return { height: job.height, header: header.toString("hex"), body: out.toString("hex") };
 }
 
+// Next work before the node has saved our block ("optimistic work"). Measured
+// on the DeFi testnet: the in-tab node takes a median ~440 ms to append a mined
+// block (SQLite on OPFS) and Hog another ~250 ms to get its next template, so
+// miners spent ~0.75 s on dead work after every block (a native node with
+// --stratum: ~0.07 s). At one block every ~4 s that was ~1 in 4 solutions
+// coming back stale. The next job is built from the solved header instead.
+// Difficulty changes at a retarget (heights k*720+1 below ten months of
+// blocks, k*8640+1 after; 8640 is a multiple of 720) and the reward at a
+// halving: no optimistic work for those heights.
+const RETARGET_STEP = 720;
+const HALVING_INTERVAL = (2 * 365 * 24 * 60 * 60) / 20;
+
+/**
+ * The job for height + 1 on top of a solved block, when it is certain to match
+ * the node's own next template apart from the timestamp: the template holds
+ * only the block reward (merklePrefix is the one reward leaf, sha256 of body
+ * bytes 12..28: account id + amount), so the next block's body is the same.
+ * A template with transactions in it gets null (they are spent by this block).
+ * @param {ReturnType<typeof jobFromTemplate>} job the job the block was solved on
+ * @param {string} solvedHeaderHex the solved block's 80-byte header
+ * @param {number} [nowSec]
+ */
+export function optimisticNextJob(job, solvedHeaderHex, nowSec = Math.floor(Date.now() / 1000)) {
+  if (!job || job.merklePrefix.length !== 32 || job.body.length < 28) return null;
+  if (!sha256(job.body.subarray(12, 28)).equals(job.merklePrefix)) return null;
+  const height = job.height + 1;
+  for (const step of [RETARGET_STEP, HALVING_INTERVAL]) {
+    if (height % step === 0 || height % step === 1) return null;
+  }
+  const solved = Buffer.from(String(solvedHeaderHex || ""), "hex");
+  if (solved.length !== 80) return null;
+  const header = Buffer.from(job.header);
+  Buffer.from(blockHash(solvedHeaderHex), "hex").copy(header, 0);
+  header.fill(0, 36, 68);
+  header.writeUInt32BE(Math.max(nowSec >>> 0, solved.readUInt32BE(72)), 72);
+  header.fill(0, 76, 80);
+  const next = jobFromTemplate(
+    { header: header.toString("hex"), body: job.body.toString("hex"), merklePrefix: job.merklePrefix.toString("hex"), height, difficulty: job.difficulty },
+    { key: job.network, page: job.page, lengthPrefixedBody: job.lengthPrefixedBody },
+  );
+  return { ...next, optimistic: true, parentHeight: job.height };
+}
+
 /** A Warthog block hash: SHA-256 twice over the 80-byte header (core HeaderView::hash). */
 export function blockHash(headerHex) {
   return sha256(sha256(Buffer.from(String(headerHex || ""), "hex"))).toString("hex");
@@ -260,6 +303,7 @@ export function createStratumBridge({
   tipRefreshMs = TIP_REFRESH_MS,
   slack = READY_SLACK,
   gateGraceMs = GATE_GRACE_MS,
+  optimisticWork = true,
 }) {
   let server = null;
   /** network key -> { publicTip, publicAt, pinHeight, pinAt, highWater, refreshing, refreshedAt } */
@@ -290,6 +334,9 @@ export function createStratumBridge({
   // synced: the ready gate is open (node synced and caught up with the tip).
   // nodeHeight / tipHeight: what the gate last compared ("height X of ~Y").
   const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, stale: 0, pending: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "", nodeHeight: 0, tipHeight: 0, gate: "" };
+  // optimisticJobs: next jobs sent before the node saved our block.
+  // optimisticOff: why optimistic work was turned off for this run ("" = on).
+  const optimistic = { jobs: 0, off: optimisticWork ? "" : "disabled" };
   /** @type {Set<any>} submitted blocks whose fate is not known yet */
   const pendingShares = new Set();
   let reconcileTimer = null;
@@ -465,9 +512,17 @@ export function createStratumBridge({
         entry.again = true;
         return;
       }
+      // Our block for that height is still with the node and miners already
+      // have the next job: an older template is not news.
+      if (entry.parent && job.network === entry.parent.network && job.height <= entry.parent.height) return;
       if (entry.jobs.has(job.id) || entry.spent.has(job.id)) return;
       if (entry.last && entry.last.workKey === job.workKey && Date.now() - entry.sentAt < REFRESH_MS) return;
-      const clean = !entry.last || entry.last.prevHash !== job.prevHash || entry.last.network !== job.network;
+      let clean = !entry.last || entry.last.prevHash !== job.prevHash || entry.last.network !== job.network;
+      if (!clean && entry.last.optimistic && (entry.last.nbits !== job.nbits || entry.last.version !== job.version)) {
+        // The node's next block differs from what Hog predicted: stop predicting.
+        optimistic.off = `the node's block ${job.height} has a different target or version`;
+        clean = true;
+      }
       if (clean) {
         // Same network, new tip: old jobs are stale. Another network: just gone.
         for (const old of [...entry.jobs.values()]) {
@@ -511,7 +566,7 @@ export function createStratumBridge({
   function link(socket, address) {
     let entry = accounts.get(address);
     if (!entry) {
-      entry = { sockets: new Set(), jobs: new Map(), spent: new Map(), appending: new Map(), last: null, sentAt: 0, polling: false, again: false, wonHeight: 0, wonAt: 0, timer: null };
+      entry = { sockets: new Set(), jobs: new Map(), spent: new Map(), appending: new Map(), last: null, sentAt: 0, polling: false, again: false, wonHeight: 0, wonAt: 0, parent: null, timer: null };
       entry.timer = setInterval(() => poll(address), pollMs);
       accounts.set(address, entry);
     }
@@ -572,6 +627,7 @@ export function createStratumBridge({
     let done = () => {};
     const inFlight = new Promise((resolve) => { done = resolve; });
     entry.appending.set(job.height, inFlight);
+    share.optimistic = startOptimistic(entry, job, block.header, share.hash);
     let outcome = { kind: "unknown", message: "" };
     try {
       const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: share.worker }), job.page, {
@@ -586,9 +642,48 @@ export function createStratumBridge({
       if (outcome.kind === "unknown") hold(share, outcome.message);
       else settle(share, outcome);
     } finally {
+      // Whatever the answer, older templates are news again.
+      if (entry.parent && entry.parent.hash === share.hash) entry.parent = null;
       if (entry.appending.get(job.height) === inFlight) entry.appending.delete(job.height);
       done(outcome.kind);
     }
+  }
+
+  /**
+   * Hand miners the next job on top of a block the node is still appending.
+   * @returns the optimistic job, or null when it cannot be predicted safely
+   */
+  function startOptimistic(entry, job, solvedHeader, hash) {
+    // Only on the current job; on an optimistic job too (blocks in a row while
+    // the node is still saving the first: the node tab appends them in order).
+    if (optimistic.off || entry.last !== job) return null;
+    const next = optimisticNextJob(job, solvedHeader);
+    if (!next) return null;
+    entry.parent = { height: job.height, network: job.network, hash };
+    for (const old of [...entry.jobs.values()]) if (old.network === job.network && old.height <= job.height) retire(entry, old);
+    entry.jobs.set(next.id, next);
+    entry.last = next;
+    entry.sentAt = Date.now();
+    stats.jobs += 1;
+    optimistic.jobs += 1;
+    for (const socket of entry.sockets) notify(socket, next, true);
+    for (const socket of entry.sockets) socket.fresh = false;
+    return next;
+  }
+
+  /** Our block did not land: drop the job built on it and go back to the node's work. */
+  function rollBackOptimistic(share, stale) {
+    const entry = accounts.get(share.address);
+    const next = share.optimistic;
+    if (!entry || !next) return;
+    if (entry.jobs.has(next.id)) retire(entry, next);
+    if (!stale) {
+      // The height is still open: its jobs are good work again.
+      for (const [id, height] of [...entry.spent]) if (height === share.job.height) entry.spent.delete(id);
+    }
+    if (entry.last === next) entry.last = null;
+    entry.parent = null;
+    poll(share.address, true);
   }
 
   /** A solution for a height that is already taken, answered without asking the node. */
@@ -663,6 +758,11 @@ export function createStratumBridge({
     stats.rejected += 1;
     rig.rejected += 1;
     if (outcome.stale) stats.stale += 1;
+    rollBackOptimistic(share, outcome.stale);
+    if (job.optimistic && !outcome.stale && !optimistic.off) {
+      // A block on predicted work was refused for some other reason: predict no more.
+      optimistic.off = `block ${job.height} on optimistic work was rejected: ${outcome.message}`;
+    }
     stats.lastResult = outcome.stale
       ? `Block ${job.height} was stale (that height was already taken)`
       : `Block ${job.height} rejected: ${outcome.message}`;
@@ -873,6 +973,8 @@ export function createStratumBridge({
       accounts: [...accounts.keys()],
       workers: [...workers.values()].map((w) => ({ ...w, connected: Math.max(0, w.connected) })),
       ...stats,
+      optimisticJobs: optimistic.jobs,
+      optimisticOff: optimistic.off,
       pendingBlocks: [...pendingShares].map((s) => ({ height: s.job.height, worker: s.worker, since: s.at })),
     };
   }

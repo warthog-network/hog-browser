@@ -269,7 +269,7 @@ test("a block the node tab never answers for is pending, then counted from the c
     asked.push({ path, timeoutMs: options.timeoutMs });
     return { ok: false, code: "timeout" };
   };
-  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50, reconcileMs: 30, appendTimeoutMs: 1234 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50, reconcileMs: 30, appendTimeoutMs: 1234, optimisticWork: false });
   const port = await bridge.start(0);
   const { c, submit } = await session(port);
   try {
@@ -311,7 +311,7 @@ test("a late append answer settles a pending block; unsettled ones give up in ti
     lateCallbacks.push(options.onLate);
     return { ok: false, code: "timeout" };
   };
-  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50, reconcileMs: 30, reconcileGiveUpMs: 400, minerReplyMs: 150 });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50, reconcileMs: 30, reconcileGiveUpMs: 400, minerReplyMs: 150, optimisticWork: false });
   const port = await bridge.start(0);
   const { c, submit } = await session(port);
   try {
