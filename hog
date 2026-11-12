@@ -46,6 +46,29 @@ NODE_PORT = 43100
 APP_ID = os.environ.get("HOG_APP_ID", "org.hog.Browser")
 
 
+def files_download_uri(uri, port=None):
+    """Whether a chrome download is a hog://files download from Hog's own server."""
+    port = PORT if port is None else port
+    try:
+        parts = urllib.parse.urlsplit(str(uri or ""))
+    except ValueError:
+        return False
+    if parts.scheme != "http" or parts.hostname != "127.0.0.1" or parts.port != int(port):
+        return False
+    if parts.path != "/api/files/raw" or parts.username or parts.password:
+        return False
+    query = urllib.parse.parse_qs(parts.query)
+    return query.get("download") == ["1"] and bool(query.get("root"))
+
+
+def download_name(suggested):
+    name = os.path.basename(str(suggested or "").replace("\\", "/")).strip()
+    name = "".join(ch for ch in name if ch not in "\x00\r\n")
+    if name in {"", ".", ".."}:
+        return "download"
+    return name[:255]
+
+
 def sandbox_available():
     context = WebKit2.WebContext()
     try:
@@ -1644,6 +1667,9 @@ class Hog(Gtk.Application):
         if command.startswith("bookmarks:"):
             self.on_bookmarks(command)
             return
+        if command == "files:pick-root":
+            self.pick_files_root()
+            return
         if command.startswith("dapp-reply:"):
             if self.pages is not None:
                 self.pages.deliver_dapp_reply(command[len("dapp-reply:"):])
@@ -1879,6 +1905,94 @@ class Hog(Gtk.Application):
         except Exception:
             return False
         return True
+
+    def pick_files_root(self):
+        if self.window is None or getattr(self, "_share_dialog", None) is not None:
+            return
+        dialog = Gtk.FileChooserDialog(
+            title="Add a folder to Files",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Add", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        try:
+            dialog.set_current_folder(str(Path.home()))
+        except Exception:
+            pass
+        self._share_dialog = dialog
+
+        def on_response(_dialog, response):
+            path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+            dialog.destroy()
+            self._share_dialog = None
+            if not path or any(ch in path for ch in ("\n", "\r", "\x00")):
+                return
+            try:
+                self.chrome.run_javascript(
+                    f"window.__hogFilesRoot && window.__hogFilesRoot({json.dumps(path)})",
+                    None, None, None,
+                )
+            except Exception:
+                pass
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def on_chrome_download(self, _context, download):
+        try:
+            request = download.get_request()
+            uri = request.get_uri() if request is not None else ""
+        except Exception:
+            uri = ""
+        if not files_download_uri(uri):
+            return
+        download.connect("decide-destination", self.on_files_destination)
+        download.connect("finished", self.on_files_download_done)
+
+    def on_files_destination(self, download, suggested):
+        name = download_name(suggested)
+        dialog = Gtk.FileChooserDialog(
+            title="Save file",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SAVE,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        dialog.set_do_overwrite_confirmation(True)
+        folder = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) or str(Path.home())
+        try:
+            dialog.set_current_folder(folder)
+        except Exception:
+            pass
+        dialog.set_current_name(name)
+        response = dialog.run()
+        path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+        dialog.destroy()
+        if not path or any(ch in path for ch in ("\n", "\r", "\x00")):
+            download.cancel()
+            return True
+        download.set_allow_overwrite(True)
+        download.set_destination(GLib.filename_to_uri(path, None))
+        return True
+
+    def on_files_download_done(self, download):
+        try:
+            dest = download.get_destination() or ""
+            path = GLib.filename_from_uri(dest)[0] if dest else ""
+        except Exception:
+            path = ""
+        if not path:
+            return
+        try:
+            self.chrome.run_javascript(
+                f"window.__hogFilesSaved && window.__hogFilesSaved({json.dumps(os.path.basename(path))})",
+                None, None, None,
+            )
+        except Exception:
+            pass
 
     def pick_share_folder(self):
         if self.window is None or getattr(self, "_share_dialog", None) is not None:
@@ -2355,6 +2469,8 @@ class Hog(Gtk.Application):
             base_cache_directory=str(DATA / "cache"),
         )
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
+        # hog://files downloads ask where to save. Other chrome downloads keep WebKit's default.
+        context.connect("download-started", self.on_chrome_download)
         view = WebKit2.WebView.new_with_context(context)
         background = Gdk.RGBA()
         background.parse("#0b0b0d")
