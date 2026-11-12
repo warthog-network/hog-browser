@@ -2004,7 +2004,7 @@ class Hog(Gtk.Application):
         parts = command.split(":", 2)
         action = parts[1] if len(parts) > 1 else ""
         rest = parts[2] if len(parts) > 2 else ""
-        if action not in {"list", "add", "remove", "start", "stop", "restart", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder", "browser-default", "browser-default-set", "browser-default-clear", "jellyfin-gpu", "jellyfin-gpu-set", "jellyfin-gpu-clear", "jellyfin-gpu-install", "runtime-set", "network-list", "network-create", "network-remove", "network-connect", "network-disconnect", "update-status", "update-check", "update-check-now", "update-install", "update-restart"}:
+        if action not in {"list", "add", "remove", "start", "stop", "restart", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder", "browser-default", "browser-default-set", "browser-default-clear", "jellyfin-gpu", "jellyfin-gpu-set", "jellyfin-gpu-clear", "jellyfin-gpu-install", "runtime-set", "network-list", "network-create", "network-remove", "network-connect", "network-disconnect", "update-status", "update-check", "update-check-now", "update-install", "update-restart", "samba-status", "samba-save", "samba-on", "samba-off"}:
             return
         if action == "share-pick":
             self.pick_share_folder()
@@ -2043,6 +2043,8 @@ class Hog(Gtk.Application):
                 hook = (
                     "window.__hogUpdate && window.__hogUpdate"
                     if action.startswith("update-")
+                    else "window.__hogSamba && window.__hogSamba"
+                    if action.startswith("samba-")
                     else "window.__hogContainers && window.__hogContainers"
                 )
                 try:
@@ -2058,7 +2060,7 @@ class Hog(Gtk.Application):
 
         def work():
             try:
-                if action in {"run", "recreate"}:
+                if action in {"run", "recreate", "samba-on"}:
                     payload = guard.handle(action, name, image, progress=emit)
                 else:
                     payload = guard.handle(action, name, image)

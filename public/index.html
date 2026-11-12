@@ -376,6 +376,18 @@
             <p class="eyebrow">Files</p>
             <h1>Library</h1>
             <p class="lede">Films and photos in ~/hog-shares show up in Jellyfin at /media.</p>
+            <section id="files-roots-card" class="endpoint-row files-roots-card" aria-label="Files folders">
+              <p class="eyebrow">Files folders</p>
+              <p class="note">hog://files always shows ~/hog-shares. Add other folders here, such as ~/Videos or a disk under /media. Hog refuses your whole home folder, hidden folders and its own wallet data.</p>
+              <ul id="files-roots-list" class="files-roots-list"></ul>
+              <form id="files-root-form" class="files-root-form">
+                <input id="files-root-path" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="~/Videos or /media/disk" aria-label="Folder path">
+                <button type="button" id="files-root-browse">Browse…</button>
+                <button type="submit" class="primary">Add</button>
+              </form>
+              <p id="files-root-status" class="note" role="status"></p>
+              <button type="button" id="files-open" class="tiny">Open hog://files →</button>
+            </section>
             <div id="media-library" class="endpoint-row">
               <p class="eyebrow">Files</p>
               <p class="note">In Jellyfin, add a library at /media. Drop films onto the dashed box, or use Add files, Add folder, or New folder. Those land in ~/hog-shares, which Jellyfin already reads.</p>
@@ -653,6 +665,25 @@
               <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
               <div id="jellyfin-links" class="service-links" hidden></div>
               <p id="jellyfin-gpu-hint" class="note" hidden>Jellyfin is using the NVIDIA GPU on Docker Engine. In Dashboard → Playback → Transcoding, pick NVIDIA NVENC.</p>
+            </section>
+            <section id="samba-card" class="connect-card samba-card" aria-label="Network drive">
+              <p class="eyebrow">Network drive (Samba)</p>
+              <p id="samba-state" class="note" role="status">Off. Turn it on to open ~/hog-shares as a drive on your phone or another computer in your tailnet.</p>
+              <form id="samba-form" class="samba-form">
+                <label>User
+                  <input id="samba-user" autocomplete="off" spellcheck="false" maxlength="32" placeholder="hog">
+                </label>
+                <label>Password
+                  <input id="samba-pass" type="password" autocomplete="new-password" maxlength="128" placeholder="8 characters or more">
+                </label>
+                <button type="submit">Save sign-in</button>
+              </form>
+              <div class="row">
+                <button type="button" id="samba-toggle" class="primary">Turn on</button>
+              </div>
+              <p id="samba-error" class="error" role="status"></p>
+              <ul id="samba-links" class="fx-smb-links samba-links" hidden></ul>
+              <p class="note">Samba listens only on hog's Tailscale address and on this computer (127.0.0.1), never on your home network. It needs the tailscale container running on Docker Engine. The first Turn on downloads the dockurr/samba image.</p>
             </section>
             <details id="exit-node-guide" class="connect-card exit-node-guide">
               <summary>Setting up your exit node</summary>

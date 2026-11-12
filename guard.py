@@ -1640,6 +1640,163 @@ def assess(info, name, data):
     return ""
 
 
+# ---------- Samba (network drive for ~/hog-shares over the tailnet) ----------
+
+SAMBA_NAME = "hog-samba"
+SAMBA_IMAGE = "dockurr/samba:latest"
+SAMBA_SHARE = "hog-shares"
+SAMBA_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+SAMBA_RESERVED = {"root", "nobody", "smb", "daemon", "bin", "sys", "adm", "guest"}
+SAMBA_TAILNET_V4 = "100.64.0.0/10"
+SAMBA_TAILNET_V6 = "fd7a:115c:a1e0::/48"
+
+
+def samba_dir():
+    """Samba's own files: smb.conf and the password file mounted as a secret.
+
+    They sit next to Hog's data directory, never inside it, because a
+    container may not mount anything that can see the wallet.
+    """
+    override = os.environ.get("HOG_SAMBA_DIR")
+    if override:
+        return Path(override).resolve()
+    return (Path.home() / ".local" / "share" / "hog-samba").resolve()
+
+
+def samba_user_problem(user):
+    text = str(user or "")
+    if not SAMBA_USER_RE.fullmatch(text):
+        return "Use a user name of lowercase letters, digits, - or _, starting with a letter (32 at most)."
+    if text in SAMBA_RESERVED:
+        return "Pick another user name. That one belongs to the system."
+    return ""
+
+
+def samba_password_problem(password):
+    if not isinstance(password, str):
+        return "Type a password."
+    if len(password) < 8:
+        return "Use a password of at least 8 characters."
+    if len(password) > 128:
+        return "Use a password of 128 characters at most."
+    if any(ch in password for ch in "\r\n\0"):
+        return "The password cannot contain line breaks."
+    return ""
+
+
+def tailnet_ipv4(text):
+    parts = ipv4_parts(str(text or "").strip())
+    if not parts or parts[0] != 100 or not 64 <= parts[1] <= 127:
+        return ""
+    return ".".join(str(part) for part in parts)
+
+
+def samba_config(user, gateway=""):
+    """smb.conf for the hog-shares share. One user, no guests, SMB2+.
+
+    hosts allow is a second fence behind the port publishing: loopback, the
+    tailnet ranges and the Docker bridge gateway (docker-proxy hands local
+    connections over from there).
+    """
+    if samba_user_problem(user):
+        raise ValueError("bad samba user")
+    allow = ["127.0.0.1", SAMBA_TAILNET_V4, SAMBA_TAILNET_V6]
+    gate = ipv4_parts(str(gateway or ""))
+    if gate:
+        allow.append(".".join(str(part) for part in gate))
+    lines = [
+        "# Written by Hog. Changes here are replaced the next time Samba starts.",
+        "[global]",
+        "   server string = hog",
+        "   netbios name = hog",
+        "   workgroup = WORKGROUP",
+        "   server role = standalone server",
+        "   security = user",
+        "   passdb backend = tdbsam",
+        "   map to guest = Never",
+        "   restrict anonymous = 2",
+        "   server min protocol = SMB2_10",
+        "   smb ports = 445",
+        "   disable netbios = yes",
+        "   load printers = no",
+        "   printing = bsd",
+        "   printcap name = /dev/null",
+        "   disable spoolss = yes",
+        "   follow symlinks = no",
+        "   wide links = no",
+        "   unix extensions = no",
+        "   log level = 1",
+        f"   hosts allow = {' '.join(allow)}",
+        "   hosts deny = ALL",
+        "",
+        f"[{SAMBA_SHARE}]",
+        "   path = /shared",
+        "   comment = Hog shares",
+        "   browseable = yes",
+        "   read only = no",
+        "   guest ok = no",
+        f"   valid users = {user}",
+        f"   force user = {user}",
+        "   force group = smb",
+        "   create mask = 0664",
+        "   directory mask = 0775",
+        "   veto files = /.hog-trash/.hog-upload-*/",
+        "   delete veto files = no",
+        "   hide dot files = yes",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def samba_publishes(ip):
+    """Port 445 on the Tailscale address and on loopback only. Never 0.0.0.0."""
+    address = tailnet_ipv4(ip)
+    if not address:
+        raise ValueError("not a tailnet address")
+    return ((address, "445", "445", "tcp"), ("127.0.0.1", "445", "445", "tcp"))
+
+
+def samba_run_args(user, ip, shares, folder, uid, gid, image=SAMBA_IMAGE):
+    """docker run for hog-samba. The password stays in a mounted file."""
+    if samba_user_problem(user):
+        raise ValueError("bad samba user")
+    mounts = (
+        f"{Path(shares).resolve()}:/shared",
+        f"{Path(folder).resolve() / 'smb.conf'}:/etc/samba/smb.conf:ro",
+        f"{Path(folder).resolve() / 'pass'}:/run/secrets/pass:ro",
+    )
+    env = (f"USER={user}", f"UID={int(uid)}", f"GID={int(gid)}", "CLEAR=Y", "FORCE=N")
+    args = compose_run(SAMBA_NAME, image, samba_publishes(ip), False, (), env, (), mounts, "", memory="512m")
+    # The image's healthcheck lists shares anonymously, which this config refuses.
+    args.insert(args.index(image), "--no-healthcheck")
+    args.insert(args.index(image), "--restart=unless-stopped")
+    return args
+
+
+def samba_published_ips(info):
+    """Host addresses Docker publishes 445 on, from docker inspect."""
+    host = info.get("HostConfig") if isinstance(info, dict) and isinstance(info.get("HostConfig"), dict) else {}
+    bindings = host.get("PortBindings") if isinstance(host.get("PortBindings"), dict) else {}
+    out = []
+    for key, items in bindings.items():
+        if not str(key).startswith("445/") or not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                out.append(str(item.get("HostIp") or ""))
+    return out
+
+
+def samba_binding_problem(info):
+    ips = samba_published_ips(info)
+    if not ips:
+        return "Samba is not published on port 445."
+    for ip in ips:
+        if ip != "127.0.0.1" and not tailnet_ipv4(ip):
+            return "Samba is published beyond the tailnet, so Hog stopped it."
+    return ""
+
+
 class Guard:
     def __init__(self, data_dir, docker="docker", engine_cmd=None, origin="http://127.0.0.1:4188"):
         self.data = wallet_dir(data_dir)
@@ -4291,7 +4448,193 @@ class Guard:
         return self._network_membership(blob, "disconnect")
 
 
+    # ---------- Samba ----------
+
+    def samba_state_path(self):
+        return self.data / "samba.json"
+
+    def read_samba(self):
+        try:
+            raw = json.loads(self.samba_state_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        user = str(raw.get("user") or "")
+        return {"enabled": bool(raw.get("enabled")), "user": user if not samba_user_problem(user) else ""}
+
+    def write_samba(self, **changes):
+        state = self.read_samba()
+        state.update(changes)
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.samba_state_path()
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"enabled": bool(state["enabled"]), "user": state["user"]}, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        return state
+
+    def samba_folder(self):
+        folder = samba_dir()
+        if _inside(folder, self.data):
+            raise RuntimeError("Samba's folder overlaps Hog's data, so Hog will not use it.")
+        folder.mkdir(parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+        return folder
+
+    def samba_password_set(self):
+        try:
+            path = samba_dir() / "pass"
+            return path.is_file() and path.stat().st_size >= 8
+        except OSError:
+            return False
+
+    def _write_private(self, path, text):
+        temporary = path.with_name(f".{path.name}.tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, text.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+
+    def samba_gateway(self):
+        try:
+            result = self.run_on(["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"], timeout=8, sock=self.engine_sock())
+        except RuntimeError:
+            return "172.17.0.1"
+        for word in (result.stdout or "").split():
+            if ipv4_parts(word):
+                return word
+        return "172.17.0.1"
+
+    def samba_status(self, error="", notice=""):
+        state = self.read_samba()
+        info, _problem = self.inspect_on(SAMBA_NAME, sock=self.engine_sock())
+        running = bool(isinstance(info, dict) and isinstance(info.get("State"), dict) and info["State"].get("Running") is True)
+        ips = [ip for ip in samba_published_ips(info) if tailnet_ipv4(ip)] if info else []
+        dns = ""
+        tail_ip = ""
+        try:
+            dns, _up = self.tailscale_dns()
+            tail_ip = self.tailscale_ipv4()
+        except RuntimeError:
+            pass
+        ip = ips[0] if ips else tail_ip
+        if running and tail_ip and ips and tail_ip not in ips and not error:
+            error = "Tailscale's address changed. Turn Samba off and on again."
+        engine_tailscale = self.container_runtime("tailscale") == RUNTIME_ENGINE
+        return {
+            "ok": not error,
+            "error": error,
+            "notice": notice,
+            "samba": {
+                "enabled": state["enabled"],
+                "running": running,
+                "exists": info is not None,
+                "user": state["user"],
+                "passwordSet": self.samba_password_set(),
+                "ip": ip,
+                "dns": dns,
+                "share": SAMBA_SHARE,
+                "image": SAMBA_IMAGE,
+                "runtimeOk": engine_tailscale,
+                "error": error,
+            },
+        }
+
+    def samba_save(self, raw):
+        try:
+            data = json.loads(raw or "{}")
+        except (TypeError, json.JSONDecodeError):
+            data = None
+        if not isinstance(data, dict):
+            return self.samba_status(error="Hog could not read that sign-in.")
+        user = str(data.get("user") or "").strip()
+        password = data.get("password")
+        problem = samba_user_problem(user)
+        if not problem and (password not in (None, "") or not self.samba_password_set()):
+            problem = samba_password_problem(password if isinstance(password, str) else None)
+        if problem:
+            return self.samba_status(error=problem)
+        try:
+            folder = self.samba_folder()
+            if isinstance(password, str) and password:
+                self._write_private(folder / "pass", password)
+        except (OSError, RuntimeError):
+            return self.samba_status(error="Hog could not save the Samba password.")
+        changed = self.read_samba()["user"] != user
+        state = self.write_samba(user=user)
+        info, _problem = self.inspect_on(SAMBA_NAME, sock=self.engine_sock())
+        if info is not None and state["enabled"]:
+            # Re-run so the new user or password is used. The share stays the same.
+            return self.samba_on(notice="Saved. Samba restarted with the new sign-in.")
+        return self.samba_status(notice="Saved. The user name changed." if changed else "Saved.")
+
+    def samba_on(self, progress=None, notice=""):
+        state = self.read_samba()
+        if not state["user"] or not self.samba_password_set():
+            return self.samba_status(error="Set a Samba user and password first.")
+        if self.container_runtime("tailscale") != RUNTIME_ENGINE:
+            return self.samba_status(error="Samba needs Tailscale on Docker Engine. Docker Desktop runs containers in a VM, so its ports never reach the tailnet address.")
+        ip = tailnet_ipv4(self.tailscale_ipv4())
+        if not ip:
+            return self.samba_status(error="Start the tailscale container and sign in first. Samba listens only on hog's Tailscale address.")
+        sock = self.engine_sock()
+        try:
+            folder = self.samba_folder()
+            shares = shares_root()
+            shares.mkdir(parents=True, exist_ok=True)
+            self._write_private(folder / "smb.conf", samba_config(state["user"], self.samba_gateway()))
+        except (OSError, RuntimeError, ValueError):
+            return self.samba_status(error="Hog could not write Samba's settings.")
+        problem = self.ensure_image(SAMBA_IMAGE, sock=sock, progress=progress)
+        if problem:
+            return self.samba_status(error=problem)
+        problem = self._stop_rm_keep_volumes(SAMBA_NAME, sock=sock)
+        if problem:
+            return self.samba_status(error=problem)
+        args = samba_run_args(state["user"], ip, shares, folder, os.getuid(), os.getgid())
+        result = self.run_on(args, timeout=120, sock=sock)
+        if result.returncode != 0:
+            blob = f"{result.stderr or ''}\n{result.stdout or ''}"
+            if docker_offline(blob):
+                return self.samba_status(error="Docker is not running.")
+            detail = [line.strip() for line in blob.splitlines() if line.strip()]
+            message = detail[-1][:180] if detail else "Docker did not start Samba."
+            if "address already in use" in message.lower():
+                message = "Port 445 is already taken on this computer, maybe by a Samba server outside Hog."
+            self.run_on(["rm", "-f", SAMBA_NAME], timeout=20, sock=sock)
+            return self.samba_status(error=message)
+        started, error = self.inspect_on(SAMBA_NAME, sock=sock)
+        reason = (assess(started, SAMBA_NAME, self.data) or samba_binding_problem(started)) if started else (error or "Docker did not describe Samba.")
+        if reason:
+            self.run_on(["rm", "-f", SAMBA_NAME], timeout=20, sock=sock)
+            return self.samba_status(error=reason)
+        self.save_runtime(SAMBA_NAME, RUNTIME_ENGINE)
+        self.remember(SAMBA_NAME)
+        self.write_samba(enabled=True)
+        return self.samba_status(notice=notice or "Samba is on for your tailnet.")
+
+    def samba_off(self):
+        problem = self._stop_rm_keep_volumes(SAMBA_NAME, sock=self.engine_sock())
+        self.write_samba(enabled=False)
+        if problem:
+            return self.samba_status(error=problem)
+        self.forget(SAMBA_NAME)
+        return self.samba_status(notice="Samba is off.")
+
     def handle(self, action, name="", image="", progress=None):
+        if action == "samba-status":
+            return self.samba_status()
+        if action == "samba-save":
+            return self.samba_save(name)
+        if action == "samba-on":
+            return self.samba_on(progress=progress)
+        if action == "samba-off":
+            return self.samba_off()
         if action == "update-status":
             return self.update_status()
         if action == "update-check":
