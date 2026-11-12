@@ -90,6 +90,7 @@ cp -a \
   "${HB}/share_page.py" \
   "${HB}/bookmark_files.py" \
   "${HB}/server.mjs" \
+  "${HB}/mining.mjs" \
   "${HB}/opfs-polyfill.js" \
   "${HB}/package.json" \
   "${HB}/package-lock.json" \

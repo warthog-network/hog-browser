@@ -442,7 +442,7 @@ function showBrowserSettings() {
   requestAnimationFrame(reportShareDrop);
 }
 
-const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale"];
+const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale", "mining"];
 
 function normalizeSettingsPage(page) {
   if (page === "docker") return "containers";
@@ -473,6 +473,7 @@ function showSettingsPage(page) {
   if (next === "files" || next === "tailscale") {
     desktopCommand("containers:share-status");
   }
+  if (next === "mining") refreshMining();
   if (next === "general") {
     desktopCommand("containers:browser-default");
     desktopCommand("containers:update-status");
@@ -6895,3 +6896,75 @@ restoreSpotTops();
 armCelebrate();
 bootFlash();
 window.__hogReady = true;
+
+
+// ---------- Solo mining (BzMiner -> 127.0.0.1:3100 -> node tab) ----------
+function paintMining(state) {
+  const button = $("mining-toggle");
+  const status = $("mining-status");
+  const error = $("mining-error");
+  const command = $("mining-command");
+  const source = $("mining-source");
+  if (!button || !status || !error || !state) return;
+  delete button.dataset.busy;
+  button.disabled = false;
+  const on = Boolean(state.enabled);
+  button.classList.toggle("is-on", on);
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+  button.textContent = on ? "Turn off" : "Turn on";
+  if (command && state.command) command.textContent = state.command;
+  if (source) source.textContent = state.defiNodeSource ? `DeFi node files: ${state.defiNodeSource}` : "";
+  if (!on) {
+    status.textContent = "Off. Turn this on to let BzMiner connect.";
+  } else if (!state.listening) {
+    status.textContent = "On, but the port could not open.";
+  } else {
+    const page = state.pageConnected
+      ? (state.pageNetwork === "defi" ? "Node tab connected (DeFi testnet)." : state.pageNetwork ? `Node tab is on ${state.pageNetwork}; switch it to DeFi testnet.` : "Node tab connected; start the node.")
+      : "Open the node tab so Hog can reach it.";
+    status.textContent = `Listening on 127.0.0.1:${state.port}. ${page} Templates served: ${state.templates || 0}. Blocks submitted: ${state.submits || 0}.`;
+  }
+  error.textContent = state.error || state.lastError || "";
+}
+
+async function refreshMining() {
+  try {
+    const response = await fetch("/api/mining", { credentials: "same-origin" });
+    paintMining(await response.json());
+  } catch (err) {
+    const error = $("mining-error");
+    if (error) error.textContent = err instanceof Error ? err.message : String(err);
+  }
+}
+
+(function wireMining() {
+  const button = $("mining-toggle");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    if (button.dataset.busy) return;
+    button.dataset.busy = "1";
+    button.disabled = true;
+    const enabled = button.getAttribute("aria-pressed") !== "true";
+    try {
+      const response = await fetch("/api/mining", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const state = await response.json();
+      if (!response.ok) throw new Error(state.error || `Hog returned ${response.status}`);
+      paintMining(state);
+    } catch (err) {
+      delete button.dataset.busy;
+      button.disabled = false;
+      $("mining-error").textContent = err instanceof Error ? err.message : String(err);
+    }
+  });
+  const open = $("mining-open-node");
+  if (open) open.addEventListener("click", () => openUrl("https://browser-node.netlify.app/?network=defi"));
+  setInterval(() => {
+    const pane = $("settings-mining");
+    if (pane && !pane.hidden && !$("browser-settings").hidden) refreshMining();
+  }, 3000);
+})();

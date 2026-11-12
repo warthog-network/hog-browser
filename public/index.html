@@ -43,6 +43,7 @@
             <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
             <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
             <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="mining"><span>Solo mining</span><small>BzMiner to the node tab (DeFi testnet)</small></button></li>
           </ul>
         </div>
       </div>
@@ -200,6 +201,7 @@
               <button type="button" data-settings="containers"><span>Containers</span><small>Images and logs</small></button>
               <button type="button" data-settings="networks"><span>Networks</span><small>Docker networks</small></button>
               <button type="button" data-settings="tailscale"><span>Tailscale</span><small>Phone access</small></button>
+              <button type="button" data-settings="mining"><span>Solo mining</span><small>BzMiner</small></button>
             </nav>
             <div class="settings-panes">
           <div id="settings-general" hidden>
@@ -434,6 +436,26 @@
                   </div>
                 </div>
               </details>
+            </section>
+          </div>
+          <div id="settings-mining" hidden>
+            <p class="eyebrow">Solo mining</p>
+            <h1>Mine to your node tab</h1>
+            <p class="lede">Hog opens a local port that BzMiner can use like a Warthog node. Block templates come from the node running in Hog's node tab, and solved blocks go back into it. Only this computer can connect.</p>
+            <section id="mining-card" class="connect-card" aria-label="Solo mining">
+              <p class="eyebrow">DeFi testnet</p>
+              <div class="engine-row default-browser-row">
+                <div class="default-browser-copy">
+                  <strong>Local mining port</strong>
+                  <p id="mining-status" class="note" role="status">Off. Turn this on to let BzMiner connect.</p>
+                  <p id="mining-error" class="error" role="status"></p>
+                </div>
+                <button type="button" id="mining-toggle" aria-pressed="false">Turn on</button>
+              </div>
+              <p class="note">1. Open the node tab on DeFi testnet and press Start. <button type="button" id="mining-open-node" class="tiny">Open DeFi node tab</button></p>
+              <p class="note">2. Run BzMiner with your 48-character wallet address:</p>
+              <code id="mining-command" class="mono">./bzminer -a warthog -p http://127.0.0.1:3100 -w &lt;48-hex-wallet&gt; --worker rig1</code>
+              <p id="mining-source" class="note"></p>
             </section>
           </div>
           <div id="settings-tailscale" hidden>
