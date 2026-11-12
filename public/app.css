@@ -1130,6 +1130,24 @@ button { cursor: pointer; }
 .hog-toast.is-ok { border-color: rgba(143, 191, 120, 0.55); }
 .hog-toast.is-error { border-color: rgba(224, 122, 98, 0.65); }
 .hog-toast.is-out { opacity: 0; transition: opacity .35s ease; }
+.hog-download { display: flex; flex-direction: column; gap: 8px; min-width: 260px; }
+.hog-download-text { overflow-wrap: anywhere; }
+.hog-download-bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.hog-download-bar[hidden] { display: none; }
+.hog-download-fill { height: 100%; width: 2%; background: var(--gold); transition: width .2s ease; }
+.hog-download-actions { display: flex; justify-content: flex-end; }
+.hog-download-button {
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.55);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hog-download-button[hidden] { display: none; }
+.hog-download-button:hover { background: rgba(var(--accent-rgb), 0.15); }
 .popover.settings-menu { width: 300px; }
 @media (max-width: 860px) {
   .settings-shell { flex-direction: column; gap: 16px; }

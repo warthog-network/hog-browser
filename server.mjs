@@ -810,6 +810,55 @@ async function publish(runtime, finalUrl, html, title, contentType) {
   };
 }
 
+const DOWNLOAD_TYPES = new Set([
+  "application/octet-stream",
+  "application/vnd.android.package-archive",
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/gzip",
+  "application/x-gzip",
+  "application/x-tar",
+  "application/x-gtar",
+  "application/x-xz",
+  "application/x-bzip2",
+  "application/zstd",
+  "application/x-7z-compressed",
+  "application/x-rar-compressed",
+  "application/vnd.rar",
+  "application/x-debian-package",
+  "application/vnd.debian.binary-package",
+  "application/x-rpm",
+  "application/x-msdownload",
+  "application/x-msi",
+  "application/x-ms-installer",
+  "application/x-apple-diskimage",
+  "application/x-iso9660-image",
+  "application/java-archive",
+  "application/x-executable",
+  "application/x-elf",
+  "application/x-sharedlib",
+  "application/x-appimage",
+  "application/pdf",
+]);
+
+export function isDownloadResponse(contentType, disposition) {
+  if (String(disposition || "").split(";")[0].trim().toLowerCase() === "attachment") return true;
+  const type = String(contentType || "").split(";")[0].trim().toLowerCase();
+  return DOWNLOAD_TYPES.has(type);
+}
+
+export function downloadPageHtml(linkUrl, finalUrl) {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(linkUrl).pathname.split("/").pop() || "");
+  } catch {}
+  if (!name) {
+    try { name = decodeURIComponent(new URL(finalUrl).pathname.split("/").pop() || ""); } catch {}
+  }
+  name = name || "this file";
+  return `<!doctype html><title>File download</title><body style="margin:0;padding:32px;background:#0b0b0d;color:#f4f4f5;font:15px/1.5 system-ui,sans-serif"><p>${escapeText(name)} is a file, not a page.</p><p><a style="color:#fdb913" href="${escapeAttr(linkUrl)}" target="_blank" rel="noopener noreferrer" download>Download it in a new window</a></p></body>`;
+}
+
 async function fetchPage(start, options = {}, runtime) {
   let current = start;
   let verb = String(options.method || "GET").toUpperCase() === "POST" ? "POST" : "GET";
@@ -843,6 +892,13 @@ async function fetchPage(start, options = {}, runtime) {
     }
     const type = (response.headers.get("content-type") || "").toLowerCase();
     const finalUrl = response.url || current.href;
+    if (isDownloadResponse(type, response.headers.get("content-disposition"))) {
+      // A file (APK, archive, attachment). Never read it as text; that drew
+      // its raw bytes in the tab. Offer the original link instead.
+      try { await response.body?.cancel(); } catch {}
+      const html = downloadPageHtml(start.href, finalUrl);
+      return publish(runtime, current.href, html, "File download", "text/html");
+    }
     if (type.startsWith("image/")) {
       const shown = new URL(finalUrl);
       const html = `<!doctype html><title>${escapeAttr(finalUrl)}</title><body style="margin:0;background:#111"><img alt="" src="${escapeAttr(shown.pathname + shown.search)}" style="max-width:100%"></body>`;

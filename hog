@@ -69,6 +69,88 @@ def download_name(suggested):
     return name[:255]
 
 
+# Page responses with these types are files to save, never pages to draw.
+# GitHub release assets (APK, .deb, zip) come back as one of these after the
+# redirect to objects.githubusercontent.com / release-assets.githubusercontent.com.
+DOWNLOAD_MIME_TYPES = frozenset({
+    "application/octet-stream",
+    "application/vnd.android.package-archive",
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/gzip",
+    "application/x-gzip",
+    "application/x-tar",
+    "application/x-gtar",
+    "application/x-xz",
+    "application/x-bzip2",
+    "application/zstd",
+    "application/x-7z-compressed",
+    "application/x-rar-compressed",
+    "application/vnd.rar",
+    "application/x-debian-package",
+    "application/vnd.debian.binary-package",
+    "application/x-rpm",
+    "application/x-msdownload",
+    "application/x-msi",
+    "application/x-ms-installer",
+    "application/x-apple-diskimage",
+    "application/x-iso9660-image",
+    "application/java-archive",
+    "application/x-executable",
+    "application/x-elf",
+    "application/x-sharedlib",
+    "application/x-appimage",
+})
+
+
+def disposition_is_attachment(value):
+    """Content-Disposition: attachment (any case, any parameters)."""
+    head = str(value or "").split(";", 1)[0].strip().lower()
+    return head == "attachment"
+
+
+def response_wants_download(mime, disposition="", can_show=True):
+    """Whether a main-frame page response should be saved instead of shown."""
+    if disposition_is_attachment(disposition):
+        return True
+    kind = str(mime or "").split(";", 1)[0].strip().lower()
+    if not kind:
+        return False
+    if kind in DOWNLOAD_MIME_TYPES:
+        return True
+    return not can_show
+
+
+def page_download_name(suggested, uri=""):
+    """A safe file name for a page download: no folders, not hidden."""
+    raw = str(suggested or "").strip()
+    if not raw:
+        try:
+            raw = urllib.parse.unquote(urllib.parse.urlsplit(str(uri or "")).path.rsplit("/", 1)[-1])
+        except ValueError:
+            raw = ""
+    name = download_name(raw).lstrip(". ").strip()
+    return name or "download"
+
+
+def unique_download_path(folder, name, taken=()):
+    """folder/name, or folder/name (1).ext and so on. Never an existing file."""
+    folder = str(folder)
+    base, ext = os.path.splitext(name)
+    # Keep .tar.gz style double extensions together.
+    if base.lower().endswith(".tar"):
+        base, ext = base[:-4], base[-4:] + ext
+    if not base:
+        base, ext = name, ""
+    taken = set(taken)
+    for index in range(0, 10000):
+        candidate = name if index == 0 else f"{base} ({index}){ext}"
+        path = os.path.join(folder, candidate)
+        if path not in taken and not os.path.lexists(path):
+            return path
+    raise FileExistsError("No free download name")
+
+
 def sandbox_available():
     context = WebKit2.WebContext()
     try:
@@ -584,6 +666,176 @@ EDGE_GRIP_SCRIPT = r"""
 """
 
 
+def downloads_folder():
+    override = os.environ.get("HOG_DOWNLOADS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    folder = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+    return Path(folder) if folder else Path.home() / "Downloads"
+
+
+class PageDownloads:
+    """Files from page tabs go straight to ~/Downloads under a name that never
+    replaces an existing file. The chrome shows progress, then Show in folder."""
+
+    def __init__(self, tell_chrome):
+        self.tell_chrome = tell_chrome
+        self.items = {}
+        self.paths = {}
+        self.next_id = 1
+
+    def emit(self, item_id, state, **extra):
+        item = self.items.get(item_id)
+        if item is None:
+            return
+        payload = {"id": item_id, "state": state, "name": item.get("name") or "download"}
+        payload.update(extra)
+        self.tell_chrome(f"window.__hogDownload && window.__hogDownload({json.dumps(payload)})")
+
+    def on_started(self, _context, download):
+        item_id = str(self.next_id)
+        self.next_id += 1
+        try:
+            request = download.get_request()
+            uri = request.get_uri() if request is not None else ""
+        except Exception:
+            uri = ""
+        self.items[item_id] = {"download": download, "name": "", "path": "", "uri": uri, "shown": -1.0, "done": False}
+        download.connect("decide-destination", self.on_destination, item_id)
+        download.connect("notify::estimated-progress", self.on_progress, item_id)
+        download.connect("failed", self.on_failed, item_id)
+        download.connect("finished", self.on_finished, item_id)
+
+    def on_destination(self, download, suggested, item_id):
+        item = self.items.get(item_id)
+        if item is None:
+            download.cancel()
+            return True
+        name = page_download_name(suggested, item.get("uri"))
+        folder = downloads_folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path = unique_download_path(folder, name, self.paths.values())
+        except Exception:
+            item["name"] = name
+            self.emit(item_id, "failed", error="Hog could not use your Downloads folder.")
+            item["done"] = True
+            download.cancel()
+            return True
+        item["name"] = os.path.basename(path)
+        item["path"] = path
+        self.paths[item_id] = path
+        download.set_allow_overwrite(False)
+        download.set_destination(GLib.filename_to_uri(path, None))
+        self.emit(item_id, "started", progress=0)
+        return True
+
+    def on_progress(self, download, _pspec, item_id):
+        item = self.items.get(item_id)
+        if item is None or item["done"] or not item["path"]:
+            return
+        try:
+            progress = float(download.get_estimated_progress())
+        except Exception:
+            return
+        if progress < 1.0 and progress - item["shown"] < 0.02:
+            return
+        item["shown"] = progress
+        try:
+            received = int(download.get_received_data_length())
+        except Exception:
+            received = 0
+        self.emit(item_id, "progress", progress=round(progress, 3), received=received)
+
+    def on_failed(self, _download, error, item_id):
+        item = self.items.get(item_id)
+        if item is None or item["done"]:
+            return
+        item["done"] = True
+        self.paths.pop(item_id, None)
+        cancelled = False
+        try:
+            cancelled = error.matches(WebKit2.download_error_quark(), WebKit2.DownloadError.CANCELLED_BY_USER)
+        except Exception:
+            cancelled = False
+        if cancelled:
+            self.emit(item_id, "cancelled")
+        else:
+            message = getattr(error, "message", "") or "The download failed."
+            self.emit(item_id, "failed", error=message[:200])
+
+    def on_finished(self, download, item_id):
+        item = self.items.get(item_id)
+        if item is None or item["done"]:
+            return
+        item["done"] = True
+        self.paths.pop(item_id, None)
+        try:
+            dest = download.get_destination() or ""
+            path = GLib.filename_from_uri(dest)[0] if dest else item["path"]
+        except Exception:
+            path = item["path"]
+        item["path"] = path
+        item["name"] = os.path.basename(path) or item["name"]
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        self.emit(item_id, "done", progress=1, received=size)
+
+    def command(self, command):
+        parts = command.split(":")
+        if len(parts) != 3 or not parts[2].isdigit():
+            return
+        item = self.items.get(parts[2])
+        if item is None:
+            return
+        if parts[1] == "cancel" and not item["done"]:
+            try:
+                item["download"].cancel()
+            except Exception:
+                pass
+        elif parts[1] == "show" and item["done"] and item["path"]:
+            show_in_folder(item["path"])
+
+
+def show_in_folder(path):
+    """Open the file manager on the saved file. The file itself never runs."""
+    if not os.path.exists(path):
+        return
+    uri = GLib.filename_to_uri(path, None)
+    folder_uri = GLib.filename_to_uri(os.path.dirname(path), None)
+
+    def fallback():
+        try:
+            Gio.AppInfo.launch_default_for_uri(folder_uri, None)
+        except Exception:
+            pass
+
+    def done(connection, result):
+        try:
+            connection.call_finish(result)
+        except Exception:
+            fallback()
+
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call(
+            "org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+            "ShowItems",
+            GLib.Variant("(ass)", ([uri], "")),
+            None,
+            Gio.DBusCallFlags.NONE,
+            5000,
+            None,
+            done,
+        )
+    except Exception:
+        fallback()
+
+
 class PageHost:
     """Real WebKit pages over the content area. The wallet stays on the chrome view."""
 
@@ -602,6 +854,7 @@ class PageHost:
         self.grip_paint = None
         self.menu_paint = None
         self.on_grip_move = None
+        self.downloads = PageDownloads(self.tell_chrome)
 
     def widget(self):
         return self.box
@@ -833,6 +1086,7 @@ class PageHost:
         )
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
         harden_page_context(context, manager)
+        self.watch_downloads(context)
         self.shared_context = context
         return context
 
@@ -915,6 +1169,7 @@ class PageHost:
             manager = WebKit2.WebsiteDataManager.new_ephemeral()
             context = WebKit2.WebContext.new_with_website_data_manager(manager)
             harden_page_context(context, manager)
+            self.watch_downloads(context)
         else:
             context = self.shared()
         view = WebKit2.WebView.new_with_context(context)
@@ -938,7 +1193,10 @@ class PageHost:
 
     def on_decide(self, view, decision, decision_type, tab_id):
         if decision_type == WebKit2.PolicyDecisionType.RESPONSE:
-            decision.use()
+            if self.response_is_download(view, decision):
+                decision.download()
+            else:
+                decision.use()
             return True
         try:
             action = decision.get_navigation_action()
@@ -963,6 +1221,46 @@ class PageHost:
         # Drop those quietly. A page-sized error hides the site the person is reading.
         decision.ignore()
         return True
+
+    def response_is_download(self, view, decision):
+        """Files (APKs, archives, attachments) save to Downloads instead of
+        drawing their bytes in the tab. Only the tab's own page, not frames."""
+        try:
+            if not decision.is_main_frame_main_resource():
+                return False
+        except Exception:
+            pass
+        try:
+            response = decision.get_response()
+        except Exception:
+            return False
+        if response is None:
+            return False
+        try:
+            mime = response.get_mime_type() or ""
+        except Exception:
+            mime = ""
+        disposition = ""
+        try:
+            headers = response.get_http_headers()
+            if headers is not None:
+                disposition = headers.get_one("Content-Disposition") or ""
+        except Exception:
+            disposition = ""
+        kind = mime.split(";", 1)[0].strip().lower()
+        try:
+            can_show = bool(view.can_show_mime_type(kind)) if kind else True
+        except Exception:
+            can_show = True
+        return response_wants_download(kind, disposition, can_show)
+
+    def watch_downloads(self, context):
+        if self.downloads is None:
+            return
+        try:
+            context.connect("download-started", self.downloads.on_started)
+        except Exception:
+            pass
 
     def on_load(self, view, event, tab_id):
         if event == WebKit2.LoadEvent.STARTED:
@@ -1065,6 +1363,10 @@ class PageHost:
         view.destroy()
 
     def command(self, command):
+        if command.startswith("download:"):
+            if self.downloads is not None:
+                self.downloads.command(command)
+            return True
         if command.startswith("view:"):
             parts = command.split(":")
             if len(parts) < 6:

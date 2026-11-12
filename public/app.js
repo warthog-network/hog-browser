@@ -1264,6 +1264,89 @@ window.__hogFilesSaved = (name) => {
   if (typeof name === "string" && name) showToast(`Saved ${name}.`);
 };
 
+// Page downloads. Hog saves them to ~/Downloads and reports here.
+const DOWNLOAD_STATES = new Set(["started", "progress", "done", "failed", "cancelled"]);
+const downloadToasts = new Map();
+
+function downloadSizeText(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function downloadText(payload) {
+  const name = String(payload.name || "download").slice(0, 120);
+  const size = downloadSizeText(payload.received);
+  if (payload.state === "done") return `Saved ${name} to Downloads${size ? ` (${size})` : ""}.`;
+  if (payload.state === "failed") return `${name} did not download. ${String(payload.error || "").slice(0, 160)}`.trim();
+  if (payload.state === "cancelled") return `Stopped downloading ${name}.`;
+  const pct = Math.max(0, Math.min(100, Math.round((Number(payload.progress) || 0) * 100)));
+  return `Downloading ${name}… ${pct}%${size ? ` · ${size}` : ""}`;
+}
+
+window.__hogDownload = (payload) => {
+  if (!payload || typeof payload !== "object") return;
+  const id = String(payload.id || "");
+  if (!/^\d{1,9}$/.test(id) || !DOWNLOAD_STATES.has(payload.state)) return;
+  const host = $("hog-toasts");
+  if (!host) return;
+  let entry = downloadToasts.get(id);
+  if (!entry) {
+    const item = document.createElement("div");
+    item.className = "hog-toast hog-download is-ok";
+    item.setAttribute("role", "status");
+    const text = document.createElement("div");
+    text.className = "hog-download-text";
+    const bar = document.createElement("div");
+    bar.className = "hog-download-bar";
+    const fill = document.createElement("div");
+    fill.className = "hog-download-fill";
+    bar.append(fill);
+    const actions = document.createElement("div");
+    actions.className = "hog-download-actions";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "hog-download-button";
+    actions.append(button);
+    item.append(text, bar, actions);
+    host.append(item);
+    entry = { item, text, bar, fill, button, timer: 0 };
+    button.addEventListener("click", () => {
+      const action = button.dataset.action;
+      if (action === "show" || action === "cancel") desktopCommand(`download:${action}:${id}`);
+      if (action === "cancel") button.disabled = true;
+    });
+    downloadToasts.set(id, entry);
+  }
+  entry.text.textContent = downloadText(payload);
+  const finished = payload.state === "done" || payload.state === "failed" || payload.state === "cancelled";
+  entry.item.classList.toggle("is-error", payload.state === "failed");
+  entry.item.classList.toggle("is-ok", payload.state !== "failed");
+  entry.bar.hidden = finished;
+  entry.fill.style.width = `${Math.max(2, Math.min(100, (Number(payload.progress) || 0) * 100))}%`;
+  if (payload.state === "done") {
+    entry.button.textContent = "Show in folder";
+    entry.button.dataset.action = "show";
+    entry.button.disabled = false;
+    entry.button.hidden = false;
+  } else if (finished) {
+    entry.button.hidden = true;
+  } else {
+    entry.button.textContent = "Cancel";
+    entry.button.dataset.action = "cancel";
+    entry.button.hidden = false;
+  }
+  if (finished && !entry.timer) {
+    entry.timer = setTimeout(() => {
+      entry.item.classList.add("is-out");
+      setTimeout(() => { entry.item.remove(); downloadToasts.delete(id); }, 600);
+    }, payload.state === "done" ? 12000 : 6000);
+  }
+};
+
 function bindFilesSettings() {
   const form = $("files-root-form");
   if (!form) return;
