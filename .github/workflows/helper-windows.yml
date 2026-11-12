@@ -1,0 +1,48 @@
+name: Mining helper (Windows .exe)
+
+on:
+  push:
+    branches: ["helper-windows"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (project only)
+        run: npm ci
+
+      - name: Helper tests on Windows
+        run: node --test test/helper.test.mjs test/mining.test.mjs test/stratum.test.mjs test/tailnet.test.mjs
+
+      - name: Build Warthog-Mining-Helper.exe (Node SEA)
+        env:
+          HELPER_BUILD_CACHE: ${{ runner.temp }}\helper-build
+        run: node helper/build-sea.mjs
+
+      - name: Smoke test the .exe
+        run: node helper/smoke-exe.mjs dist/Warthog-Mining-Helper.exe
+
+      - name: Size
+        shell: bash
+        run: ls -la dist/Warthog-Mining-Helper.exe && cat dist/Warthog-Mining-Helper.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Warthog-Mining-Helper-windows-x64
+          path: |
+            dist/Warthog-Mining-Helper.exe
+            dist/Warthog-Mining-Helper.exe.sha256
+            helper/README.md
+          if-no-files-found: error

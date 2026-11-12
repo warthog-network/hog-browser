@@ -29,14 +29,20 @@ separate from browser-node.netlify.app: the first start syncs from scratch
 
 ## Use
 
-1. Start the helper: `./warthog-mining-helper.sh` (Linux/macOS) or
-   double-click `Warthog-Mining-Helper.cmd` (Windows). Needs Node.js 18+.
-   It opens the control page.
+1. Start the helper: `./warthog-mining-helper.sh` (Linux/macOS), or on
+   Windows double-click `Warthog-Mining-Helper.exe` (Node is inside; no
+   install). Windows may show a SmartScreen "unknown publisher" prompt: the
+   .exe is not code-signed (More info -> Run anyway). A console window stays
+   open while it runs; closing it (or **Quit helper**) stops the helper.
+   It opens the control page. Windows settings live in
+   `%APPDATA%\warthog-mining-helper\`, the unpacked node builds in
+   `%LOCALAPPDATA%\warthog-mining-helper\runtime\`.
 2. Click **Open DeFi testnet node** (or mainnet) and press **Start node** in
    that tab. Keep the tab open; wait until it is synced.
 3. In the control page: paste your address, pick the network, **Save**, **Turn on**.
 4. Run the command it shows from your BzMiner v24.0.1 folder, e.g.
    `./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w <address> -r brave-defi`
+   (on Windows: `bzminer.exe -a warthog -p stratum+tcp://127.0.0.1:3456 -w <address> -r brave-defi`)
    Don't use `--nvidia` alone: Warthog (Janushash) needs the CPU half too.
 
 ### Rigs on your tailnet (opt-in)
@@ -76,6 +82,11 @@ To add it to the app menu, use AppImageLauncher or Gear Lever, or copy the
 `node helper/build.mjs` writes `dist/warthog-mining-helper/` (one bundled
 `.mjs`, the two node builds, launchers). Tests: `node --test test/helper.test.mjs`.
 
-A Windows single `.exe` can be made with Node's single executable application
-support (`node --experimental-sea-config` + `postject`, or `node --build-sea`
-on Node 25+) from the bundled file; the node builds stay beside it.
+Windows `.exe`: `node helper/build-sea.mjs` on Windows writes
+`dist/Warthog-Mining-Helper.exe`, a Node single executable application. It
+bundles the helper into one CommonJS file (`helper/sea-entry.cjs`), embeds it
+and both patched node builds as SEA assets, and injects that into a copy of
+the official `node.exe` (nodejs.org zip, checked against SHASUMS256.txt) with
+postject run from a cache folder. CI builds it on `windows-latest`
+(`.github/workflows/helper-windows.yml`) and runs `helper/smoke-exe.mjs`
+against it (control page, embedded node builds, stratum port, quit).

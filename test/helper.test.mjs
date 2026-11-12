@@ -60,8 +60,8 @@ test("node files map to the patched builds per network", () => {
   const dirs = findNodeDirs();
   assert.ok(dirs.defi.endsWith("node-defi"));
   assert.ok(dirs.mainnet.endsWith("node-mainnet"));
-  assert.ok(localNodeFile("/node/defi/wart-node.wasm", dirs).endsWith("node-defi/wart-node.wasm"));
-  assert.ok(localNodeFile("/node/wart-node.js", dirs).endsWith("node-mainnet/wart-node.js"));
+  assert.ok(localNodeFile("/node/defi/wart-node.wasm", dirs).endsWith(join("node-defi", "wart-node.wasm")));
+  assert.ok(localNodeFile("/node/wart-node.js", dirs).endsWith(join("node-mainnet", "wart-node.js")));
   assert.equal(localNodeFile("/node/defi/other.js", dirs), "");
   assert.equal(localNodeFile("/node/../../etc/passwd", dirs), "");
 });
@@ -134,7 +134,7 @@ test("relay and peer sockets need the node page origin; relay needs the token", 
 });
 
 test("control API: token and origin locked; turning on starts stratum on 127.0.0.1", async () => {
-  const { helper, controlPort, stratumPort } = await startHelper();
+  const { helper, controlPort, stratumPort } = await startHelper({ os: "linux" });
   const base = `http://127.0.0.1:${controlPort}`;
   const headers = { "x-helper-token": helper.controlToken, "content-type": "application/json" };
   try {
@@ -208,6 +208,19 @@ test("quit is token-locked and calls onQuit", async () => {
     assert.equal(ok.status, 200);
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(quit, 1);
+  } finally {
+    await helper.close();
+  }
+});
+
+test("on Windows the local miner command is bzminer.exe", async () => {
+  const { helper, controlPort, stratumPort } = await startHelper({ os: "win32" });
+  const base = `http://127.0.0.1:${controlPort}`;
+  const headers = { "x-helper-token": helper.controlToken, "content-type": "application/json" };
+  try {
+    const s = await (await fetch(`${base}/api/settings`, { method: "POST", headers, body: JSON.stringify({ address: ADDRESS, network: "mainnet" }) })).json();
+    assert.equal(s.os, "win32");
+    assert.equal(s.command, `bzminer.exe -a warthog -p stratum+tcp://127.0.0.1:${stratumPort} -w ${ADDRESS} -r brave-mainnet`);
   } finally {
     await helper.close();
   }

@@ -97,6 +97,11 @@ export function bzminerCommand(port = 3456, wallet = "<48-hex-wallet>", worker =
   return `./bzminer -a warthog -p stratum+tcp://127.0.0.1:${port} -w ${wallet} -r ${worker}`;
 }
 
+/** The same command as typed on Windows (bzminer.exe in cmd or PowerShell). */
+export function bzminerForOs(command, os = process.platform) {
+  return os === "win32" ? String(command).replace(/^\.\/bzminer\b/, "bzminer.exe") : String(command);
+}
+
 function sameToken(a, b) {
   const x = Buffer.from(String(a || ""));
   const y = Buffer.from(String(b || ""));

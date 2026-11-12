@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { WebSocketServer, WebSocket } from "ws";
-import { MINING_NETWORKS, bzminerCommand, createMiningRelay, pageRelayScript, resolveMiningNetwork } from "../mining.mjs";
+import { MINING_NETWORKS, bzminerCommand, bzminerForOs, createMiningRelay, pageRelayScript, resolveMiningNetwork } from "../mining.mjs";
 import { createStratumBridge, isWarthogAddress } from "../stratum.mjs";
 import { controlPage } from "./control-page.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "../tailnet.mjs";
@@ -319,7 +319,9 @@ export function createHelper(opts = {}) {
       pageUrls: { defi: `${pageOrigin}/?network=defi`, mainnet: `${pageOrigin}/?network=mainnet` },
       nodeBuilds: { defi: Boolean(nodeDirs.defi), mainnet: Boolean(nodeDirs.mainnet) },
       configuredStratumPort: stratumPort,
-      command: bzminerCommand(sport, state.address || undefined, net ? `brave-${net.key}` : "rig1"),
+      // BzMiner on this computer: bzminer.exe when the helper runs on Windows.
+      command: bzminerForOs(bzminerCommand(sport, state.address || undefined, net ? `brave-${net.key}` : "rig1"), opts.os ?? platform()),
+      os: opts.os ?? platform(),
       ...tailnetInfo(sport, net),
       error,
     };
@@ -338,7 +340,7 @@ export function createHelper(opts = {}) {
       remoteRigName: rig,
       remoteCommand: host ? cmd(host) : "",
       remoteCommandIp: ipv4 && dnsName ? cmd(ipv4) : "",
-      remoteCommandWindows: host ? cmd(host).replace(/^\.\/bzminer/, "bzminer.exe") : "",
+      remoteCommandWindows: host ? bzminerForOs(cmd(host), "win32") : "",
     };
   }
 
