@@ -570,6 +570,7 @@ class SettingsUiTest(unittest.TestCase):
         self.assertIn("postMining({ network: radio.value })", app)
         deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
         self.assertIn('"${HB}/stratum.mjs"', deb)
+        self.assertIn('"${HB}/tailnet.mjs"', deb)
         self.assertIn('cp -a "${HB}/node-defi" "${APP}/"', deb)
         self.assertIn('cp -a "${HB}/node-mainnet" "${APP}/"', deb)
 
