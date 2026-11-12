@@ -6898,13 +6898,19 @@ bootFlash();
 window.__hogReady = true;
 
 
-// ---------- Solo mining (BzMiner -> 127.0.0.1:3100 -> node tab) ----------
+// ---------- Solo mining (BzMiner -> stratum 127.0.0.1:3456 -> node tab) ----------
+const MINING_ADDRESS_RE = /^[0-9a-fA-F]{48}$/;
+let miningAddressDirty = false;
+
+function setText(id, text) {
+  const el = $(id);
+  if (el) el.textContent = text;
+}
+
 function paintMining(state) {
   const button = $("mining-toggle");
   const status = $("mining-status");
   const error = $("mining-error");
-  const command = $("mining-command");
-  const source = $("mining-source");
   if (!button || !status || !error || !state) return;
   delete button.dataset.busy;
   button.disabled = false;
@@ -6912,19 +6918,45 @@ function paintMining(state) {
   button.classList.toggle("is-on", on);
   button.setAttribute("aria-pressed", on ? "true" : "false");
   button.textContent = on ? "Turn off" : "Turn on";
-  if (command && state.command) command.textContent = state.command;
-  if (source) source.textContent = state.defiNodeSource ? `DeFi node files: ${state.defiNodeSource}` : "";
+  if (state.command) setText("mining-command", state.command);
+  setText("mining-source", state.defiNodeSource ? `DeFi node build: ${state.defiNodeSource}` : "");
+  const input = $("mining-address");
+  if (input && !miningAddressDirty && document.activeElement !== input) input.value = state.address || "";
+  if (!miningAddressDirty) {
+    setText("mining-address-note", state.address ? "Saved. BzMiner's command below uses it." : "Paste the address you want block rewards paid to.");
+  }
+  const tab = !state.pageConnected
+    ? "Not open"
+    : state.pageNetwork && state.pageNetwork !== "defi"
+      ? `On ${state.pageNetwork}`
+      : state.synced ? "Synced" : state.pageNetwork === "defi" ? "Running" : "Open, not started";
+  setText("mining-stat-node", tab);
+  setText("mining-stat-height", state.height ? Number(state.height).toLocaleString() : "—");
+  setText("mining-stat-miners", String(state.miners || 0));
+  setText("mining-stat-blocks", String(state.blocks || 0));
+  setText("mining-stat-rejected", String(state.rejected || 0));
+  setText("mining-last", state.lastResult || "");
   if (!on) {
     status.textContent = "Off. Turn this on to let BzMiner connect.";
-  } else if (!state.listening) {
-    status.textContent = "On, but the port could not open.";
+  } else if (!state.stratumListening) {
+    status.textContent = "On, but the stratum port could not open.";
   } else {
-    const page = state.pageConnected
-      ? (state.pageNetwork === "defi" ? "Node tab connected (DeFi testnet)." : state.pageNetwork ? `Node tab is on ${state.pageNetwork}; switch it to DeFi testnet.` : "Node tab connected; start the node.")
-      : "Open the node tab so Hog can reach it.";
-    status.textContent = `Listening on 127.0.0.1:${state.port}. ${page} Templates served: ${state.templates || 0}. Blocks submitted: ${state.submits || 0}.`;
+    const miners = state.miners ? `${state.miners} miner${state.miners === 1 ? "" : "s"} connected.` : "Waiting for BzMiner.";
+    status.textContent = `Stratum on 127.0.0.1:${state.stratumPort}. ${miners}`;
   }
   error.textContent = state.error || state.lastError || "";
+}
+
+async function postMining(body) {
+  const response = await fetch("/api/mining", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const state = await response.json();
+  if (!response.ok) throw new Error(state.error || `Hog returned ${response.status}`);
+  return state;
 }
 
 async function refreshMining() {
@@ -6932,8 +6964,27 @@ async function refreshMining() {
     const response = await fetch("/api/mining", { credentials: "same-origin" });
     paintMining(await response.json());
   } catch (err) {
-    const error = $("mining-error");
-    if (error) error.textContent = err instanceof Error ? err.message : String(err);
+    setText("mining-error", err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function saveMiningAddress() {
+  const input = $("mining-address");
+  if (!input) return;
+  const value = input.value.trim();
+  if (value && !MINING_ADDRESS_RE.test(value)) {
+    setText("mining-address-note", "A Warthog address is 48 hex characters (0-9, a-f).");
+    input.setAttribute("aria-invalid", "true");
+    return;
+  }
+  try {
+    const state = await postMining({ address: value });
+    input.removeAttribute("aria-invalid");
+    miningAddressDirty = false;
+    paintMining(state);
+  } catch (err) {
+    input.setAttribute("aria-invalid", "true");
+    setText("mining-address-note", err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -6946,23 +6997,51 @@ async function refreshMining() {
     button.disabled = true;
     const enabled = button.getAttribute("aria-pressed") !== "true";
     try {
-      const response = await fetch("/api/mining", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled }),
-      });
-      const state = await response.json();
-      if (!response.ok) throw new Error(state.error || `Hog returned ${response.status}`);
-      paintMining(state);
+      paintMining(await postMining({ enabled }));
     } catch (err) {
       delete button.dataset.busy;
       button.disabled = false;
-      $("mining-error").textContent = err instanceof Error ? err.message : String(err);
+      setText("mining-error", err instanceof Error ? err.message : String(err));
     }
   });
+  const input = $("mining-address");
+  if (input) {
+    input.addEventListener("input", () => {
+      miningAddressDirty = true;
+      const value = input.value.trim();
+      const shaped = !value || MINING_ADDRESS_RE.test(value);
+      input.toggleAttribute("aria-invalid", !shaped);
+      setText("mining-address-note", !value
+        ? "Paste the address you want block rewards paid to."
+        : shaped ? "Press Save to check it and use it." : `${value.length}/48 hex characters.`);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") saveMiningAddress();
+    });
+  }
+  const save = $("mining-address-save");
+  if (save) save.addEventListener("click", saveMiningAddress);
+  const copy = $("mining-command-copy");
+  if (copy) {
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText($("mining-command").textContent);
+        copy.textContent = "Copied";
+      } catch {
+        copy.textContent = "Copy failed";
+      }
+      setTimeout(() => { copy.textContent = "Copy"; }, 1500);
+    });
+  }
   const open = $("mining-open-node");
   if (open) open.addEventListener("click", () => openUrl("https://browser-node.netlify.app/?network=defi"));
+  const dash = $("mining-dashboard");
+  if (dash) {
+    dash.addEventListener("click", (event) => {
+      event.preventDefault();
+      openUrl("http://127.0.0.1:4014/");
+    });
+  }
   setInterval(() => {
     const pane = $("settings-mining");
     if (pane && !pane.hidden && !$("browser-settings").hidden) refreshMining();

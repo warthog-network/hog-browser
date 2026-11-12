@@ -80,7 +80,7 @@ test("mining helpers validate accounts, routes, and port", () => {
   assert.equal(miningPort(undefined), 3100);
   assert.equal(miningPort("3200"), 3200);
   assert.throws(() => miningPort("nope"));
-  assert.equal(bzminerCommand(3100), "./bzminer -a warthog -p http://127.0.0.1:3100 -w <48-hex-wallet> --worker rig1");
+  assert.equal(bzminerCommand(3100), "./bzminer -a warthog -p stratum+tcp://127.0.0.1:3100 -w <48-hex-wallet> --worker rig1");
   const script = pageRelayScript(TOKEN);
   assert.match(script, /virtual_post/);
   assert.match(script, new RegExp(TOKEN));
@@ -164,6 +164,10 @@ test("mining port refuses other routes, browsers, and foreign hosts", async () =
     assert.equal(fetchSite.status, 403);
     const rebind = await http(h.port, "GET", `/chain/mine/${ACCOUNT}`, { headers: { host: `evil.example:${h.port}` } });
     assert.equal(rebind.status, 403);
+    const bare = await http(h.port, "GET", "/debug/fakemine", { headers: { host: "127.0.0.1" } });
+    assert.equal(bare.status, 404, "a loopback Host without a port (BzMiner) gets past the host check");
+    const bareEvil = await http(h.port, "GET", "/debug/fakemine", { headers: { host: "evil.example" } });
+    assert.equal(bareEvil.status, 403);
   } finally {
     await h.close();
   }
@@ -198,13 +202,42 @@ test("mining listener binds loopback only", async () => {
 
 test("server routes local DeFi node files only for the node site", async () => {
   const { localDefiNodeFile } = await import("../server.mjs");
-  const node = "https://browser-node.netlify.app";
-  assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.wasm", "/x/defi"), "/x/defi/wart-node.wasm");
-  assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.js", "/x/defi"), "/x/defi/wart-node.js");
-  assert.equal(localDefiNodeFile(node, "/node/wart-node.wasm", "/x/defi"), "");
-  assert.equal(localDefiNodeFile(node, "/node/defi/../secret", "/x/defi"), "");
-  assert.equal(localDefiNodeFile("https://example.com", "/node/defi/wart-node.wasm", "/x/defi"), "");
-  assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.wasm", ""), "");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "hog-defi-"));
+  try {
+    writeFileSync(join(dir, "wart-node.wasm"), "x");
+    writeFileSync(join(dir, "wart-node.js"), "x");
+    const node = "https://browser-node.netlify.app";
+    assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.wasm", dir), join(dir, "wart-node.wasm"));
+    assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.js", dir), join(dir, "wart-node.js"));
+    // Files Hog does not have fall through to the live site.
+    assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.worker.js", dir), "");
+    assert.equal(localDefiNodeFile(node, "/node/wart-node.wasm", dir), "");
+    assert.equal(localDefiNodeFile(node, "/node/defi/../secret", dir), "");
+    assert.equal(localDefiNodeFile("https://example.com", "/node/defi/wart-node.wasm", dir), "");
+    assert.equal(localDefiNodeFile(node, "/node/defi/wart-node.wasm", ""), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Hog bundles the DeFi node build that accepts mined blocks", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { createHash } = await import("node:crypto");
+  const root = new URL("../node-defi/", import.meta.url);
+  const sums = readFileSync(new URL("SHA256SUMS", root), "utf8");
+  for (const name of ["wart-node.js", "wart-node.wasm"]) {
+    const body = readFileSync(new URL(name, root));
+    const hash = createHash("sha256").update(body).digest("hex");
+    assert.match(sums, new RegExp(`^${hash}  node-defi/${name.replace(".", "\\.")}$`, "m"));
+  }
+  const wasm = readFileSync(new URL("wart-node.wasm", root));
+  assert.ok(wasm.includes(Buffer.from("/chain/append")), "bundled wasm registers POST /chain/append");
+  assert.ok(wasm.includes(Buffer.from("/chain/mine/")), "bundled wasm serves mining templates");
+  const deb = readFileSync(new URL("../packaging/build-deb.sh", import.meta.url), "utf8");
+  assert.match(deb, /cp -a "\$\{HB\}\/node-defi" "\$\{APP\}\/"/);
 });
 
 test("node page HTML carries the relay script, other sites do not", async () => {

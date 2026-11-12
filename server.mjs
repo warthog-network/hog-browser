@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
@@ -9,6 +9,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { bzminerCommand, createMiningRelay, miningPort, pageRelayScript } from "./mining.mjs";
+import { createStratumBridge, isWarthogAddress, stratumPort } from "./stratum.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -44,14 +45,18 @@ const MINING = createMiningRelay({
   token: randomBytes(24).toString("hex"),
   pageOrigin: `http://${PAGE_HOST}:${NODE_PORT}`,
 });
+const STRATUM = createStratumBridge({ call: MINING.call });
 let miningError = "";
-// Optional local DeFi WASM triad (for example warthog-browser-node/public/node/defi
-// built with POST /chain/append). Unset = load the node files from the live site.
-const DEFI_NODE_DIR = process.env.HOG_DEFI_NODE_DIR || "";
-const DEFI_NODE_FILES = new Set(["wart-node.js", "wart-node.wasm", "wart-node.worker.mjs", "wart-node.worker.js"]);
+// DeFi WASM node files Hog serves itself instead of the live site's. The bundled
+// build (node-defi/, see its README) adds POST /chain/append so solved blocks from
+// a local miner reach the in-tab node. HOG_DEFI_NODE_DIR overrides it; set it to
+// an empty string to load the live site's files.
+const BUNDLED_DEFI_NODE_DIR = fileURLToPath(new URL("./node-defi/", import.meta.url));
+const DEFI_NODE_DIR = process.env.HOG_DEFI_NODE_DIR ?? (existsSync(join(BUNDLED_DEFI_NODE_DIR, "wart-node.wasm")) ? BUNDLED_DEFI_NODE_DIR : "");
+const DEFI_NODE_FILES = new Set(["wart-node.js", "wart-node.wasm"]);
 
 /**
- * Map /node/defi/<file> on the node site to a local file when HOG_DEFI_NODE_DIR is set.
+ * Map /node/defi/<file> on the node site to a local file, if Hog has one.
  * @param {string} origin
  * @param {string} pathname
  * @param {string} dir
@@ -60,26 +65,33 @@ export function localDefiNodeFile(origin, pathname, dir = DEFI_NODE_DIR) {
   if (!dir || origin !== NODE_ORIGIN) return "";
   const match = /^\/node\/defi\/([^/]+)$/.exec(String(pathname || ""));
   if (!match || !DEFI_NODE_FILES.has(match[1])) return "";
-  return join(dir, match[1]);
+  const file = join(dir, match[1]);
+  return existsSync(file) ? file : "";
 }
 
-function readMiningEnabled() {
+function readMiningState() {
   try {
-    return JSON.parse(readFileSync(MINING_STATE_FILE, "utf8"))?.enabled === true;
+    const saved = JSON.parse(readFileSync(MINING_STATE_FILE, "utf8"));
+    return {
+      enabled: saved?.enabled === true,
+      address: isWarthogAddress(saved?.address) ? String(saved.address).toLowerCase() : "",
+    };
   } catch {
-    return false;
+    return { enabled: false, address: "" };
   }
 }
 
-function saveMiningEnabled(enabled) {
+function saveMiningState(state) {
   mkdirSync(join(homedir(), ".local/share/hog-browser"), { recursive: true });
-  writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(enabled) })}\n`);
+  writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(state.enabled), address: state.address || "" })}\n`);
 }
 
 function miningStatus(enabled) {
   let port = 0;
+  let sport = 0;
   try {
     port = miningPort();
+    sport = stratumPort();
   } catch (error) {
     miningError = error instanceof Error ? error.message : String(error);
   }
@@ -88,9 +100,12 @@ function miningStatus(enabled) {
     ok: true,
     enabled: Boolean(enabled),
     ...status,
+    ...STRATUM.status(),
     configuredPort: port,
-    command: bzminerCommand(port || 3100),
-    defiNodeSource: DEFI_NODE_DIR ? `local: ${DEFI_NODE_DIR}` : `live site: ${NODE_ORIGIN}/node/defi/`,
+    configuredStratumPort: sport,
+    address: miningAddress,
+    command: bzminerCommand(sport || 3456, miningAddress || undefined),
+    defiNodeSource: DEFI_NODE_DIR ? (DEFI_NODE_DIR === BUNDLED_DEFI_NODE_DIR ? "bundled with Hog (accepts mined blocks)" : `local: ${DEFI_NODE_DIR}`) : `live site: ${NODE_ORIGIN}/node/defi/ (cannot accept mined blocks)`,
     error: miningError,
   };
 }
@@ -98,18 +113,29 @@ function miningStatus(enabled) {
 async function setMining(enabled) {
   miningError = "";
   if (!enabled) {
+    await STRATUM.stop();
     await MINING.stop();
     return;
+  }
+  const problems = [];
+  try {
+    await STRATUM.start(stratumPort());
+  } catch (error) {
+    problems.push(error?.code === "EADDRINUSE"
+      ? `Stratum port ${stratumPort()} is already in use (a local Warthog node with --stratum?). Set HOG_STRATUM_PORT to another port.`
+      : (error instanceof Error ? error.message : String(error)));
   }
   try {
     await MINING.start(miningPort());
   } catch (error) {
-    miningError = error?.code === "EADDRINUSE"
-      ? `Port ${miningPort()} is already in use (a local warthog node?). Set HOG_MINING_PORT to another port.`
-      : (error instanceof Error ? error.message : String(error));
+    problems.push(error?.code === "EADDRINUSE"
+      ? `HTTP port ${miningPort()} is already in use (a local Warthog node?). Set HOG_MINING_PORT to another port.`
+      : (error instanceof Error ? error.message : String(error)));
   }
+  miningError = problems.join(" ");
 }
 let miningEnabled = false;
+let miningAddress = "";
 
 const NETWORKS = {
   defi: "https://warthog-defitestnet.duckdns.org",
@@ -1358,10 +1384,20 @@ async function handle(req, res, runtime) {
     }
     if (url.pathname === "/api/mining" && req.method === "POST") {
       const payload = await readJson(req);
-      if (typeof payload.enabled !== "boolean") throw new Error("enabled must be true or false");
-      miningEnabled = payload.enabled;
-      if (runtime.persistSites) saveMiningEnabled(miningEnabled);
-      await setMining(miningEnabled);
+      if (payload.address !== undefined) {
+        const address = String(payload.address || "").trim().toLowerCase();
+        if (address && !isWarthogAddress(address)) {
+          send(res, 400, { ok: false, error: "That is not a Warthog address: it needs 48 hex characters with a valid checksum." });
+          return;
+        }
+        miningAddress = address;
+      }
+      if (payload.enabled !== undefined && typeof payload.enabled !== "boolean") throw new Error("enabled must be true or false");
+      if (typeof payload.enabled === "boolean" && payload.enabled !== miningEnabled) {
+        miningEnabled = payload.enabled;
+        await setMining(miningEnabled);
+      }
+      if (runtime.persistSites) saveMiningState({ enabled: miningEnabled, address: miningAddress });
       send(res, 200, miningStatus(miningEnabled));
       return;
     }
@@ -1464,6 +1500,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
   const closeMain = server.close.bind(server);
   server.close = (callback) => {
     for (const child of runtime.siteServers) child.close();
+    STRATUM.stop();
     MINING.stop();
     return closeMain(callback);
   };
@@ -1475,7 +1512,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const server = await startServer(PORT, { persistSites: true });
-  miningEnabled = readMiningEnabled();
+  ({ enabled: miningEnabled, address: miningAddress } = readMiningState());
   if (miningEnabled) await setMining(true);
   if (process.env.HOG_MINING === "1" && !miningEnabled) {
     miningEnabled = true;
@@ -1483,7 +1520,9 @@ if (isMain) {
   }
   if (miningEnabled) {
     const state = MINING.status();
+    const strat = STRATUM.status();
     console.log(state.listening ? `Hog solo mining relay on http://127.0.0.1:${state.port}` : `Hog solo mining relay is off: ${miningError}`);
+    if (strat.stratumListening) console.log(`Hog solo mining stratum on stratum+tcp://127.0.0.1:${strat.stratumPort}`);
   }
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : PORT;

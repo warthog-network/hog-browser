@@ -441,7 +441,7 @@
           <div id="settings-mining" hidden>
             <p class="eyebrow">Solo mining</p>
             <h1>Mine to your node tab</h1>
-            <p class="lede">Hog opens a local port that BzMiner can use like a Warthog node. Block templates come from the node running in Hog's node tab, and solved blocks go back into it. Only this computer can connect.</p>
+            <p class="lede">Hog runs a local stratum port that BzMiner mines to like a Warthog node. Work comes from the node in Hog's node tab, and solved blocks go back into it and out to the network. Only this computer can connect.</p>
             <section id="mining-card" class="connect-card" aria-label="Solo mining">
               <p class="eyebrow">DeFi testnet</p>
               <div class="engine-row default-browser-row">
@@ -452,9 +452,27 @@
                 </div>
                 <button type="button" id="mining-toggle" aria-pressed="false">Turn on</button>
               </div>
-              <p class="note">1. Open the node tab on DeFi testnet and press Start. <button type="button" id="mining-open-node" class="tiny">Open DeFi node tab</button></p>
-              <p class="note">2. Run BzMiner with your 48-character wallet address:</p>
-              <code id="mining-command" class="mono">./bzminer -a warthog -p http://127.0.0.1:3100 -w &lt;48-hex-wallet&gt; --worker rig1</code>
+              <dl id="mining-stats" class="mining-stats" aria-label="Mining status">
+                <div><dt>Node tab</dt><dd id="mining-stat-node">—</dd></div>
+                <div><dt>Height</dt><dd id="mining-stat-height">—</dd></div>
+                <div><dt>Miners</dt><dd id="mining-stat-miners">0</dd></div>
+                <div><dt>Blocks found</dt><dd id="mining-stat-blocks">0</dd></div>
+                <div><dt>Rejected</dt><dd id="mining-stat-rejected">0</dd></div>
+              </dl>
+              <p id="mining-last" class="note"></p>
+              <p class="note">1. Open the node tab on DeFi testnet and press Start node. Leave it open while you mine. <button type="button" id="mining-open-node" class="tiny">Open DeFi node tab</button></p>
+              <label class="mining-address-label" for="mining-address">2. Your Warthog address (blocks pay here)</label>
+              <div class="mining-address-row">
+                <input id="mining-address" class="mono" autocomplete="off" spellcheck="false" maxlength="48" placeholder="48 hex characters" aria-describedby="mining-address-note">
+                <button type="button" id="mining-address-save" class="tiny">Save</button>
+              </div>
+              <p id="mining-address-note" class="note" role="status"></p>
+              <p class="note">3. Run BzMiner (it uses the GPU and the CPU together; do not add <code>--nvidia</code> on its own):</p>
+              <div class="mining-address-row">
+                <code id="mining-command" class="mono">./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w &lt;48-hex-wallet&gt; --worker rig1</code>
+                <button type="button" id="mining-command-copy" class="tiny">Copy</button>
+              </div>
+              <p class="note">Hashrate shows in BzMiner's own dashboard: <a id="mining-dashboard" href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. Every block found here is a whole block reward on DeFi testnet.</p>
               <p id="mining-source" class="note"></p>
             </section>
           </div>

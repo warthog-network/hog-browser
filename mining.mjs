@@ -62,9 +62,9 @@ export function miningRoute(method, rawUrl) {
   return null;
 }
 
-/** BzMiner command shown in Settings. */
-export function bzminerCommand(port = DEFAULT_MINING_PORT, wallet = "<48-hex-wallet>") {
-  return `./bzminer -a warthog -p http://127.0.0.1:${port} -w ${wallet} --worker rig1`;
+/** BzMiner command shown in Settings: stratum to Hog's local stratum port. */
+export function bzminerCommand(port = 3456, wallet = "<48-hex-wallet>", worker = "rig1") {
+  return `./bzminer -a warthog -p stratum+tcp://127.0.0.1:${port} -w ${wallet} --worker ${worker}`;
 }
 
 function sameToken(a, b) {
@@ -73,9 +73,15 @@ function sameToken(a, b) {
   return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
 }
 
+// Loopback Host only (blocks DNS rebinding). Miners vary: BzMiner sends the
+// host without a port, some send none at all; browsers always send one.
 function hostOk(hostHeader, port) {
-  const raw = String(hostHeader || "").toLowerCase();
-  return raw === `127.0.0.1:${port}` || raw === `localhost:${port}`;
+  const raw = String(hostHeader ?? "").trim().toLowerCase();
+  if (!raw) return true;
+  for (const name of ["127.0.0.1", "localhost", "[::1]"]) {
+    if (raw === name || raw === `${name}:${port}`) return true;
+  }
+  return false;
 }
 
 function json(res, status, body) {
@@ -124,6 +130,10 @@ export function pageRelayScript(token) {
       if (msg.network && net && net !== msg.network) { reply({ ok: false, code: "wrong-network" }); return; }
       if (!mod || typeof mod.virtual_get !== "function" || typeof mod.virtual_post !== "function") { reply({ ok: false, code: "not-running" }); return; }
       if (msg.network && !net) { reply({ ok: false, code: "not-running" }); return; }
+      // The node glue's virtual_post calls VIRTUALSTATE.postId, which the glue never
+      // defines (virtual_get uses getId). Alias it so POST /chain/append can run.
+      var vs = mod.VIRTUALSTATE;
+      if (vs && typeof vs.postId !== "function" && typeof vs.getId === "function") vs.postId = vs.getId;
       var p;
       try {
         p = msg.method === "POST" ? mod.virtual_post(msg.path, String(msg.body || "")) : mod.virtual_get(msg.path);
@@ -228,10 +238,11 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
     }
     const id = ++seq;
     return new Promise((resolve) => {
+      // Appending a block makes the in-tab node verify and store it; give it longer.
       const timer = setTimeout(() => {
         pending.delete(id);
         resolve({ ok: false, code: "timeout" });
-      }, timeoutMs);
+      }, method === "POST" ? timeoutMs * 3 : timeoutMs);
       pending.set(id, { resolve, timer });
       page.send(JSON.stringify({ type: "rpc", id, method, path, body, network }));
     });

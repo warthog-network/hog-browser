@@ -551,6 +551,19 @@ class SelfUpdateUiTest(unittest.TestCase):
 
 
 class SettingsUiTest(unittest.TestCase):
+    def test_solo_mining_pane_has_address_stats_and_stratum_command(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        for el in ("mining-toggle", "mining-address", "mining-address-save", "mining-command",
+                   "mining-command-copy", "mining-stat-blocks", "mining-stat-height", "mining-open-node"):
+            self.assertIn(f'id="{el}"', html)
+        self.assertIn("stratum+tcp://127.0.0.1:3456", html)
+        self.assertIn("postMining({ address: value })", app)
+        deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        self.assertIn('"${HB}/stratum.mjs"', deb)
+        self.assertIn('cp -a "${HB}/node-defi" "${APP}/"', deb)
+
     def test_settings_nav_has_no_ai_page(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "public" / "index.html").read_text(encoding="utf-8")
@@ -559,12 +572,12 @@ class SettingsUiTest(unittest.TestCase):
         hog = (root / "hog").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
         self.assertIn('id="settings-nav"', html)
-        for page in ("general", "files", "containers", "networks", "tailscale"):
+        for page in ("general", "files", "containers", "networks", "tailscale", "mining"):
             self.assertIn(f'data-settings="{page}"', html)
             self.assertIn(f'id="settings-{page}"', html)
         self.assertNotIn('data-settings="ai"', html)
         self.assertNotIn('id="settings-ai"', html)
-        self.assertIn('const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale"];', app)
+        self.assertIn('const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale", "mining"];', app)
         # Old links to the AI page land on Containers instead of a blank pane.
         self.assertIn('return SETTINGS_SECTIONS.includes(page) ? page : "containers";', app)
         self.assertLess(html.find('id="hog-update-card"'), html.find('id="settings-files"'))

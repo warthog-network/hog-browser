@@ -91,12 +91,14 @@ cp -a \
   "${HB}/bookmark_files.py" \
   "${HB}/server.mjs" \
   "${HB}/mining.mjs" \
+  "${HB}/stratum.mjs" \
   "${HB}/opfs-polyfill.js" \
   "${HB}/package.json" \
   "${HB}/package-lock.json" \
   "${APP}/"
 
 cp -a "${HB}/public" "${APP}/"
+cp -a "${HB}/node-defi" "${APP}/"
 cp -a "${HB}/node_modules" "${APP}/"
 
 find "${APP}" -type d -name '__pycache__' -prune -exec rm -rf {} +
