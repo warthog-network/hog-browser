@@ -2820,9 +2820,22 @@ class Guard:
             for name in self.read_names()
         ]
 
+    def engine_containers_live(self):
+        """True when Docker Engine answers and some saved container lives there.
+
+        The default docker context can point at Docker Desktop while Desktop is
+        stopped. Engine containers keep running, so their status must still be
+        read from the Engine socket instead of showing every row as unknown.
+        """
+        uses_engine = self.gpu_enabled() or RUNTIME_ENGINE in self.read_runtimes().values()
+        if not uses_engine:
+            return False
+        return bool(self._native_engine_status().get("ok"))
+
     def engine_status(self):
         running = self.docker_running()
-        items = self.items() if running else self._offline_items()
+        live = running or self.engine_containers_live()
+        items = self.items() if live else self._offline_items()
         jellyfin_up = any(
             isinstance(item, dict) and item.get("name") == "jellyfin" and item.get("state") == "running" and not item.get("reason")
             for item in items
@@ -2835,7 +2848,7 @@ class Guard:
             isinstance(item, dict) and item.get("name") == "tailscale" and item.get("state") == "running" and not item.get("reason")
             for item in items
         )
-        if running and ts_up:
+        if live and ts_up:
             try:
                 ts_ip = self.tailscale_ipv4()
             except (RuntimeError, OSError):
@@ -2988,6 +3001,9 @@ class Guard:
     def snapshot(self, name):
         info, error = self.inspect(name)
         if info is None:
+            # A stopped Docker Desktop is not the same as a deleted container.
+            if error == "Docker is not running.":
+                return {"name": name, "state": "unknown", "image": "", "reason": "", "runtime": self.container_runtime(name)}
             return {"name": name, "state": "missing", "image": "", "reason": error}
         reason = assess(info, name, self.data)
         state = ""

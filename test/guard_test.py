@@ -234,6 +234,49 @@ class PolicyTest(unittest.TestCase):
             self.assertEqual(result["items"][0]["name"], "hog-ubuntu")
             self.assertEqual(result["items"][0]["reason"], "")
 
+    def test_list_reads_engine_containers_when_desktop_context_is_down(self):
+        # Default context = Docker Desktop (stopped), containers live on Engine.
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.write_names(["jellyfin", "tailscale"])
+            guard.save_runtime("jellyfin", "engine")
+            guard.save_runtime("tailscale", "engine")
+            guard.docker_running = lambda: False
+            guard._native_engine_status = lambda: {"ok": True, "installed": True, "running": True, "permission": True, "info": {}}
+            guard.items = lambda: [
+                {"name": "jellyfin", "state": "running", "image": "", "reason": "", "runtime": "engine"},
+                {"name": "tailscale", "state": "running", "image": "", "reason": "", "runtime": "engine"},
+            ]
+            guard.tailscale_ipv4 = lambda: ""
+            guard.tailscale_backend = lambda: {"state": "", "loginUrl": ""}
+            result = guard.handle("list")
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["docker"])
+            self.assertEqual([item["state"] for item in result["items"]], ["running", "running"])
+
+    def test_list_skips_engine_probe_without_engine_containers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.write_names(["hog-ubuntu"])
+            guard.docker_running = lambda: False
+
+            def probe():
+                raise AssertionError("engine probed")
+
+            guard._native_engine_status = probe
+            result = guard.handle("list")
+            self.assertEqual(result["items"][0]["state"], "unknown")
+
+    def test_snapshot_marks_offline_desktop_container_unknown(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.inspect = lambda name: (None, "Docker is not running.")
+            row = guard.snapshot("hog-ubuntu")
+            self.assertEqual(row["state"], "unknown")
+            self.assertEqual(row["reason"], "")
+            guard.inspect = lambda name: (None, "Error: No such object: hog-ubuntu")
+            self.assertEqual(guard.snapshot("hog-ubuntu")["state"], "missing")
+
     def test_create_starts_the_typed_image(self):
         with tempfile.TemporaryDirectory() as folder:
             guard = Guard(folder, docker="docker")
