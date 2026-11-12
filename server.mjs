@@ -39,6 +39,18 @@ const SITE_HEADERS = {
   "cross-origin-resource-policy": "cross-origin",
 };
 let siteCursor = SITE_PORT_MIN;
+// The hog window asks this on launch. A server left over from before an update
+// reports its old version, and the window replaces it instead of attaching.
+const SERVER_VERSION = (() => {
+  try {
+    return String(JSON.parse(readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf8")).version || "");
+  } catch {
+    return "";
+  }
+})();
+export function serverVersionInfo() {
+  return { app: "hog-browser", version: SERVER_VERSION, pid: process.pid };
+}
 
 // ---------- Solo mining (BzMiner -> 127.0.0.1:HOG_MINING_PORT -> node tab) ----------
 const MINING_STATE_FILE = join(homedir(), ".local/share/hog-browser/mining.json");
@@ -1473,6 +1485,10 @@ async function handle(req, res, runtime) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/__hog/version" && hostName(req) === WALLET_HOST) {
+      send(res, 200, serverVersionInfo());
+      return;
+    }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
     if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining") && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from guard import Guard, allowed_browser_open_url, allowed_tailscale_open_url
 from bookmark_files import bookmark_backup_path, read_bookmark_file, write_bookmark_backup, write_bookmark_file
+from server_guard import replace_stale_server
 
 import gi
 
@@ -70,6 +71,42 @@ def harden_page_context(context, manager=None):
         manager.set_itp_enabled(True)
     except Exception:
         pass
+
+
+# Ubuntu's WebKitGTK 2.52 has no accelerated backing store on NVIDIA, and a page
+# that starts a view transition (a YouTube watch page does) then makes the web
+# process enter compositing mode anyway. The UI process dereferences the missing
+# store and the whole Hog window segfaults (bugs.webkit.org 321683 / 323949,
+# Launchpad 2167164). With view transitions off, document.startViewTransition is
+# undefined and sites fall back to a plain update.
+CRASHY_FEATURES = ("ViewTransitions", "CrossDocumentViewTransitions")
+
+
+def disable_crashy_features(settings):
+    turned_off = []
+    try:
+        features = settings.get_all_features()
+    except Exception:
+        return turned_off
+    for index in range(features.get_length()):
+        feature = features.get(index)
+        if feature.get_identifier() in CRASHY_FEATURES:
+            try:
+                settings.set_feature_enabled(feature, False)
+                turned_off.append(feature.get_identifier())
+            except Exception:
+                pass
+    return turned_off
+
+
+def crash_message(reason):
+    """Text for a tab whose page process died. The rest of Hog keeps running."""
+    try:
+        if reason == WebKit2.WebProcessTerminationReason.EXCEEDED_MEMORY_LIMIT:
+            return "This page used too much memory and was stopped. Reload to try again."
+    except Exception:
+        pass
+    return "This page stopped working. Reload to try again."
 
 
 def port_open(port):
@@ -783,6 +820,7 @@ class PageHost:
         settings.set_enable_webgl(True)
         settings.set_enable_media(True)
         settings.set_javascript_can_access_clipboard(False)
+        disable_crashy_features(settings)
         try:
             settings.set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.ALWAYS)
         except Exception:
@@ -866,6 +904,7 @@ class PageHost:
         except Exception:
             pass
         view.connect("notify::title", self.on_title, tab_id)
+        view.connect("web-process-terminated", self.on_crash, tab_id)
         self.box.add_named(view, tab_id)
         view.show()
         if self.on_view is not None:
@@ -933,6 +972,19 @@ class PageHost:
             loading=False,
         )
         return False
+
+    def on_crash(self, view, reason, tab_id):
+        # Only this tab's page process died. Tell the tab; never close Hog.
+        try:
+            uri = view.get_uri() or ""
+        except Exception:
+            uri = ""
+        print(f"Hog: the page process for tab {tab_id} stopped ({reason}).", file=sys.stderr, flush=True)
+        try:
+            self.emit_state(tab_id, "fail", url=uri, error=crash_message(reason), loading=False)
+        except Exception:
+            pass
+        return True
 
     def on_title(self, view, _pspec, tab_id):
         if view.get_title():
@@ -2229,7 +2281,13 @@ class Hog(Gtk.Application):
         return True
 
     def ensure_server(self):
-        if port_open(PORT):
+        state = replace_stale_server(
+            PORT,
+            ROOT,
+            port_open=port_open,
+            log=lambda text: print(text, file=sys.stderr, flush=True),
+        )
+        if state in ("current", "foreign") and port_open(PORT):
             return
         bundle = ROOT / "public" / "wallet-bundle.js"
         if not bundle.is_file():
@@ -2305,6 +2363,7 @@ class Hog(Gtk.Application):
         settings.set_enable_media(True)
         settings.set_media_playback_requires_user_gesture(False)
         settings.set_media_playback_allows_inline(True)
+        disable_crashy_features(settings)
         # The node page refuses to start until the file system API exists.
         # This GTK build still has no working sync file handle; the page stores
         # the chain through Hog's disk endpoint instead.
@@ -2364,6 +2423,15 @@ class Hog(Gtk.Application):
                 self.start_update_check()
 
         view.connect("load-changed", on_load)
+
+        def on_chrome_crash(web_view, reason):
+            # Hog's own UI page died: load it again instead of leaving a blank window.
+            print(f"Hog: the Hog UI page process stopped ({reason}); reloading it.", file=sys.stderr, flush=True)
+            self.chrome_ready = False
+            GLib.timeout_add(500, lambda: (web_view.load_uri(URL), False)[1])
+            return True
+
+        view.connect("web-process-terminated", on_chrome_crash)
         window.add(overlay)
         self.tabs_spot.prepare()
         self.wallet_spot.prepare()

@@ -89,6 +89,7 @@ cp -a \
   "${HB}/shell.py" \
   "${HB}/share_page.py" \
   "${HB}/bookmark_files.py" \
+  "${HB}/server_guard.py" \
   "${HB}/server.mjs" \
   "${HB}/mining.mjs" \
   "${HB}/stratum.mjs" \
