@@ -8,8 +8,11 @@
 // solved block. The share difficulty is the network difficulty, so every
 // accepted share is a block.
 //
-// Binds 127.0.0.1 only; it is started and stopped with the mining relay.
+// Binds 127.0.0.1. With "Allow rigs on my tailnet" it also binds this
+// computer's Tailscale addresses (never 0.0.0.0), and only accepts peers from
+// loopback or the tailnet ranges. It is started and stopped with the mining relay.
 import { createServer } from "node:net";
+import { stratumPeerAllowed, tailnetAddresses, normalizeIp, isLoopback } from "./tailnet.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { MINING_NETWORKS } from "./mining.mjs";
 
@@ -118,14 +121,38 @@ export function solvedBlock(job, extra2prefix, extranonce2, ntime, nonce) {
  *   pollMs?: number,
  * }} options
  */
-export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.defi, host = "127.0.0.1", pollMs = POLL_MS }) {
+export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.defi, host = "127.0.0.1", pollMs = POLL_MS, findTailnet = tailnetAddresses }) {
   let server = null;
   let listenPort = 0;
+  let allowTailnet = false;
+  /** @type {Map<string, any>} tailnet address -> net.Server */
+  const tailnetServers = new Map();
+  let tailnetError = "";
+  let refused = 0;
+  /** @type {Map<string, any>} per-rig stats, keyed by worker name and source address */
+  const workers = new Map();
   let prefixCounter = randomBytes(4).readUInt32LE(0);
   /** @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, last: any, polling: boolean, timer: any }>} */
   const accounts = new Map();
   const sockets = new Set();
   const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "" };
+
+  function workerFor(socket) {
+    const name = socket.account?.worker || "";
+    const key = `${name}|${socket.peer}`;
+    let w = workers.get(key);
+    if (!w) {
+      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, lastShareAt: 0, lastResult: "" };
+      workers.set(key, w);
+      // Keep the list bounded: drop the oldest disconnected entries.
+      if (workers.size > 64) {
+        for (const [k, v] of workers) {
+          if (!v.connected) { workers.delete(k); break; }
+        }
+      }
+    }
+    return w;
+  }
 
   function send(socket, message) {
     if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`);
@@ -231,21 +258,28 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     const nonce = hexBytes(nonceHex, 4);
     if (!en2 || !ntime || !nonce) return send(socket, { id, result: null, error: [20, "Bad share format", null] });
     stats.shares += 1;
+    const rig = workerFor(socket);
+    rig.shares += 1;
+    rig.lastShareAt = Date.now();
     const block = solvedBlock(job, socket.extra2prefix, en2, ntime, nonce);
     const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: socket.account.worker }), job.page);
     const result = reply?.ok ? reply.result : null;
     if (result && result.code === 0) {
       stats.blocks += 1;
-      stats.lastResult = `${MINING_NETWORKS[job.network]?.label || job.network} block ${job.height} accepted`;
+      rig.blocks += 1;
+      stats.lastResult = `${MINING_NETWORKS[job.network]?.label || job.network} block ${job.height} accepted${socket.account.worker ? ` (${socket.account.worker})` : ""}`;
+      rig.lastResult = `block ${job.height} accepted`;
       send(socket, { id, result: true, error: null });
       poll(socket.account.address);
       return;
     }
     stats.rejected += 1;
+    rig.rejected += 1;
     const message = result?.error || (reply?.ok ? "Rejected" : `Node tab: ${reply?.code || "no answer"}`);
     stats.lastResult = /deprecated/i.test(String(message))
       ? `Block ${job.height} was stale (that height was already taken)`
       : `Block ${job.height} rejected: ${message}`;
+    rig.lastResult = stats.lastResult;
     send(socket, { id, result: null, error: [40, String(message), null] });
   }
 
@@ -269,8 +303,12 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
         socket.end();
         return;
       }
-      if (socket.account) unlink(socket);
+      if (socket.account) {
+        unlink(socket);
+        workerFor(socket).connected -= 1;
+      }
       socket.account = account;
+      workerFor(socket).connected += 1;
       send(socket, { id, result: true, error: null });
       link(socket, account.address);
       return;
@@ -291,6 +329,12 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
   }
 
   function onConnection(socket) {
+    socket.peer = normalizeIp(socket.remoteAddress);
+    if (!stratumPeerAllowed(socket.peer, allowTailnet)) {
+      refused += 1;
+      socket.destroy();
+      return;
+    }
     const prefix = Buffer.alloc(4);
     prefix.writeUInt32LE(prefixCounter >>> 0, 0);
     prefixCounter = (prefixCounter + 1) >>> 0;
@@ -313,25 +357,75 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     socket.on("error", () => {});
     socket.on("close", () => {
       sockets.delete(socket);
+      if (socket.account) workerFor(socket).connected -= 1;
       unlink(socket);
     });
   }
 
-  async function start(port = DEFAULT_STRATUM_PORT) {
-    if (server) return listenPort;
+  function listenOn(port, address) {
     const next = createServer(onConnection);
-    await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       next.once("error", reject);
-      next.listen(port, host, () => {
+      next.listen({ port, host: address, ipv6Only: address.includes(":") }, () => {
         next.removeAllListeners("error");
         next.on("error", () => {});
-        resolve();
+        resolve(next);
       });
     });
+  }
+
+  /** Bind or unbind the tailnet addresses to match allowTailnet. */
+  async function syncTailnet() {
+    tailnetError = "";
+    if (!server || !allowTailnet) {
+      for (const srv of tailnetServers.values()) srv.close();
+      tailnetServers.clear();
+      return;
+    }
+    const want = findTailnet().map((a) => a.address);
+    for (const [address, srv] of tailnetServers) {
+      if (!want.includes(address)) {
+        srv.close();
+        tailnetServers.delete(address);
+      }
+    }
+    if (!want.length) {
+      tailnetError = "No Tailscale address on this computer. Start Tailscale (Hog: Tailscale page), then turn this on again.";
+      return;
+    }
+    const problems = [];
+    for (const address of want) {
+      if (tailnetServers.has(address)) continue;
+      try {
+        tailnetServers.set(address, await listenOn(listenPort, address));
+      } catch (error) {
+        problems.push(`${address}: ${error?.code === "EADDRINUSE" ? `port ${listenPort} is in use` : error?.code || error?.message || error}`);
+      }
+    }
+    if (problems.length) tailnetError = `Could not listen on the tailnet (${problems.join("; ")})`;
+  }
+
+  async function start(port = DEFAULT_STRATUM_PORT, options = {}) {
+    if (options.tailnet !== undefined) allowTailnet = Boolean(options.tailnet);
+    if (server) {
+      await syncTailnet();
+      return listenPort;
+    }
+    const next = await listenOn(port, host);
     server = next;
     const address = next.address();
     listenPort = typeof address === "object" && address ? address.port : port;
+    await syncTailnet();
     return listenPort;
+  }
+
+  /** Turn "Allow rigs on my tailnet" on or off; takes effect now if running. */
+  async function setTailnet(on) {
+    allowTailnet = Boolean(on);
+    if (!allowTailnet) {
+      for (const socket of sockets) if (!isLoopback(socket.peer)) socket.destroy();
+    }
+    await syncTailnet();
   }
 
   function stop() {
@@ -339,6 +433,8 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     accounts.clear();
     for (const socket of sockets) socket.destroy();
     sockets.clear();
+    for (const srv of tailnetServers.values()) srv.close();
+    tailnetServers.clear();
     if (!server) return Promise.resolve();
     const current = server;
     server = null;
@@ -349,8 +445,20 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
   function status() {
     let miners = 0;
     for (const entry of accounts.values()) miners += entry.sockets.size;
-    return { stratumListening: Boolean(server), stratumPort: listenPort, miners, accounts: [...accounts.keys()], ...stats };
+    return {
+      stratumListening: Boolean(server),
+      stratumPort: listenPort,
+      stratumHosts: server ? [host, ...tailnetServers.keys()] : [],
+      allowTailnet,
+      tailnetListening: [...tailnetServers.keys()],
+      tailnetError,
+      refused,
+      miners,
+      accounts: [...accounts.keys()],
+      workers: [...workers.values()].map((w) => ({ ...w, connected: Math.max(0, w.connected) })),
+      ...stats,
+    };
   }
 
-  return { start, stop, status };
+  return { start, stop, status, setTailnet };
 }

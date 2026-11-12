@@ -480,6 +480,24 @@
                 <code id="mining-command" class="mono">./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w &lt;48-hex-wallet&gt; -r rig1</code>
                 <button type="button" id="mining-command-copy" class="tiny">Copy</button>
               </div>
+              <div class="mining-tailnet" id="mining-tailnet">
+                <label class="mining-tailnet-toggle"><input type="checkbox" id="mining-tailnet-allow"> <strong>Allow rigs on my tailnet</strong></label>
+                <p id="mining-tailnet-note" class="note" role="status">Off: only BzMiner on this computer can connect. On: other computers on your Tailscale network can mine to this node too. Hog listens on its Tailscale address only, never on your LAN or the internet, and refuses anyone outside the tailnet.</p>
+                <div id="mining-tailnet-remote" hidden>
+                  <p class="note">On another rig in your tailnet, run (Linux):</p>
+                  <div class="mining-address-row">
+                    <code id="mining-remote-command" class="mono"></code>
+                    <button type="button" id="mining-remote-copy" class="tiny">Copy</button>
+                  </div>
+                  <p class="note">Windows: <code id="mining-remote-command-windows" class="mono"></code></p>
+                  <p id="mining-remote-ip" class="note"></p>
+                  <p class="note">Give each rig its own <code>-r</code> name so it shows up separately below.</p>
+                </div>
+              </div>
+              <table id="mining-workers" class="mining-workers" hidden>
+                <thead><tr><th>Rig (-r)</th><th>From</th><th>Online</th><th>Shares</th><th>Blocks</th><th>Rejected</th></tr></thead>
+                <tbody></tbody>
+              </table>
               <p class="note">Hashrate shows in BzMiner's own dashboard: <a id="mining-dashboard" href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. This is solo mining: every block found is a whole block reward on that network, and on mainnet a single rig may go a long time between blocks.</p>
               <p id="mining-source" class="note"></p>
             </section>

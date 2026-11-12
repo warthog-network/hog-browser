@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
 import { createStratumBridge, isWarthogAddress, stratumPort } from "./stratum.mjs";
+import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -111,15 +112,47 @@ function readMiningState() {
       network: MINING_NETWORK_SETTINGS.has(saved?.network) ? saved.network : "auto",
       enabled: saved?.enabled === true,
       address: isWarthogAddress(saved?.address) ? String(saved.address).toLowerCase() : "",
+      tailnet: saved?.tailnet === true,
     };
   } catch {
-    return { enabled: false, address: "", network: "auto" };
+    return { enabled: false, address: "", network: "auto", tailnet: false };
   }
 }
 
 function saveMiningState(state) {
   mkdirSync(join(homedir(), ".local/share/hog-browser"), { recursive: true });
-  writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(state.enabled), address: state.address || "", network: state.network || "auto" })}\n`);
+  writeFileSync(MINING_STATE_FILE, `${JSON.stringify({ enabled: Boolean(state.enabled), address: state.address || "", network: state.network || "auto", tailnet: Boolean(state.tailnet) })}\n`);
+}
+
+// "Allow rigs on my tailnet": off by default. MagicDNS name is looked up in the
+// background and cached, so status stays synchronous.
+let miningTailnet = false;
+let tailnetDnsName = "";
+let tailnetDnsFor = "";
+function refreshTailnetName(ip) {
+  if (!ip || tailnetDnsFor === ip) return;
+  tailnetDnsFor = ip;
+  magicDnsName(ip).then((name) => {
+    if (tailnetDnsFor === ip) tailnetDnsName = name;
+  }, () => {});
+}
+
+/** Tailnet part of the mining status: addresses, MagicDNS name and the remote rig command. */
+export function tailnetMiningInfo({ allow, listening, port, wallet, network, dnsName, addresses = tailnetAddresses() }) {
+  const ipv4 = addresses.find((a) => a.family === 4)?.address || "";
+  const host = dnsName || ipv4;
+  const rig = rigNameSuggestion(network);
+  return {
+    allowTailnet: Boolean(allow),
+    tailnetAddress: ipv4,
+    tailnetDnsName: dnsName || "",
+    tailnetAvailable: Boolean(ipv4),
+    tailnetListening: listening,
+    remoteRigName: rig,
+    remoteCommand: host ? bzminerCommand(port, wallet, rig).replace("127.0.0.1", host) : "",
+    remoteCommandIp: ipv4 && dnsName ? bzminerCommand(port, wallet, rig).replace("127.0.0.1", ipv4) : "",
+    remoteCommandWindows: host ? bzminerCommand(port, wallet, rig).replace("127.0.0.1", host).replace(/^\.\/bzminer/, "bzminer.exe") : "",
+  };
 }
 
 function miningStatus(enabled) {
@@ -148,6 +181,14 @@ function miningStatus(enabled) {
     command: bzminerCommand(sport || 3456, miningAddress || undefined, net ? `hog-${net.key}` : "rig1"),
     defiNodeSource: nodeSource(DEFI_NODE_DIR, BUNDLED_DEFI_NODE_DIR, "/node/defi/"),
     mainnetNodeSource: nodeSource(MAINNET_NODE_DIR, BUNDLED_MAINNET_NODE_DIR, "/node/"),
+    ...tailnetMiningInfo({
+      allow: miningTailnet,
+      listening: STRATUM.status().tailnetListening,
+      port: sport || 3456,
+      wallet: miningAddress || undefined,
+      network: net?.key || "defi",
+      dnsName: tailnetDnsName,
+    }),
     error: miningError,
   };
 }
@@ -161,7 +202,7 @@ async function setMining(enabled) {
   }
   const problems = [];
   try {
-    await STRATUM.start(stratumPort());
+    await STRATUM.start(stratumPort(), { tailnet: miningTailnet });
   } catch (error) {
     problems.push(error?.code === "EADDRINUSE"
       ? `Stratum port ${stratumPort()} is already in use (a local Warthog node with --stratum?). Set HOG_STRATUM_PORT to another port.`
@@ -1421,6 +1462,7 @@ async function handle(req, res, runtime) {
     }
 
     if (url.pathname === "/api/mining" && req.method === "GET") {
+      refreshTailnetName(tailnetAddresses().find((a) => a.family === 4)?.address || "");
       send(res, 200, miningStatus(miningEnabled));
       return;
     }
@@ -1441,12 +1483,19 @@ async function handle(req, res, runtime) {
         }
         miningNetworkSetting = payload.network;
       }
+      if (payload.tailnet !== undefined) {
+        if (typeof payload.tailnet !== "boolean") throw new Error("tailnet must be true or false");
+        if (payload.tailnet !== miningTailnet) {
+          miningTailnet = payload.tailnet;
+          await STRATUM.setTailnet(miningTailnet);
+        }
+      }
       if (payload.enabled !== undefined && typeof payload.enabled !== "boolean") throw new Error("enabled must be true or false");
       if (typeof payload.enabled === "boolean" && payload.enabled !== miningEnabled) {
         miningEnabled = payload.enabled;
         await setMining(miningEnabled);
       }
-      if (runtime.persistSites) saveMiningState({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting });
+      if (runtime.persistSites) saveMiningState({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting, tailnet: miningTailnet });
       send(res, 200, miningStatus(miningEnabled));
       return;
     }
@@ -1561,7 +1610,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const server = await startServer(PORT, { persistSites: true });
-  ({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting } = readMiningState());
+  ({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting, tailnet: miningTailnet } = readMiningState());
   if (miningEnabled) await setMining(true);
   if (process.env.HOG_MINING === "1" && !miningEnabled) {
     miningEnabled = true;
@@ -1572,6 +1621,8 @@ if (isMain) {
     const strat = STRATUM.status();
     console.log(state.listening ? `Hog solo mining relay on http://127.0.0.1:${state.port}` : `Hog solo mining relay is off: ${miningError}`);
     if (strat.stratumListening) console.log(`Hog solo mining stratum on stratum+tcp://127.0.0.1:${strat.stratumPort}`);
+    for (const host of strat.tailnetListening) console.log(`Hog solo mining stratum for tailnet rigs on ${host}:${strat.stratumPort}`);
+    if (strat.tailnetError) console.log(strat.tailnetError);
   }
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : PORT;

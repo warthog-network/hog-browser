@@ -564,6 +564,9 @@ class SettingsUiTest(unittest.TestCase):
             self.assertIn(f'name="mining-network" value="{value}"', html)
         self.assertIn('id="mining-open-mainnet"', html)
         self.assertIn('id="mining-stat-network"', html)
+        for el in ("mining-tailnet-allow", "mining-remote-command", "mining-remote-command-windows", "mining-remote-copy", "mining-workers"):
+            self.assertIn(f'id="{el}"', html)
+        self.assertIn("Allow rigs on my tailnet", html)
         self.assertIn("postMining({ network: radio.value })", app)
         deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
         self.assertIn('"${HB}/stratum.mjs"', deb)

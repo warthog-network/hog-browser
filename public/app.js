@@ -6962,9 +6962,49 @@ function paintMining(state) {
     status.textContent = "On, but the stratum port could not open.";
   } else {
     const miners = state.miners ? `${state.miners} miner${state.miners === 1 ? "" : "s"} connected.` : "Waiting for BzMiner.";
-    status.textContent = `Stratum on 127.0.0.1:${state.stratumPort}${label ? ` for ${label}` : ""}. ${miners}`;
+    const tailnetOn = Array.isArray(state.tailnetListening) && state.tailnetListening[0] ? ` and ${state.tailnetListening[0]}:${state.stratumPort} (tailnet)` : "";
+    status.textContent = `Stratum on 127.0.0.1:${state.stratumPort}${tailnetOn}${label ? ` for ${label}` : ""}. ${miners}`;
   }
   error.textContent = state.error || state.lastError || "";
+  paintMiningTailnet(state);
+}
+
+function paintMiningTailnet(state) {
+  const allow = $("mining-tailnet-allow");
+  if (allow && document.activeElement !== allow) allow.checked = Boolean(state.allowTailnet);
+  const listening = Array.isArray(state.tailnetListening) ? state.tailnetListening : [];
+  let note;
+  if (!state.allowTailnet) {
+    note = "Off: only BzMiner on this computer can connect. On: other computers on your Tailscale network can mine to this node too. Hog listens on its Tailscale address only, never on your LAN or the internet, and refuses anyone outside the tailnet.";
+  } else if (!state.tailnetAvailable) {
+    note = "On, but this computer has no Tailscale address. Start Tailscale on the Tailscale page.";
+  } else if (!state.stratumListening) {
+    note = `On. Rigs can connect to ${state.tailnetDnsName || state.tailnetAddress} once you turn the mining port on.`;
+  } else if (state.tailnetError) {
+    note = state.tailnetError;
+  } else {
+    note = `On: listening on ${listening.join(" and ")} port ${state.stratumPort} for rigs on your tailnet.${state.refused ? ` Refused ${state.refused} connection${state.refused === 1 ? "" : "s"} from outside the tailnet.` : ""}`;
+  }
+  setText("mining-tailnet-note", note);
+  const remote = $("mining-tailnet-remote");
+  if (remote) remote.hidden = !(state.allowTailnet && state.remoteCommand);
+  setText("mining-remote-command", state.remoteCommand || "");
+  setText("mining-remote-command-windows", state.remoteCommandWindows || "");
+  setText("mining-remote-ip", state.remoteCommandIp ? `If the rig does not use MagicDNS, use the IP: ${state.remoteCommandIp}` : "");
+  const table = $("mining-workers");
+  if (!table) return;
+  const rows = Array.isArray(state.workers) ? state.workers : [];
+  table.hidden = !rows.length;
+  const body = table.querySelector("tbody");
+  body.replaceChildren(...rows.map((w) => {
+    const tr = document.createElement("tr");
+    for (const value of [w.worker || "(no -r name)", w.remote ? w.source : "this computer", w.connected ? "yes" : "no", w.shares, w.blocks, w.rejected]) {
+      const td = document.createElement("td");
+      td.textContent = String(value);
+      tr.append(td);
+    }
+    return tr;
+  }));
 }
 
 async function postMining(body) {
@@ -7061,6 +7101,29 @@ async function saveMiningAddress() {
       } catch (err) {
         setText("mining-error", err instanceof Error ? err.message : String(err));
       }
+    });
+  }
+  const allow = $("mining-tailnet-allow");
+  if (allow) {
+    allow.addEventListener("change", async () => {
+      try {
+        paintMining(await postMining({ tailnet: allow.checked }));
+      } catch (err) {
+        allow.checked = !allow.checked;
+        setText("mining-error", err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+  const remoteCopy = $("mining-remote-copy");
+  if (remoteCopy) {
+    remoteCopy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText($("mining-remote-command").textContent);
+        remoteCopy.textContent = "Copied";
+      } catch {
+        remoteCopy.textContent = "Copy failed";
+      }
+      setTimeout(() => { remoteCopy.textContent = "Copy"; }, 1500);
     });
   }
   const openMainnet = $("mining-open-mainnet");

@@ -608,3 +608,10 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
 .mining-network-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 #mining-card[data-network="mainnet"] #mining-stat-network { color: var(--gold); }
 #mining-card[data-network="defi"] #mining-stat-network { color: var(--blue-ink); }
+
+/* Solo mining: tailnet rigs and per-rig stats */
+.mining-tailnet { margin: 10px 0; padding: 8px 10px; border: 1px solid var(--line, rgba(253,185,19,.25)); border-radius: 8px; }
+.mining-tailnet-toggle { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.mining-workers { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
+.mining-workers th, .mining-workers td { text-align: left; padding: 3px 6px; border-bottom: 1px solid rgba(255,255,255,.08); }
+.mining-workers th { color: #FDB913; font-weight: 600; }
