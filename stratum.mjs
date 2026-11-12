@@ -17,7 +17,17 @@ import { createHash, randomBytes } from "node:crypto";
 import { MINING_NETWORKS } from "./mining.mjs";
 
 export const DEFAULT_STRATUM_PORT = 3456;
-const POLL_MS = 1000;
+// A new tip (someone else's block) reaches miners within one poll. On a fast
+// chain (DeFi testnet: a solo rig can find a block every few seconds) every
+// half second spent on old work is a solution that comes back "deprecated".
+const POLL_MS = 500;
+// After our own block at height H the node's next template is H+1. A template
+// still at H or below within this long is the node not having caught up with
+// its own append yet: skip it rather than hand miners dead work again.
+const WON_HOLD_MS = 5_000;
+// Remember this many retired job ids, so a late solution for one is answered
+// "stale" at once instead of being sent to the node to be called deprecated.
+const MAX_SPENT = 128;
 const MAX_LINE = 16_384;
 const MAX_JOBS = 32;
 // The template's timestamp moves every second; only re-send the same work this often.
@@ -265,7 +275,13 @@ export function createStratumBridge({
   /** @type {Map<string, any>} per-rig stats, keyed by worker name and source address */
   const workers = new Map();
   let prefixCounter = randomBytes(4).readUInt32LE(0);
-  /** @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, last: any, polling: boolean, timer: any }>} */
+  /**
+   * spent: retired job id -> height (a block at that height is already found).
+   * appending: height -> promise of the in-flight append's outcome kind.
+   * wonHeight / wonAt: our latest accepted block. again: poll once more when
+   * the current poll ends (a win or a new tip arrived while it was running).
+   * @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, spent: Map<string, number>, appending: Map<number, Promise<string>>, last: any, sentAt: number, polling: boolean, again: boolean, wonHeight: number, wonAt: number, timer: any }>}
+   */
   const accounts = new Map();
   const sockets = new Set();
   // blocks: on chain (the node accepted it, or the chain shows it). rejected:
@@ -365,10 +381,27 @@ export function createStratumBridge({
     if (hadWork) for (const socket of entry.sockets) socket.end();
   }
 
-  async function poll(address) {
+  /** A job's height is taken: answer later solutions for it locally as stale. */
+  function retire(entry, job) {
+    entry.jobs.delete(job.id);
+    entry.spent.set(job.id, job.height);
+    while (entry.spent.size > MAX_SPENT) entry.spent.delete(entry.spent.keys().next().value);
+  }
+
+  /**
+   * @param {string} address
+   * @param {boolean} [urgent] a block just landed: if a poll is already running
+   *   (it may be fetching the old template), run another right after it.
+   */
+  async function poll(address, urgent = false) {
     const entry = accounts.get(address);
-    if (!entry || entry.polling) return;
+    if (!entry) return;
+    if (entry.polling) {
+      if (urgent) entry.again = true;
+      return;
+    }
     entry.polling = true;
+    entry.again = false;
     try {
       const net = getNetwork();
       if (!net) {
@@ -379,6 +412,7 @@ export function createStratumBridge({
       }
       if (stats.miningNetwork !== net.key) {
         stats.miningNetwork = net.key;
+        entry.wonHeight = 0;
         stats.height = 0;
         stats.synced = false;
         gateOpen = false;
@@ -426,10 +460,22 @@ export function createStratumBridge({
       stats.lastError = "";
       const job = jobFromTemplate(data, net);
       stats.height = job.height;
-      if (entry.jobs.has(job.id)) return;
+      if (job.height <= entry.wonHeight && Date.now() - entry.wonAt < WON_HOLD_MS) {
+        // The node has not moved past our own block yet; ask again shortly.
+        entry.again = true;
+        return;
+      }
+      if (entry.jobs.has(job.id) || entry.spent.has(job.id)) return;
       if (entry.last && entry.last.workKey === job.workKey && Date.now() - entry.sentAt < REFRESH_MS) return;
       const clean = !entry.last || entry.last.prevHash !== job.prevHash || entry.last.network !== job.network;
-      if (clean) entry.jobs.clear();
+      if (clean) {
+        // Same network, new tip: old jobs are stale. Another network: just gone.
+        for (const old of [...entry.jobs.values()]) {
+          if (old.network === job.network) retire(entry, old);
+          else entry.jobs.delete(old.id);
+        }
+        if (entry.last && entry.last.network !== job.network) entry.spent.clear();
+      }
       entry.jobs.set(job.id, job);
       while (entry.jobs.size > MAX_JOBS) entry.jobs.delete(entry.jobs.keys().next().value);
       entry.last = job;
@@ -441,6 +487,10 @@ export function createStratumBridge({
       stats.lastError = error instanceof Error ? error.message : String(error);
     } finally {
       entry.polling = false;
+      if (entry.again && accounts.get(address) === entry) {
+        entry.again = false;
+        setTimeout(() => poll(address), 0).unref?.();
+      }
     }
   }
 
@@ -461,7 +511,7 @@ export function createStratumBridge({
   function link(socket, address) {
     let entry = accounts.get(address);
     if (!entry) {
-      entry = { sockets: new Set(), jobs: new Map(), last: null, sentAt: 0, polling: false, timer: null };
+      entry = { sockets: new Set(), jobs: new Map(), spent: new Map(), appending: new Map(), last: null, sentAt: 0, polling: false, again: false, wonHeight: 0, wonAt: 0, timer: null };
       entry.timer = setInterval(() => poll(address), pollMs);
       accounts.set(address, entry);
     }
@@ -488,12 +538,24 @@ export function createStratumBridge({
     const args = params.length >= 5 ? params.slice(1) : params;
     const [jobId, en2Hex, ntimeHex, nonceHex] = args.map((v) => String(v ?? ""));
     const entry = accounts.get(socket.account.address);
-    const job = entry?.jobs.get(jobId);
-    if (!job) return send(socket, { id, result: null, error: [21, "Job not found", null] });
+    let job = entry?.jobs.get(jobId);
+    if (!job) {
+      const height = entry?.spent.get(jobId);
+      if (height !== undefined) return staleLocally(socket, id, height);
+      return send(socket, { id, result: null, error: [21, "Job not found", null] });
+    }
     const en2 = hexBytes(en2Hex, 6);
     const ntime = hexBytes(ntimeHex, 4);
     const nonce = hexBytes(nonceHex, 4);
     if (!en2 || !ntime || !nonce) return send(socket, { id, result: null, error: [20, "Bad share format", null] });
+    // Another solution for this height is with the node right now. If it lands,
+    // this one is stale: wait for it rather than queue a second append in the
+    // node tab ahead of the next template.
+    const ahead = entry.appending.get(job.height);
+    if (ahead) {
+      await ahead.catch(() => "");
+      if (!entry.jobs.has(jobId) || job.height <= entry.wonHeight) return staleLocally(socket, id, job.height);
+    }
     stats.shares += 1;
     const rig = workerFor(socket);
     rig.shares += 1;
@@ -507,28 +569,52 @@ export function createStratumBridge({
       at: Date.now(),
       pending: false, done: false, replied: false, checking: false, replyTimer: null,
     };
-    const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: share.worker }), job.page, {
-      timeoutMs: appendTimeoutMs,
-      // A late answer settles a pending block at once (if the chain has not already).
-      onLate: (late) => {
-        const outcome = appendOutcome(late);
-        if (outcome.kind !== "unknown") settle(share, outcome);
-      },
-    });
-    const outcome = appendOutcome(reply);
-    if (outcome.kind === "unknown") return hold(share, outcome.message);
-    settle(share, outcome);
+    let done = () => {};
+    const inFlight = new Promise((resolve) => { done = resolve; });
+    entry.appending.set(job.height, inFlight);
+    let outcome = { kind: "unknown", message: "" };
+    try {
+      const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: share.worker }), job.page, {
+        timeoutMs: appendTimeoutMs,
+        // A late answer settles a pending block at once (if the chain has not already).
+        onLate: (late) => {
+          const outcome = appendOutcome(late);
+          if (outcome.kind !== "unknown") settle(share, outcome);
+        },
+      });
+      outcome = appendOutcome(reply);
+      if (outcome.kind === "unknown") hold(share, outcome.message);
+      else settle(share, outcome);
+    } finally {
+      if (entry.appending.get(job.height) === inFlight) entry.appending.delete(job.height);
+      done(outcome.kind);
+    }
+  }
+
+  /** A solution for a height that is already taken, answered without asking the node. */
+  function staleLocally(socket, id, height) {
+    const rig = workerFor(socket);
+    stats.shares += 1;
+    rig.shares += 1;
+    rig.lastShareAt = Date.now();
+    stats.rejected += 1;
+    stats.stale += 1;
+    rig.rejected += 1;
+    stats.lastResult = `Block ${height} was stale (that height was already taken)`;
+    rig.lastResult = stats.lastResult;
+    send(socket, { id, result: null, error: [21, `Stale job: block ${height} was already found`, null] });
   }
 
   function label(job) {
     return MINING_NETWORKS[job.network]?.label || job.network;
   }
 
-  function replyMiner(share, ok, message) {
+  // Stratum code 21 is "job not found": miners file it under stale, not invalid.
+  function replyMiner(share, ok, message, code = 40) {
     if (share.replied) return;
     share.replied = true;
     clearTimeout(share.replyTimer);
-    send(share.socket, ok ? { id: share.id, result: true, error: null } : { id: share.id, result: null, error: [40, String(message), null] });
+    send(share.socket, ok ? { id: share.id, result: true, error: null } : { id: share.id, result: null, error: [code, String(message), null] });
   }
 
   /** The node tab did not answer: keep the block pending and check the chain for it. */
@@ -542,7 +628,7 @@ export function createStratumBridge({
     share.replyTimer = setTimeout(() => replyMiner(share, false, `${message}; still checking the chain`), minerReplyMs);
     share.replyTimer.unref?.();
     // A new tip may be waiting behind the slow answer.
-    if (accounts.has(share.address)) poll(share.address);
+    if (accounts.has(share.address)) poll(share.address, true);
   }
 
   /** @param {{ kind: "won" | "rejected", message: string, stale?: boolean, confirmed?: boolean }} outcome */
@@ -563,7 +649,15 @@ export function createStratumBridge({
       stats.lastResult = `${label(job)} block ${job.height} accepted${who}${outcome.confirmed ? ", confirmed on chain" : ""}`;
       rig.lastResult = `block ${job.height} accepted`;
       replyMiner(share, true);
-      if (accounts.has(share.address)) poll(share.address);
+      const entry = accounts.get(share.address);
+      if (entry) {
+        // That height is ours now: drop its jobs so any later solution for it
+        // is answered stale here, and fetch the next template right away.
+        if (job.height > entry.wonHeight) entry.wonHeight = job.height;
+        entry.wonAt = Date.now();
+        for (const old of [...entry.jobs.values()]) if (old.height <= job.height) retire(entry, old);
+        poll(share.address, true);
+      }
       return;
     }
     stats.rejected += 1;
@@ -573,7 +667,7 @@ export function createStratumBridge({
       ? `Block ${job.height} was stale (that height was already taken)`
       : `Block ${job.height} rejected: ${outcome.message}`;
     rig.lastResult = stats.lastResult;
-    replyMiner(share, false, outcome.message);
+    replyMiner(share, false, outcome.message, outcome.stale ? 21 : 40);
   }
 
   /** Settle pending blocks by the hash the node's chain has at their height. */

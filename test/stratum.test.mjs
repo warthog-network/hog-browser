@@ -337,3 +337,74 @@ test("a late append answer settles a pending block; unsettled ones give up in ti
     await bridge.stop();
   }
 });
+
+test("after our block, later solutions for that height are stale here and new work goes out at once", async () => {
+  const posts = [];
+  let tip = TEMPLATE;
+  let slowGet = null; // when set, the next template GET waits on it (a poll in flight)
+  const call = async (method, path, body) => {
+    if (method === "GET") {
+      if (slowGet) { const wait = slowGet; slowGet = null; await wait; return { ok: true, result: { code: 0, data: TEMPLATE } }; }
+      return { ok: true, result: { code: 0, data: tip } };
+    }
+    posts.push(JSON.parse(body));
+    await new Promise((r) => setTimeout(r, 60)); // the node tab takes a moment to append
+    // The first block at a height lands; the node then moves on.
+    if (posts.length === 1) { tip = { ...TEMPLATE, header: "22".repeat(32) + TEMPLATE.header.slice(64), height: TEMPLATE.height + 1 }; return { ok: true, result: { code: 0, error: "No error" } }; }
+    return { ok: true, result: { code: 76, error: "Submitted deprecated block" } };
+  };
+  // A long poll interval: only the win itself can bring the next job quickly.
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 60_000 });
+  const port = await bridge.start(0);
+  const { c, submit } = await session(port);
+  try {
+    // The first template read after the block still shows the old height (the
+    // node tab is a step behind its own append): Hog skips it and asks again.
+    let release = () => {};
+    slowGet = new Promise((r) => { release = r; });
+    submit(3, "000000000001", "00000001");
+    // A second solution for the same height while the first is with the node.
+    submit(4, "000000000002", "00000002");
+    assert.equal((await c.next((m) => m.id === 3)).result, true);
+    const second = await c.next((m) => m.id === 4);
+    assert.deepEqual(second.error.slice(0, 1), [21], "stale, not invalid");
+    assert.match(second.error[1], /Stale job: block 52139/);
+    assert.equal(posts.length, 1, "the stale one never went to the node");
+    release();
+    const fresh = await c.next((m) => m.method === "mining.notify" && m.params[1] === "22".repeat(32), 1000);
+    assert.equal(fresh.params[6], true);
+    // A solution for the old job after the new one went out: stale here too.
+    submit(5, "000000000003", "00000003");
+    assert.equal((await c.next((m) => m.id === 5)).error[0], 21);
+    assert.equal(posts.length, 1);
+    const state = bridge.status();
+    assert.equal(state.blocks, 1);
+    assert.equal(state.rejected, 2);
+    assert.equal(state.stale, 2);
+    assert.equal(state.shares, 3);
+  } finally {
+    c.socket.destroy();
+    await bridge.stop();
+  }
+});
+
+test("a block the node calls deprecated is answered as stale (stratum code 21)", async () => {
+  const call = async (method) => (method === "GET"
+    ? { ok: true, result: { code: 0, data: TEMPLATE } }
+    : { ok: true, result: { code: 76, error: "Submitted deprecated block" } });
+  const bridge = createStratumBridge({ call, getPublicTip: TIP, pollMs: 50 });
+  const port = await bridge.start(0);
+  const { c, submit } = await session(port);
+  try {
+    submit(3, "000000000001", "00000001");
+    assert.deepEqual((await c.next((m) => m.id === 3)).error.slice(0, 2), [21, "Submitted deprecated block"]);
+    assert.equal(bridge.status().stale, 1);
+    // It did not land, so the next solution for that height still goes to the node.
+    submit(4, "000000000002", "00000002");
+    assert.equal((await c.next((m) => m.id === 4)).error[0], 21);
+    assert.equal(bridge.status().stale, 2);
+  } finally {
+    c.socket.destroy();
+    await bridge.stop();
+  }
+});
