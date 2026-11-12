@@ -5,7 +5,7 @@ name: Android APK
 # workflow (release.yml) is separate and unchanged.
 on:
   push:
-    branches: ["feature/android-companion"]
+    branches: ["feature/android-companion", "fix/mobile-*"]
   workflow_dispatch:
 
 permissions:

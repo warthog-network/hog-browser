@@ -58,7 +58,9 @@ export function paintPhoneCard() {
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(pair.qr)}`;
     $("phone-qr").replaceChildren(img);
     $("phone-code").textContent = pair.code;
-    $("phone-host").textContent = `${st.address || "(no tailnet address yet)"}:${st.port}`;
+    $("phone-host").textContent = st.dnsName && st.ip
+      ? `${st.dnsName}:${st.port}  or  ${st.ip}:${st.port}`
+      : `${st.address || "(no tailnet address yet)"}:${st.port}`;
     const left = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
     $("phone-expiry").textContent = `Works once, for about ${left || 1} more minute${left === 1 ? "" : "s"}.`;
   }

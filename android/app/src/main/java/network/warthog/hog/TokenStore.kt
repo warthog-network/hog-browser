@@ -20,8 +20,10 @@ class TokenStore(context: Context) {
     @Volatile private var cached: String? = null
 
     val host: String get() = prefs.getString("host", "") ?: ""
+    /** hog's Tailscale IP, used when the phone cannot look up the .ts.net name. */
+    val ip: String get() = prefs.getString("ip", "") ?: ""
     val port: Int get() = prefs.getInt("port", 4189)
-    val paired: Boolean get() = token() != null && host.isNotEmpty()
+    val paired: Boolean get() = token() != null && (host.isNotEmpty() || ip.isNotEmpty())
 
     @Synchronized
     fun token(): String? {
@@ -35,8 +37,8 @@ class TokenStore(context: Context) {
     }
 
     @Synchronized
-    fun save(host: String, port: Int, token: String) {
-        prefs.edit().putString("host", host).putInt("port", port).putString("token", encrypt(token)).apply()
+    fun save(host: String, ip: String, port: Int, token: String) {
+        prefs.edit().putString("host", host).putString("ip", ip).putInt("port", port).putString("token", encrypt(token)).apply()
         cached = token
     }
 

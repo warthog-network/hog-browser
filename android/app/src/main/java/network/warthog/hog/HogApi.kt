@@ -2,18 +2,46 @@ package network.warthog.hog
 
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.URL
+import java.net.UnknownHostException
 
 /** HTTP to hog's phone API (/m/v1/...) over the tailnet. */
 class HogApi(private val store: TokenStore) {
     class Resp(val status: Int, val text: String)
 
-    fun url(host: String, port: Int, route: String): URL = URL("http://$host:$port/m/v1/$route")
+    /** Set once the .ts.net name failed to resolve, so later calls go straight to the IP. */
+    @Volatile var usingIp = false
+        private set
+
+    fun url(host: String, port: Int, route: String): URL = URL("http://${Tailnet.urlHost(host)}:$port/m/v1/$route")
+
+    /**
+     * Pick the address to use: the .ts.net name when the phone can resolve it,
+     * otherwise hog's Tailscale IP. Android's "Use Tailscale DNS" being off
+     * (or Private DNS in the way) breaks MagicDNS names but not the IP.
+     */
+    fun pick(host: String, ip: String): String {
+        val name = host.takeIf { it.isNotEmpty() && Tailnet.isTsName(it) }
+        val addr = ip.takeIf { it.isNotEmpty() && Tailnet.isIp(it) }
+        if (name == null) return addr ?: host
+        if (addr == null) return name
+        if (usingIp) return addr
+        return try {
+            InetAddress.getByName(name)
+            name
+        } catch (e: UnknownHostException) {
+            usingIp = true
+            addr
+        }
+    }
+
+    fun current(): String = pick(store.host, store.ip)
 
     /** A connection to an authenticated route. Throws if this phone is not paired. */
     fun open(method: String, route: String, timeoutMs: Int = 15_000): HttpURLConnection {
         val token = store.token() ?: throw IOException("not paired")
-        val host = store.host
+        val host = current()
         Tailnet.problem(host, store.port)?.let { throw IOException(it) }
         val conn = url(host, store.port, route).openConnection() as HttpURLConnection
         conn.requestMethod = method
@@ -45,9 +73,11 @@ class HogApi(private val store: TokenStore) {
         return try { read(conn) } finally { conn.disconnect() }
     }
 
-    /** Pairing needs no token: trade hog's one-time code for one. */
-    fun pair(host: String, port: Int, code: String, deviceName: String): Resp {
-        val conn = url(host, port, "pair").openConnection() as HttpURLConnection
+    /** Pairing needs no token: trade hog's one-time code for one. Tries the name, then the IP. */
+    fun pair(host: String, ip: String, port: Int, code: String, deviceName: String): Resp {
+        val target = pick(host, ip)
+        Tailnet.problem(target, port)?.let { throw IOException(it) }
+        val conn = url(target, port, "pair").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 10_000
         conn.readTimeout = 20_000

@@ -182,32 +182,41 @@ class MainActivity : Activity() {
         fun state(): String = JSONObject()
             .put("paired", store.paired)
             .put("host", store.host)
+            .put("ip", store.ip)
+            .put("via", if (store.paired) api.current() else "")
             .put("port", store.port)
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
             .put("version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
             .toString()
 
         @JavascriptInterface
-        fun pair(id: Int, rawHost: String, port: Int, code: String) {
-            val host = Tailnet.normalizeHost(rawHost)
-            Tailnet.problem(host, port)?.let {
+        fun pair(id: Int, rawHost: String, rawIp: String, port: Int, code: String) {
+            var host = Tailnet.normalizeHost(rawHost)
+            var ip = Tailnet.normalizeHost(rawIp)
+            // Someone typed the IP into the address box.
+            if (Tailnet.isIp(host)) { if (ip.isEmpty()) ip = host; host = "" }
+            if (ip.isNotEmpty() && !Tailnet.isIp(ip)) ip = ""
+            val shown = host.ifEmpty { ip }
+            (if (shown.isEmpty()) "Type hog's address." else Tailnet.problem(shown, port))?.let {
                 done(id, 0, JSONObject().put("ok", false).put("error", it).toString())
                 return
             }
             io.execute {
                 try {
-                    val resp = api.pair(host, port, code, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                    val resp = api.pair(host, ip, port, code, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
                     if (resp.status == 200) {
                         val body = JSONObject(resp.text)
                         val token = body.getString("token")
-                        store.save(host, port, token)
+                        store.save(host, ip, port, token)
                         // The token stays on the Kotlin side; the page only learns it worked.
                         done(id, 200, JSONObject().put("ok", true).put("device", body.optJSONObject("device")).toString())
                     } else {
                         done(id, resp.status, resp.text)
                     }
+                } catch (e: java.net.UnknownHostException) {
+                    done(id, 0, JSONObject().put("ok", false).put("error", "This phone cannot look up $host. In the Tailscale app turn on Use Tailscale DNS, or type hog's Tailscale IP (100.x) as the address.").toString())
                 } catch (e: Exception) {
-                    done(id, 0, JSONObject().put("ok", false).put("error", "Could not reach hog at $host:$port. Is Tailscale on, and Phone app turned on in hog? (${e.message ?: "network error"})").toString())
+                    done(id, 0, JSONObject().put("ok", false).put("error", "Could not reach hog at ${api.pick(host, ip)}:$port. Is Tailscale on, and Phone app turned on in hog? (${e.message ?: "network error"})").toString())
                 }
             }
         }

@@ -130,18 +130,15 @@ function showPair(message = "") {
   $("pair-error").textContent = message;
 }
 
+let scannedIp = "";
 function applyScan(text) {
   try {
     const url = new URL(String(text).trim());
     if (url.protocol !== "hogpair:") throw new Error();
-    const host = url.searchParams.get("host") || url.searchParams.get("ip") || "";
-    $("pair-host").value = host;
+    $("pair-host").value = url.searchParams.get("host") || url.searchParams.get("ip") || "";
+    scannedIp = url.searchParams.get("ip") || "";
     $("pair-port").value = url.searchParams.get("port") || "4189";
     $("pair-code").value = url.searchParams.get("code") || "";
-    if (!url.searchParams.get("host") && url.searchParams.get("ip")) {
-      $("pair-error").textContent = "Hog did not have its Tailscale name yet. Type hog's .ts.net name (Tailscale admin → Machines) instead of the IP.";
-      return;
-    }
     submitPair();
   } catch {
     $("pair-error").textContent = "That QR code is not a hog pairing code.";
@@ -153,12 +150,12 @@ async function submitPair() {
   const port = Number($("pair-port").value || 4189);
   const code = $("pair-code").value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
   $("pair-error").textContent = "";
-  if (!host) return ($("pair-error").textContent = "Type hog's address, like hog.tailxxxx.ts.net.");
+  if (!host) return ($("pair-error").textContent = "Type hog's address, like hog.tailxxxx.ts.net or 100.x.y.z.");
   if (code.length !== 8) return ($("pair-error").textContent = "The code has 8 letters and numbers.");
   $("pair-submit").disabled = true;
   $("pair-submit").textContent = "Pairing…";
   try {
-    const res = native ? await call((id, h, p, c) => native.pair(id, h, p, c), host, port, code) : await demo.pair();
+    const res = native ? await call((id, h, i, p, c) => native.pair(id, h, i, p, c), host, scannedIp, port, code) : await demo.pair();
     if (!res.ok) throw new Error(res.body.error || `Pairing failed (${res.status || "no answer"}).`);
     $("pair-code").value = "";
     startApp();
@@ -438,7 +435,8 @@ function menu() {
   sheet(
     el("p", { class: "sheet-title", text: "This phone" }),
     el("dl", { class: "kv" },
-      el("dt", { text: "Hog" }), el("dd", { text: `${cfg.host || "?"}:${cfg.port || 4189}` }),
+      el("dt", { text: "Hog" }), el("dd", { text: `${cfg.host || cfg.ip || "?"}:${cfg.port || 4189}` }),
+      cfg.ip && cfg.host ? el("dt", { text: "IP" }) : null, cfg.ip && cfg.host ? el("dd", { text: `${cfg.ip}${cfg.via === cfg.ip ? " (in use: the phone cannot look up the name)" : ""}` }) : null,
       el("dt", { text: "Phone" }), el("dd", { text: cfg.device || "" }),
       el("dt", { text: "App" }), el("dd", { text: cfg.version || "" })),
     el("p", { class: "note", text: "To cut this phone off, remove it in hog → Settings → Tailscale → Phone app. Forget only clears it here." }),
@@ -452,13 +450,15 @@ function startApp() {
   const cfg = config();
   $("pair-view").hidden = true;
   $("app-view").hidden = false;
-  $("top-host").textContent = cfg.host ? `${cfg.host}:${cfg.port}` : "";
+  const via = cfg.via || cfg.host || cfg.ip;
+  $("top-host").textContent = via ? `${via}:${cfg.port}` : "";
   go(current);
 }
 
 function wire() {
   $("scan-btn").addEventListener("click", () => (native ? native.scan() : applyScan("hogpair://pair?host=hog.tail314642.ts.net&port=4189&code=7KQ3XW9M")));
   $("pair-form").addEventListener("submit", (ev) => { ev.preventDefault(); submitPair(); });
+  $("pair-host").addEventListener("input", () => { scannedIp = ""; });
   $("pair-code").addEventListener("input", (ev) => {
     const v = ev.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
     ev.target.value = v.length > 4 ? `${v.slice(0, 4)}-${v.slice(4)}` : v;
