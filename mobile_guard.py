@@ -81,6 +81,11 @@ def run(guard, action, name=""):
         if not valid_name(name) or name not in managed:
             listing = guard.engine_status()
             return view(listing, managed, ok=False, error="Hog does not manage that container.")
+        if action == "stop" and name == "tailscale":
+            # The phone reaches hog through this container; stopping it from
+            # the phone would cut the phone off until someone is at the computer.
+            listing = guard.engine_status()
+            return view(listing, managed, ok=False, error="Stop Tailscale on the computer: the phone talks to hog through it. Restart works from here.")
         result = guard.handle(action, name)
         listing = guard.engine_status()
         return view(listing, managed, ok=bool(result.get("ok")), error=str(result.get("error") or ""))

@@ -226,7 +226,7 @@ function paintContainers(data) {
       item.blocked ? el("p", { class: "note", text: item.reason || "Hog does not run this container." }) : el("div", { class: "ct-actions" },
         running ? null : el("button", { class: "primary", type: "button", text: "Start", onclick: act("start") }),
         running ? el("button", { class: "ghost", type: "button", text: "Restart", onclick: act("restart") }) : null,
-        running ? el("button", { class: "danger", type: "button", text: "Stop", onclick: (e) => confirmSheet(`Stop ${item.name}?`, "Stop", () => act("stop")(e)) }) : null),
+        running && item.name !== "tailscale" ? el("button", { class: "danger", type: "button", text: "Stop", onclick: (e) => confirmSheet(`Stop ${item.name}?`, "Stop", () => act("stop")(e)) }) : null),
       links.length ? el("div", { class: "ct-links" }, links.map((l) => el("button", { class: "chip", type: "button", text: `${l.label} :${l.port}`, onclick: () => openUrl(l.url) }))) : null));
   }
 }
