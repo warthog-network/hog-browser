@@ -45,7 +45,7 @@ function pythonScript(source, name) {
   if (!m) throw new Error(`${name} not found in hog`);
   return m[1];
 }
-const hog = readFileSync(join(root, "hog"), "utf8");
+const hog = readFileSync(join(root, "hog"), "utf8").replace(/\r\n/g, "\n");
 const edge = pythonScript(hog, "EDGE_GRIP_SCRIPT");
 const dapp = readFileSync(join(root, "public", "dapp-provider.js"), "utf8");
 const template = readFileSync(join(here, "preload-page.template.cjs"), "utf8");

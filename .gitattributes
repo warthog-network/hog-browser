@@ -1,3 +1,8 @@
-# Byte-exact on every OS (SHA256SUMS pins them; Windows checkouts would add CR).
+# LF everywhere, also in Windows CI checkouts (stage.mjs reads hog; SHA256SUMS pin node builds).
+* text=auto eol=lf
+*.png binary
+*.ttf binary
+*.mp4 binary
+*.wasm binary
 node-defi/** -text
 node-mainnet/** -text
