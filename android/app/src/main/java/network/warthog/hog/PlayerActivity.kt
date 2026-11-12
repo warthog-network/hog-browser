@@ -181,7 +181,7 @@ class PlayerActivity : Activity() {
         }
         keep = Button(this).apply {
             text = "Keep watching"
-            setOnClickListener { overlay.visibility = View.GONE }
+            setOnClickListener { this@PlayerActivity.overlay.visibility = View.GONE }
         }
         row.addView(keep)
         row.addView(Button(this).apply { text = "Close"; setOnClickListener { finish() } })
