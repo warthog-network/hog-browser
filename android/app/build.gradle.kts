@@ -12,7 +12,7 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.1.0"
+        versionName = System.getenv("HOG_VERSION") ?: "0.1.0-dev"
     }
 
     buildTypes {
