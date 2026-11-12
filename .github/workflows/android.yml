@@ -1,0 +1,53 @@
+name: Android APK
+
+# Builds the Hog phone app (android/) as a debug-signed APK and uploads it
+# as a workflow artifact. Does not publish a release. The main Release
+# workflow (release.yml) is separate and unchanged.
+on:
+  push:
+    branches: ["feature/android-companion"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Check the bundled UI parses
+        run: node --check android/app/src/main/assets/web/app.js
+
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Inspect APK
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          mkdir -p out
+          cp "$APK" out/hog-mobile-debug.apk
+          AAPT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)aapt
+          "$AAPT" dump badging out/hog-mobile-debug.apk | head -20
+          (cd out && sha256sum hog-mobile-debug.apk | tee SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hog-mobile-debug-apk
+          path: |
+            out/hog-mobile-debug.apk
+            out/SHA256SUMS
+          if-no-files-found: error

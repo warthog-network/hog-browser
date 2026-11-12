@@ -1,0 +1,42 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "network.warthog.hog"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "network.warthog.hog"
+        minSdk = 29
+        targetSdk = 34
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "0.1.0"
+    }
+
+    buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
+        release {
+            isMinifyEnabled = false
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        buildConfig = true
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.webkit:webkit:1.11.0")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+}
