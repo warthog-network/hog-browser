@@ -20,7 +20,8 @@ const PAGE_HOST = "localhost";
 const SITE_PORT_MIN = 43110;
 const SITE_PORT_MAX = 44109;
 const NODE_ORIGIN = "https://browser-node.netlify.app";
-const NODE_PORT = 43100;
+// HOG_NODE_PORT is for headless/dev runs next to an installed Hog; the hog window expects 43100.
+const NODE_PORT = Number(process.env.HOG_NODE_PORT || 43100);
 const SITE_PORT_FILE = join(homedir(), ".local/share/hog-browser/site-ports.json");
 const GLUE_PREFIX = readFileSync(fileURLToPath(new URL("./opfs-polyfill.js", import.meta.url)));
 const OPFS_LOCK_MS = 60_000;
