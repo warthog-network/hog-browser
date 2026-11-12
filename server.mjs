@@ -14,6 +14,7 @@ import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs
 import { createFilesService, handleFilesRequest } from "./files.mjs";
 import { execFile } from "node:child_process";
 import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
+import { createLanForwarder, createLanState, lanStatus } from "./jellyfin-lan.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -116,6 +117,27 @@ async function setMobile(enabled) {
       ? `Port ${mobilePort()} is already in use. Set HOG_MOBILE_PORT to another port.`
       : (error instanceof Error ? error.message : String(error));
   }
+}
+
+// ---------- Jellyfin on the home network (opt-in, LAN IPv4 only, never 0.0.0.0) ----------
+const JELLYFIN_LAN_STATE = createLanState({ file: process.env.HOG_JELLYFIN_LAN_CONFIG || join(HOG_DATA_DIR, "jellyfin-lan.json") });
+const JELLYFIN_LAN = createLanForwarder({
+  port: Number(process.env.HOG_JELLYFIN_LAN_PORT || 8096),
+  targetPort: Number(process.env.HOG_JELLYFIN_PORT || 8096),
+  ...(process.env.HOG_JELLYFIN_LAN_NO_LAN === "1" ? { findLan: () => [] } : {}),
+});
+
+async function setJellyfinLan(enabled) {
+  if (enabled) await JELLYFIN_LAN.start();
+  else await JELLYFIN_LAN.stop();
+}
+
+/** What Settings → Containers → Jellyfin → Home network access shows. */
+export function jellyfinLanStatus() {
+  return lanStatus(JELLYFIN_LAN_STATE, JELLYFIN_LAN, {
+    targetPort: Number(process.env.HOG_JELLYFIN_PORT || 8096),
+    ...(process.env.HOG_JELLYFIN_LAN_NO_LAN === "1" ? { findLan: () => [] } : {}),
+  });
 }
 
 /** What Settings → Tailscale → Phone app shows. Never includes tokens or hashes. */
@@ -1637,7 +1659,7 @@ async function handle(req, res, runtime) {
       return;
     }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
-    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile") && !walletRequest) {
+    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile" || url.pathname === "/api/jellyfin-lan") && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
       return;
     }
@@ -1679,6 +1701,26 @@ async function handle(req, res, runtime) {
         return;
       }
       send(res, 200, mobileStatus());
+      return;
+    }
+
+    if (url.pathname === "/api/jellyfin-lan" && req.method === "GET") {
+      send(res, 200, await jellyfinLanStatus());
+      return;
+    }
+    if (url.pathname === "/api/jellyfin-lan" && req.method === "POST") {
+      if (req.headers["x-hog-lan"] !== "1") {
+        send(res, 403, { ok: false, error: "Open Hog to change this" });
+        return;
+      }
+      const payload = await readJson(req);
+      if (typeof payload.enabled !== "boolean") {
+        send(res, 400, { ...(await jellyfinLanStatus()), ok: false, error: "enabled must be true or false" });
+        return;
+      }
+      JELLYFIN_LAN_STATE.setEnabled(payload.enabled);
+      await setJellyfinLan(payload.enabled);
+      send(res, 200, await jellyfinLanStatus());
       return;
     }
 
@@ -1822,6 +1864,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
     STRATUM.stop();
     MINING.stop();
     MOBILE_LISTENER.stop();
+    JELLYFIN_LAN.stop();
     return closeMain(callback);
   };
   return new Promise((resolve) => {
@@ -1831,6 +1874,8 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
 
 /** Test hooks for the phone app API. */
 export const mobileInternals = { state: MOBILE_STATE, listener: MOBILE_LISTENER, api: MOBILE_API, setMobile };
+/** Test hooks for Jellyfin home network access. */
+export const jellyfinLanInternals = { state: JELLYFIN_LAN_STATE, forwarder: JELLYFIN_LAN, setJellyfinLan };
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
@@ -1841,6 +1886,11 @@ if (isMain) {
     await setMobile(true);
     const phone = MOBILE_LISTENER.status();
     console.log(phone.listening ? `Hog phone app API on ${phone.hosts.join(", ")} port ${phone.port}` : `Hog phone app API is off: ${mobileError}`);
+  }
+  if (JELLYFIN_LAN_STATE.enabled) {
+    await setJellyfinLan(true);
+    const lan = JELLYFIN_LAN.status();
+    console.log(lan.hosts.length ? `Jellyfin on the home network at ${lan.hosts.map((h) => `http://${h}:${lan.port}`).join(", ")}` : `Jellyfin home network access is waiting: ${lan.error}`);
   }
   if (process.env.HOG_MINING === "1" && !miningEnabled) {
     miningEnabled = true;

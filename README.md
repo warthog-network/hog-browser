@@ -109,6 +109,12 @@ Click an address to open it in a new Hog tab, or press **Copy**. Ports that are 
 
 Earlier versions had an AI page (Ollama, Open WebUI, Continue, and an Aider Code chat). It was removed in 0.1.20. Hog leaves any `hog-ollama`, `hog-open-webui`, or `hog-aider` containers, their images and volumes, and `~/.continue` alone; remove them from the container ⋯ menu or with `docker rm` and `docker volume rm` if you no longer want them.
 
+## Jellyfin on your home network (TVs without Tailscale)
+
+Roku and some other TVs cannot run Tailscale. **Settings → Containers → Jellyfin → Home network access** (off by default) makes Hog forward this computer's private home-network IPv4 addresses (10/8, 172.16/12 or 192.168/16 on Wi-Fi or Ethernet) on port 8096 to Jellyfin at `127.0.0.1:8096`. The container is not recreated. Hog never listens on `0.0.0.0`, a Docker bridge, a VPN or Tailscale address, and it drops connections from non-private addresses, so a router port forward cannot put Jellyfin on the internet through it. The card shows the address to type into the TV's Jellyfin app, for example `http://192.168.1.50:8096`. Reserve that IP in your router so it stays the same. Hog re-checks the addresses every 15 seconds and remembers the setting across restarts.
+
+If Ubuntu's ufw firewall is on, the card shows the one rule to run yourself, for example `sudo ufw allow in on wlp4s0 from 192.168.1.0/24 to any port 8096 proto tcp`. Hog never changes the firewall.
+
 ## Jellyfin GPU acceleration (NVIDIA)
 
 Docker Desktop on Linux runs containers inside a small virtual machine, so it cannot pass through an NVIDIA GPU. Hog can instead run Jellyfin on native Docker Engine (`/var/run/docker.sock`, docker-ce) with `--gpus all`. GPU acceleration requires Docker Engine and turns that runtime on for Jellyfin. Turning the GPU off leaves Jellyfin on Engine without the GPU; use the runtime control if you want it back on Docker Desktop. Tailscale can run on either runtime. If Tailscale is on Docker Engine it reaches Jellyfin at `127.0.0.1:8096`; on Docker Desktop it still uses `host.docker.internal:8096`.

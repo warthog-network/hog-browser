@@ -97,6 +97,7 @@ cp -a \
   "${HB}/tailnet.mjs" \
   "${HB}/files.mjs" \
   "${HB}/mobile.mjs" \
+  "${HB}/jellyfin-lan.mjs" \
   "${HB}/mobile_guard.py" \
   "${HB}/opfs-polyfill.js" \
   "${HB}/package.json" \

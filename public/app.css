@@ -335,7 +335,7 @@ button { cursor: pointer; }
 
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }
-#endpoint-lan, #endpoint-public, #tailscale-up, #share-publish, #share-enable, #jellyfin-copy, .share-name button {
+#endpoint-lan, #endpoint-public, #tailscale-up, #share-publish, #share-enable, #jellyfin-copy, #jellyfin-lan-urls button, .share-name button {
   border: 1px solid rgba(var(--accent-rgb), 0.55);
   background: var(--panel);
   color: var(--gold);
@@ -1768,3 +1768,9 @@ h3 { margin: 8px 0; font-size: 18px; }
 .phone-devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .phone-devices li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .phone-devices li span { overflow-wrap: anywhere; }
+
+/* Jellyfin → Home network access */
+#jellyfin-lan-card { margin-top: 12px; }
+#jellyfin-lan-urls { flex-wrap: wrap; row-gap: 6px; }
+#jellyfin-lan-urls strong { font-size: 22px; }
+#jellyfin-lan-urls button { margin: 0; padding: 4px 12px; }

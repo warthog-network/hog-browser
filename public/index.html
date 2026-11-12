@@ -478,6 +478,23 @@
               <pre id="jellyfin-gpu-install-log" class="mono gpu-install-log" hidden></pre>
             </details>
           </section>
+          <section id="jellyfin-lan-card" class="connect-card" aria-label="Home network access">
+            <p class="eyebrow">Jellyfin</p>
+            <div class="engine-row default-browser-row">
+              <div class="default-browser-copy">
+                <strong>Home network access</strong>
+                <p id="jellyfin-lan-state" class="note" role="status">Off. Turn it on so a TV app on your Wi-Fi, such as Roku, can reach Jellyfin without Tailscale.</p>
+              </div>
+              <button type="button" id="jellyfin-lan-toggle" aria-pressed="false">Turn on</button>
+            </div>
+            <div id="jellyfin-lan-urls" class="connect-addr" hidden></div>
+            <p id="jellyfin-lan-error" class="error" role="status"></p>
+            <div id="jellyfin-lan-firewall" hidden>
+              <p class="note">The ufw firewall is on, so it may block the TV. If the TV cannot connect, run this once in a terminal. Hog never changes your firewall.</p>
+              <pre id="jellyfin-lan-firewall-cmd" class="mono"></pre>
+            </div>
+            <p class="note">Reachable by devices on your home Wi-Fi, not the internet. In the TV's Jellyfin app, add the server by hand with the address above. Reserve this computer's IP in your router so the address stays the same.</p>
+          </section>
           <details class="settings-block" id="container-advanced">
             <summary>Advanced</summary>
             <div class="command-box stack">

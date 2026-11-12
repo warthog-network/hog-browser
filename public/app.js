@@ -10,6 +10,7 @@ import { FitAddon, Terminal } from "./xterm-bundle.js";
 import { smbLinks } from "./files-core.js";
 import { createFilesView } from "./files-view.js";
 import { refreshPhoneApp, wirePhoneCard } from "./phone-settings.js";
+import { refreshJellyfinLan, wireJellyfinLan } from "./jellyfin-lan.js";
 import {
   createAccount,
   signAssetCreation,
@@ -479,6 +480,7 @@ function showSettingsPage(page) {
     desktopCommand("containers:list");
     requestAnimationFrame(reportShareDrop);
   }
+  if (next === "containers") refreshJellyfinLan();
   if (next === "networks") requestNetworks(networkRuntime);
   if (next === "files" || next === "tailscale") {
     desktopCommand("containers:share-status");
@@ -1460,6 +1462,7 @@ function bindSambaCard() {
     $("samba-pass").value = "";
   });
   wirePhoneCard();
+  wireJellyfinLan();
   $("samba-toggle").addEventListener("click", () => {
     const on = !(sambaState && sambaState.running);
     sambaBusy = true;
