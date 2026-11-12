@@ -42,6 +42,7 @@ rsync -a \
   --exclude '*.pyc' \
   --exclude '.github/' \
   --exclude 'packaging/' \
+  --exclude 'android/' \
   "${ROOT}/" "${HB}/"
 
 echo "==> npm ci + build (bundles) + prune production deps"

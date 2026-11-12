@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Warthog circle logo (from hog's public/hog-icon.svg), gold on near-black. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.0589"
+        android:scaleY="0.0589"
+        android:translateX="21"
+        android:translateY="21">
+        <path
+            android:fillColor="#FF0B0B0D"
+            android:strokeColor="#FFFDB913"
+            android:strokeWidth="26"
+            android:pathData="M560,34 A526,526 0 1,1 559.9,34 Z" />
+        <group android:translateX="20" android:translateY="20">
+            <path
+                android:fillColor="#FFFDB913"
+                android:pathData="M291.1,784.1 L376.1,785 L455.8,682.5 L359,719.5 Z" />
+            <path
+                android:fillColor="#FFFDB913"
+                android:pathData="m 805.8,564 68.4,-14.9 19.9,-44.5 -26.5,-6.4 -69.3,-47.8 -52.8,-86.9 -22.2,6.4 -21.3,-62.3 -51,39.4 6.4,-35.5 -92.2,-16.5 30.3,26.4 -110.6,-13.6 42.4,29.9 -113.3,1.1 52.5,27 -99.4,21.8 51.8,13.1 -62.3,20.1 -1.9,0.1 -1.5,1 -44.2,14.1 18,3.5 -42.2,28.6 0.1,-0.3 -42.3,26.9 -20.1,44.8 -36.5,18.7 6.3,17.6 47.3,-13 26.5,26.7 1.9,75.5 -70.5,120 h 62.9 l 92.7,-87 121.2,-42.6 124.2,-61.8 127.6,30.4 24.8,51.2 62.6,-29.7 -30.5,-54.2 -76.4,-51.6 14.4,-7.2 z m -44.1,-134.2 10,25.5 -38.5,-17.5 z" />
+            <path
+                android:fillColor="#FFFDB913"
+                android:pathData="M728.4,682.5 L708.5,644.4 L595.2,612.9 L566.8,629.2 L652.1,667.7 L675.4,707.9 Z" />
+        </group>
+    </group>
+</vector>

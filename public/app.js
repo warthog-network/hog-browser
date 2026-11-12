@@ -9,6 +9,7 @@ import { answerDappRequest, CHAINS, DappError } from "./dapp-bundle.js";
 import { FitAddon, Terminal } from "./xterm-bundle.js";
 import { smbLinks } from "./files-core.js";
 import { createFilesView } from "./files-view.js";
+import { refreshPhoneApp, wirePhoneCard } from "./phone-settings.js";
 import {
   createAccount,
   signAssetCreation,
@@ -483,7 +484,10 @@ function showSettingsPage(page) {
     desktopCommand("containers:share-status");
   }
   if (next === "files") renderFilesRoots();
-  if (next === "tailscale") desktopCommand("containers:samba-status");
+  if (next === "tailscale") {
+    desktopCommand("containers:samba-status");
+    refreshPhoneApp();
+  }
   if (next === "mining") refreshMining();
   if (next === "general") {
     desktopCommand("containers:browser-default");
@@ -1372,6 +1376,7 @@ function bindSambaCard() {
     desktopCommand(`containers:samba-save:${JSON.stringify(password ? { user, password } : { user })}`);
     $("samba-pass").value = "";
   });
+  wirePhoneCard();
   $("samba-toggle").addEventListener("click", () => {
     const on = !(sambaState && sambaState.running);
     sambaBusy = true;

@@ -12,6 +12,8 @@ import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRel
 import { createStratumBridge, headHeights, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
 import { createFilesService, handleFilesRequest } from "./files.mjs";
+import { execFile } from "node:child_process";
+import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -60,7 +62,88 @@ const FILES = createFilesService({
   configFile: process.env.HOG_FILES_CONFIG || join(homedir(), ".local/share/hog-browser/files.json"),
 });
 
-// ---------- Solo mining (BzMiner -> 127.0.0.1:HOG_MINING_PORT -> node tab) ----------
+// ---------- Phone app (tailnet): opt-in API for the Android companion ----------
+const APP_ROOT = fileURLToPath(new URL("./", import.meta.url));
+const HOG_DATA_DIR = process.env.HOG_DATA || join(homedir(), ".local/share/hog-browser");
+const MOBILE_STATE = createMobileState({ file: process.env.HOG_MOBILE_CONFIG || join(HOG_DATA_DIR, "mobile.json") });
+let mobileError = "";
+
+/** Container list and start/stop/restart through mobile_guard.py (Guard rules). */
+export function mobileContainers(action, name = "", { python = process.env.HOG_PYTHON || "python3", timeoutMs = 90_000 } = {}) {
+  const args = [join(APP_ROOT, "mobile_guard.py"), action];
+  if (name) args.push(name);
+  return new Promise((resolve) => {
+    execFile(python, args, { cwd: APP_ROOT, timeout: timeoutMs, maxBuffer: 2_000_000, env: { ...process.env, HOG_DATA: HOG_DATA_DIR } }, (error, stdout) => {
+      try {
+        const payload = JSON.parse(String(stdout || "").trim().split("\n").pop() || "{}");
+        if (payload && typeof payload === "object" && Array.isArray(payload.items)) {
+          resolve(payload);
+          return;
+        }
+      } catch {
+        // fall through
+      }
+      resolve({ ok: false, error: error?.killed ? "Docker took too long." : "Containers are not available right now.", docker: false, items: [], jellyfinUrl: "" });
+    });
+  });
+}
+
+function mobileHogInfo() {
+  const ipv4 = tailnetAddresses().find((a) => a.family === 4)?.address || "";
+  if (ipv4) refreshTailnetName(ipv4);
+  return { name: "hog", version: SERVER_VERSION, dnsName: tailnetDnsName, ip: ipv4, port: MOBILE_LISTENER.status().port || mobilePort() };
+}
+
+const MOBILE_API = createMobileApi({
+  state: MOBILE_STATE,
+  files: FILES,
+  mining: () => miningStatus(miningEnabled),
+  containers: (action, name) => mobileContainers(action, name),
+  info: mobileHogInfo,
+});
+const MOBILE_LISTENER = createMobileListener({ handler: MOBILE_API, findTailnet: process.env.HOG_MOBILE_NO_TAILNET === "1" ? () => [] : tailnetAddresses });
+
+async function setMobile(enabled) {
+  mobileError = "";
+  if (!enabled) {
+    await MOBILE_LISTENER.stop();
+    return;
+  }
+  try {
+    await MOBILE_LISTENER.start(mobilePort());
+  } catch (error) {
+    mobileError = error?.code === "EADDRINUSE"
+      ? `Port ${mobilePort()} is already in use. Set HOG_MOBILE_PORT to another port.`
+      : (error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** What Settings → Tailscale → Phone app shows. Never includes tokens or hashes. */
+export function mobileStatus() {
+  const listener = MOBILE_LISTENER.status();
+  const hog = mobileHogInfo();
+  const pairing = MOBILE_STATE.pairingInfo();
+  const port = listener.port || mobilePort();
+  let pair = null;
+  if (pairing) {
+    const uri = pairUri({ host: hog.dnsName, ip: hog.ip, port, code: pairing.plain });
+    pair = { code: pairing.code, expiresAt: pairing.expiresAt, triesLeft: pairing.tries, uri, qr: qrSvg(uri) };
+  }
+  return {
+    ok: true,
+    enabled: MOBILE_STATE.enabled,
+    listening: listener.listening,
+    tailnetListening: listener.tailnetHosts,
+    port,
+    dnsName: hog.dnsName,
+    ip: hog.ip,
+    address: hog.dnsName || hog.ip,
+    error: mobileError || listener.error,
+    devices: MOBILE_STATE.devices(),
+    pairing: pair,
+  };
+}
+
 const MINING_STATE_FILE = join(homedir(), ".local/share/hog-browser/mining.json");
 // "auto" follows the network the node tab is running; "defi" / "mainnet" pin it.
 let miningNetworkSetting = "auto";
@@ -1498,7 +1581,7 @@ async function handle(req, res, runtime) {
       return;
     }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
-    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining") && !walletRequest) {
+    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile") && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
       return;
     }
@@ -1510,6 +1593,36 @@ async function handle(req, res, runtime) {
       }
       const address = req.socket.localPort || PORT;
       await handleFilesRequest(FILES, req, res, url, { origin: `http://${WALLET_HOST}:${address}` });
+      return;
+    }
+
+    if (url.pathname === "/api/mobile" && req.method === "GET") {
+      send(res, 200, mobileStatus());
+      return;
+    }
+    if (url.pathname === "/api/mobile" && req.method === "POST") {
+      if (req.headers["x-hog-mobile"] !== "1") {
+        send(res, 403, { ok: false, error: "Open Hog to change this" });
+        return;
+      }
+      const payload = await readJson(req);
+      try {
+        if (payload.enabled !== undefined) {
+          if (typeof payload.enabled !== "boolean") throw new Error("enabled must be true or false");
+          if (payload.enabled !== MOBILE_STATE.enabled) {
+            MOBILE_STATE.setEnabled(payload.enabled);
+            await setMobile(payload.enabled);
+          }
+        }
+        if (payload.action === "pair") MOBILE_STATE.startPairing();
+        else if (payload.action === "cancel-pair") MOBILE_STATE.cancelPairing();
+        else if (payload.action === "revoke") MOBILE_STATE.revoke(payload.id);
+        else if (payload.action !== undefined) throw new Error("action must be pair, cancel-pair or revoke");
+      } catch (error) {
+        send(res, 400, { ...mobileStatus(), ok: false, error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      send(res, 200, mobileStatus());
       return;
     }
 
@@ -1652,6 +1765,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
     for (const child of runtime.siteServers) child.close();
     STRATUM.stop();
     MINING.stop();
+    MOBILE_LISTENER.stop();
     return closeMain(callback);
   };
   return new Promise((resolve) => {
@@ -1659,11 +1773,19 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
   });
 }
 
+/** Test hooks for the phone app API. */
+export const mobileInternals = { state: MOBILE_STATE, listener: MOBILE_LISTENER, api: MOBILE_API, setMobile };
+
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const server = await startServer(PORT, { persistSites: true });
   ({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting, tailnet: miningTailnet } = readMiningState());
   if (miningEnabled) await setMining(true);
+  if (MOBILE_STATE.enabled) {
+    await setMobile(true);
+    const phone = MOBILE_LISTENER.status();
+    console.log(phone.listening ? `Hog phone app API on ${phone.hosts.join(", ")} port ${phone.port}` : `Hog phone app API is off: ${mobileError}`);
+  }
   if (process.env.HOG_MINING === "1" && !miningEnabled) {
     miningEnabled = true;
     await setMining(true);

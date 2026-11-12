@@ -685,6 +685,29 @@
               <ul id="samba-links" class="fx-smb-links samba-links" hidden></ul>
               <p class="note">Samba listens only on hog's Tailscale address and on this computer (127.0.0.1), never on your home network. It needs the tailscale container running on Docker Engine. The first Turn on downloads the dockurr/samba image.</p>
             </section>
+            <section id="phone-card" class="connect-card phone-card" aria-label="Phone app">
+              <p class="eyebrow">Phone app (tailnet)</p>
+              <p id="phone-state" class="note" role="status">Off. Turn it on to use the Hog phone app over your tailnet.</p>
+              <div class="row">
+                <button type="button" id="phone-toggle" class="primary">Turn on</button>
+                <button type="button" id="phone-pair" disabled>Pair a phone</button>
+              </div>
+              <div id="phone-pairing" class="phone-pairing" hidden>
+                <div id="phone-qr" class="phone-qr" aria-label="Pairing QR code"></div>
+                <div class="phone-pair-text">
+                  <p class="note">In the Hog app, tap <strong>Scan QR</strong>, or type the address and code:</p>
+                  <p class="phone-host"><span id="phone-host"></span></p>
+                  <p class="phone-code" id="phone-code"></p>
+                  <p class="note" id="phone-expiry"></p>
+                  <button type="button" id="phone-pair-cancel">Cancel</button>
+                </div>
+              </div>
+              <p id="phone-error" class="error" role="status"></p>
+              <p class="eyebrow">Paired phones</p>
+              <p id="phone-devices-empty" class="note">No phones yet.</p>
+              <ul id="phone-devices" class="phone-devices"></ul>
+              <p class="note">The phone app can see container status and start, stop or restart hog's containers, open Jellyfin, read mining stats, and use Files (~/hog-shares and folders you added). It cannot reach the wallet, keys or anything else in hog. It answers only on hog's Tailscale address and this computer, never your home network. Remove a phone to cut it off at once.</p>
+            </section>
             <details id="exit-node-guide" class="connect-card exit-node-guide">
               <summary>Setting up your exit node</summary>
               <ol class="share-steps">

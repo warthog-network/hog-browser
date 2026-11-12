@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Plain HTTP is allowed only to Tailscale MagicDNS names (*.ts.net).
+     Tailscale encrypts the traffic end to end (WireGuard). Everything else
+     needs HTTPS. The app itself also refuses any hog address that is not a
+     *.ts.net name (see Tailnet.kt). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">ts.net</domain>
+    </domain-config>
+</network-security-config>
