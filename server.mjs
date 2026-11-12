@@ -14,7 +14,7 @@ import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs
 import { createFilesService, handleFilesRequest } from "./files.mjs";
 import { execFile } from "node:child_process";
 import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
-import { createLanForwarder, createLanState, lanStatus } from "./jellyfin-lan.mjs";
+import { canPrompt, changeFirewall, createLanForwarder, createLanState, lanAddresses, lanStatus, runUfw, ufwEnabled } from "./jellyfin-lan.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -132,11 +132,33 @@ async function setJellyfinLan(enabled) {
   else await JELLYFIN_LAN.stop();
 }
 
+// Swappable in tests; the real one runs pkexec ufw with a fixed argv.
+const JELLYFIN_FIREWALL = {
+  run: runUfw,
+  enabled: () => ufwEnabled(process.env.HOG_UFW_CONF || "/etc/ufw/ufw.conf"),
+  prompt: () => canPrompt(),
+  findLan: process.env.HOG_JELLYFIN_LAN_NO_LAN === "1" ? () => [] : lanAddresses,
+};
+
 /** What Settings → Containers → Jellyfin → Home network access shows. */
 export function jellyfinLanStatus() {
   return lanStatus(JELLYFIN_LAN_STATE, JELLYFIN_LAN, {
     targetPort: Number(process.env.HOG_JELLYFIN_PORT || 8096),
-    ...(process.env.HOG_JELLYFIN_LAN_NO_LAN === "1" ? { findLan: () => [] } : {}),
+    findLan: () => JELLYFIN_FIREWALL.findLan(),
+    firewall: () => JELLYFIN_FIREWALL.enabled(),
+    prompt: () => JELLYFIN_FIREWALL.prompt(),
+  });
+}
+
+/** "Allow through firewall" / "Remove firewall rule": polkit asks for the password, never Hog. */
+async function jellyfinFirewall(remove) {
+  if (!JELLYFIN_FIREWALL.enabled()) return { ok: false, error: "The ufw firewall is off, so there is nothing to change." };
+  if (!JELLYFIN_FIREWALL.prompt()) return { ok: false, error: "This computer cannot show a password prompt (pkexec is missing). Run the command shown in a terminal." };
+  return changeFirewall(JELLYFIN_LAN_STATE, {
+    remove,
+    addresses: JELLYFIN_FIREWALL.findLan(),
+    port: JELLYFIN_LAN.status().port || Number(process.env.HOG_JELLYFIN_LAN_PORT || 8096),
+    run: (rule, opts) => JELLYFIN_FIREWALL.run(rule, opts),
   });
 }
 
@@ -1714,6 +1736,15 @@ async function handle(req, res, runtime) {
         return;
       }
       const payload = await readJson(req);
+      if (payload.action === "firewall-allow" || payload.action === "firewall-remove") {
+        const result = await jellyfinFirewall(payload.action === "firewall-remove");
+        send(res, 200, { ...(await jellyfinLanStatus()), ok: result.ok, error: result.error || "", notice: result.notice || "", cancelled: Boolean(result.cancelled) });
+        return;
+      }
+      if (payload.action !== undefined) {
+        send(res, 400, { ...(await jellyfinLanStatus()), ok: false, error: "action must be firewall-allow or firewall-remove" });
+        return;
+      }
       if (typeof payload.enabled !== "boolean") {
         send(res, 400, { ...(await jellyfinLanStatus()), ok: false, error: "enabled must be true or false" });
         return;
@@ -1875,7 +1906,7 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
 /** Test hooks for the phone app API. */
 export const mobileInternals = { state: MOBILE_STATE, listener: MOBILE_LISTENER, api: MOBILE_API, setMobile };
 /** Test hooks for Jellyfin home network access. */
-export const jellyfinLanInternals = { state: JELLYFIN_LAN_STATE, forwarder: JELLYFIN_LAN, setJellyfinLan };
+export const jellyfinLanInternals = { state: JELLYFIN_LAN_STATE, forwarder: JELLYFIN_LAN, setJellyfinLan, firewall: JELLYFIN_FIREWALL };
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {

@@ -335,7 +335,7 @@ button { cursor: pointer; }
 
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }
-#endpoint-lan, #endpoint-public, #tailscale-up, #share-publish, #share-enable, #jellyfin-copy, #jellyfin-lan-urls button, .share-name button {
+#endpoint-lan, #endpoint-public, #tailscale-up, #share-publish, #share-enable, #jellyfin-copy, #jellyfin-lan-urls button, #jellyfin-lan-fw-allow, #jellyfin-lan-fw-remove, .share-name button {
   border: 1px solid rgba(var(--accent-rgb), 0.55);
   background: var(--panel);
   color: var(--gold);
@@ -1774,3 +1774,6 @@ h3 { margin: 8px 0; font-size: 18px; }
 #jellyfin-lan-urls { flex-wrap: wrap; row-gap: 6px; }
 #jellyfin-lan-urls strong { font-size: 22px; }
 #jellyfin-lan-urls button { margin: 0; padding: 4px 12px; }
+.jellyfin-lan-firewall { margin-top: 10px; }
+.jellyfin-lan-firewall .row { display: flex; gap: 8px; margin: 6px 0; }
+.jellyfin-lan-firewall pre { white-space: pre-wrap; word-break: break-all; }

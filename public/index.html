@@ -489,9 +489,17 @@
             </div>
             <div id="jellyfin-lan-urls" class="connect-addr" hidden></div>
             <p id="jellyfin-lan-error" class="error" role="status"></p>
-            <div id="jellyfin-lan-firewall" hidden>
-              <p class="note">The ufw firewall is on, so it may block the TV. If the TV cannot connect, run this once in a terminal. Hog never changes your firewall.</p>
-              <pre id="jellyfin-lan-firewall-cmd" class="mono"></pre>
+            <div id="jellyfin-lan-firewall" class="jellyfin-lan-firewall" hidden>
+              <p id="jellyfin-lan-fw-text" class="note"></p>
+              <div class="row">
+                <button type="button" id="jellyfin-lan-fw-allow" hidden>Allow through firewall</button>
+                <button type="button" id="jellyfin-lan-fw-remove" hidden>Remove firewall rule</button>
+              </div>
+              <p id="jellyfin-lan-fw-msg" class="note" role="status"></p>
+              <details id="jellyfin-lan-fw-manual" class="settings-sub">
+                <summary>Or run this in a terminal</summary>
+                <pre id="jellyfin-lan-firewall-cmd" class="mono"></pre>
+              </details>
             </div>
             <p class="note">Reachable by devices on your home Wi-Fi, not the internet. In the TV's Jellyfin app, add the server by hand with the address above. Reserve this computer's IP in your router so the address stays the same.</p>
           </section>

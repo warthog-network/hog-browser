@@ -15,6 +15,7 @@ process.env.HOG_MOBILE_NO_TAILNET = "1";
 process.env.HOG_JELLYFIN_LAN_CONFIG = join(base, "data", "jellyfin-lan.json");
 process.env.HOG_JELLYFIN_LAN_NO_LAN = "1";
 process.env.HOG_JELLYFIN_PORT = "1";
+process.env.HOG_UFW_CONF = join(base, "no-ufw.conf");
 const { startServer, jellyfinLanInternals } = await import("../server.mjs");
 
 function gateFrom(response) {
@@ -61,4 +62,44 @@ test("the Jellyfin card is in Settings → Containers", () => {
   assert.ok(containers > 0 && lan > containers, "Home network access sits under the GPU card");
   assert.match(html, /not the internet/);
   assert.match(html, /Reserve this computer's IP in your router/);
+});
+
+test("firewall actions go through the swappable runner and report cancel", async () => {
+  const server = await startServer(0);
+  const { port } = server.address();
+  const origin = `http://127.0.0.1:${port}`;
+  const fw = jellyfinLanInternals.firewall;
+  const saved = { ...fw };
+  const calls = [];
+  try {
+    const cookie = gateFrom(await fetch(`${origin}/`));
+    const post = (body) => fetch(`${origin}/api/jellyfin-lan`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-hog-lan": "1" }, body: JSON.stringify(body) }).then((r) => r.json());
+    const off = await post({ action: "firewall-allow" });
+    assert.equal(off.ok, false);
+    assert.match(off.error, /ufw firewall is off/);
+    fw.enabled = () => true;
+    fw.prompt = () => false;
+    assert.match((await post({ action: "firewall-allow" })).error, /pkexec is missing/);
+    fw.prompt = () => true;
+    fw.findLan = () => [{ name: "wlp4s0", address: "192.168.1.223", subnet: "192.168.1.0/24" }];
+    fw.run = async (rule, opts) => { calls.push({ rule, opts }); return { ok: false, cancelled: true, error: "The password prompt was cancelled or not authorised. Nothing changed." }; };
+    const cancelled = await post({ action: "firewall-allow" });
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(cancelled.ufw.needed, true);
+    assert.match(cancelled.ufw.commands[0], /^sudo ufw allow in on wlp4s0 from 192\.168\.1\.0\/24 to any port 8096/);
+    fw.run = async (rule, opts) => { calls.push({ rule, opts }); return { ok: true }; };
+    const allowed = await post({ action: "firewall-allow" });
+    assert.equal(allowed.ok, true);
+    assert.equal(allowed.ufw.needed, false);
+    assert.deepEqual(allowed.ufw.added, [{ iface: "wlp4s0", subnet: "192.168.1.0/24", port: 8096 }]);
+    const removed = await post({ action: "firewall-remove" });
+    assert.equal(removed.ok, true);
+    assert.deepEqual(removed.ufw.added, []);
+    assert.equal(calls.at(-1).opts.remove, true);
+    assert.equal((await fetch(`${origin}/api/jellyfin-lan`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-hog-lan": "1" }, body: JSON.stringify({ action: "sudo" }) })).status, 400);
+  } finally {
+    Object.assign(fw, saved);
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

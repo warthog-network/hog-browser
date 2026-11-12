@@ -9,6 +9,7 @@
 // It never listens on 0.0.0.0, a Docker bridge, a VPN or Tailscale address,
 // and it drops peers that are not on a private network, so a router port
 // forward cannot expose Jellyfin to the internet through it.
+import { execFile as nodeExecFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, isIP } from "node:net";
 import { networkInterfaces } from "node:os";
@@ -85,40 +86,165 @@ export function ufwEnabled(file = "/etc/ufw/ufw.conf") {
   }
 }
 
-/** The ufw rules a user can run to let home devices in (Hog never runs them). */
-export function ufwCommands(addresses, port = JELLYFIN_PORT) {
+export const UFW_COMMENT = "Jellyfin on home network (Hog)";
+export const PKEXEC = "/usr/bin/pkexec";
+export const UFW = "/usr/sbin/ufw";
+const IFACE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$/;
+
+/** A rule Hog may add: real LAN interface, private network address in CIDR form, valid port. */
+export function validUfwRule(rule) {
+  if (!rule || typeof rule !== "object") return false;
+  const { iface, subnet, port } = rule;
+  if (typeof iface !== "string" || !IFACE_RE.test(iface) || VIRTUAL_IFACE.test(iface)) return false;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+  const m = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(String(subnet || ""));
+  if (!m) return false;
+  const bits = Number(m[2]);
+  if (bits < 8 || bits > 32 || !isPrivateIpv4(m[1])) return false;
+  return subnetOf(m[1], `${m[1]}/${bits}`) === subnet;
+}
+
+function cleanRule(rule) {
+  return { iface: rule.iface, subnet: rule.subnet, port: rule.port };
+}
+
+/** Rules for this computer's current home-network interfaces. */
+export function ufwRulesFor(addresses, port = JELLYFIN_PORT) {
   const out = [];
-  for (const a of addresses) {
-    if (!a || !a.subnet || !/^[A-Za-z0-9_.:-]{1,15}$/.test(a.name || "")) continue;
-    const cmd = `sudo ufw allow in on ${a.name} from ${a.subnet} to any port ${port} proto tcp comment 'Jellyfin on home network (Hog)'`;
-    if (!out.includes(cmd)) out.push(cmd);
+  for (const a of addresses || []) {
+    const rule = { iface: a?.name, subnet: a?.subnet, port };
+    if (validUfwRule(rule) && !out.some((r) => r.iface === rule.iface && r.subnet === rule.subnet)) out.push(rule);
   }
   return out;
+}
+
+/** Fixed argv for ufw (no shell). */
+export function ufwArgs(rule, remove = false) {
+  if (!validUfwRule(rule)) throw new Error("That firewall rule is not valid.");
+  const spec = ["allow", "in", "on", rule.iface, "from", rule.subnet, "to", "any", "port", String(rule.port), "proto", "tcp"];
+  return remove ? ["delete", ...spec] : [...spec, "comment", UFW_COMMENT];
+}
+
+/** The line a user can paste into a terminal instead. */
+export function ufwCommandText(rule, remove = false) {
+  return `sudo ufw ${ufwArgs(rule, remove).map((a) => (a === UFW_COMMENT ? `'${a}'` : a)).join(" ")}`;
+}
+
+/** The ufw rules a user can run to let home devices in. */
+export function ufwCommands(addresses, port = JELLYFIN_PORT) {
+  return ufwRulesFor(addresses, port).map((rule) => ufwCommandText(rule));
+}
+
+/** Whether Hog can ask for the password with polkit's own dialog. */
+export function canPrompt({ exists = existsSync } = {}) {
+  return exists(PKEXEC) && exists(UFW);
+}
+
+/**
+ * Runs ufw through pkexec, so polkit shows its own password dialog and Hog
+ * never sees the password. execFile with a fixed argv, never a shell.
+ * Resolves { ok, cancelled, error, output }.
+ */
+export function runUfw(rule, { remove = false, execFile = nodeExecFile, timeoutMs = 180_000 } = {}) {
+  let args;
+  try {
+    args = [UFW, ...ufwArgs(rule, remove)];
+  } catch (error) {
+    return Promise.resolve({ ok: false, cancelled: false, error: error.message, output: "" });
+  }
+  return new Promise((resolve) => {
+    execFile(PKEXEC, args, { timeout: timeoutMs, maxBuffer: 64_000, env: { ...process.env, LC_ALL: "C" } }, (error, stdout, stderr) => {
+      const output = `${stdout || ""}${stderr || ""}`.trim().slice(-400);
+      if (!error) {
+        resolve({ ok: true, cancelled: false, error: "", output });
+        return;
+      }
+      const code = typeof error.code === "number" ? error.code : null;
+      if (code === 126 || code === 127) {
+        resolve({ ok: false, cancelled: true, error: "The password prompt was cancelled or not authorised. Nothing changed.", output });
+      } else if (error.killed) {
+        resolve({ ok: false, cancelled: false, error: "The password prompt timed out. Nothing changed.", output });
+      } else if (error.code === "ENOENT") {
+        resolve({ ok: false, cancelled: false, error: "pkexec is not available. Run the command below in a terminal instead.", output });
+      } else {
+        const last = output.split("\n").filter(Boolean).pop() || `ufw exited with ${code ?? "an error"}`;
+        resolve({ ok: false, cancelled: false, error: `The firewall did not change: ${last}`, output });
+      }
+    });
+  });
+}
+
+/**
+ * Add or remove Hog's ufw rules. Allow uses this computer's current LAN
+ * interfaces; remove uses the rules Hog recorded adding (and current ones).
+ */
+export async function changeFirewall(state, { remove = false, addresses = [], port = JELLYFIN_PORT, run = runUfw } = {}) {
+  const current = ufwRulesFor(addresses, port);
+  let targets = current;
+  if (remove) {
+    targets = [...state.rules];
+    for (const rule of current) if (!targets.some((r) => r.iface === rule.iface && r.subnet === rule.subnet && r.port === rule.port)) targets.push(rule);
+  }
+  if (!targets.length) return { ok: false, error: remove ? "There is no Hog firewall rule to remove." : "This computer has no home-network address to allow." };
+  for (const rule of targets) {
+    const result = await run(rule, { remove });
+    if (!result.ok) return { ok: false, cancelled: result.cancelled, error: result.error };
+    if (remove) state.dropRule(rule);
+    else state.addRule(rule);
+  }
+  return {
+    ok: true,
+    error: "",
+    notice: remove ? "Removed Hog's firewall rule for Jellyfin." : "The firewall now lets devices on your home network reach Jellyfin.",
+  };
 }
 
 export function lanUrls(addresses, port = JELLYFIN_PORT) {
   return addresses.map((a) => `http://${typeof a === "string" ? a : a.address}:${port}`);
 }
 
-/** Persisted on/off switch. Default off. */
+/** Persisted on/off switch (default off) and the ufw rules Hog added. */
 export function createLanState({ file }) {
   let enabled = false;
+  let rules = [];
   try {
-    if (file && existsSync(file)) enabled = JSON.parse(readFileSync(file, "utf8")).enabled === true;
+    if (file && existsSync(file)) {
+      const saved = JSON.parse(readFileSync(file, "utf8"));
+      enabled = saved.enabled === true;
+      rules = Array.isArray(saved.rules) ? saved.rules.filter((r) => validUfwRule(r)).map(cleanRule) : [];
+    }
   } catch {
     enabled = false;
+    rules = [];
   }
+  function save() {
+    if (!file) return;
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    const body = rules.length ? { enabled, rules } : { enabled };
+    writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, file);
+  }
+  const same = (a, b) => a.iface === b.iface && a.subnet === b.subnet && a.port === b.port;
   return {
     get enabled() {
       return enabled;
     },
+    get rules() {
+      return rules.map((r) => ({ ...r }));
+    },
     setEnabled(value) {
       enabled = value === true;
-      if (!file) return;
-      mkdirSync(dirname(file), { recursive: true });
-      const tmp = `${file}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify({ enabled }, null, 2)}\n`, { mode: 0o600 });
-      renameSync(tmp, file);
+      save();
+    },
+    addRule(rule) {
+      if (!validUfwRule(rule)) return;
+      if (!rules.some((r) => same(r, rule))) rules.push(cleanRule(rule));
+      save();
+    },
+    dropRule(rule) {
+      rules = rules.filter((r) => !same(r, rule));
+      save();
     },
   };
 }
@@ -264,7 +390,7 @@ export function createLanForwarder({
 }
 
 /** What the Jellyfin card shows. */
-export async function lanStatus(state, forwarder, { findLan = lanAddresses, probe = probeTcp, targetHost = "127.0.0.1", targetPort = JELLYFIN_PORT, firewall = ufwEnabled } = {}) {
+export async function lanStatus(state, forwarder, { findLan = lanAddresses, probe = probeTcp, targetHost = "127.0.0.1", targetPort = JELLYFIN_PORT, firewall = ufwEnabled, prompt = canPrompt } = {}) {
   const fwd = forwarder.status();
   let candidates = [];
   try {
@@ -282,7 +408,25 @@ export async function lanStatus(state, forwarder, { findLan = lanAddresses, prob
     addresses: candidates.map((a) => ({ name: a.name, address: a.address, subnet: a.subnet || "" })),
     suggested: lanUrls(candidates, fwd.port),
     jellyfinUp,
-    ufw: firewall() ? { enabled: true, commands: ufwCommands(candidates, fwd.port) } : { enabled: false, commands: [] },
+    ufw: firewallStatus(state, candidates, fwd.port, { firewall, prompt }),
     error: state.enabled ? fwd.error : "",
+  };
+}
+
+/** Firewall part of the card. "added" is what Hog itself added; other rules are unknown without root. */
+export function firewallStatus(state, candidates, port = JELLYFIN_PORT, { firewall = ufwEnabled, prompt = canPrompt } = {}) {
+  const added = state.rules || [];
+  const current = ufwRulesFor(candidates, port);
+  const known = (rule) => added.some((r) => r.iface === rule.iface && r.subnet === rule.subnet && r.port === rule.port);
+  const removable = [...added];
+  for (const rule of current) if (!known(rule)) removable.push(rule);
+  if (!firewall()) return { enabled: false, canPrompt: false, needed: false, commands: [], added, removeCommands: added.map((r) => ufwCommandText(r, true)) };
+  return {
+    enabled: true,
+    canPrompt: Boolean(prompt()),
+    needed: current.some((rule) => !known(rule)),
+    commands: current.map((rule) => ufwCommandText(rule)),
+    added,
+    removeCommands: removable.map((r) => ufwCommandText(r, true)),
   };
 }
