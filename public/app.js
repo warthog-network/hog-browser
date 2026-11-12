@@ -7,6 +7,8 @@ import {
 } from "./chains-bundle.js";
 import { answerDappRequest, CHAINS, DappError } from "./dapp-bundle.js";
 import { FitAddon, Terminal } from "./xterm-bundle.js";
+import { smbLinks } from "./files-core.js";
+import { createFilesView } from "./files-view.js";
 import {
   createAccount,
   signAssetCreation,
@@ -396,6 +398,7 @@ function reportShareDrop() {
 
 function hideBrowserSettings() {
   hideBookmarksView();
+  hideFilesView();
   const panel = $("browser-settings");
   const menu = $("settings-menu");
   if (menu) menu.hidden = true;
@@ -418,12 +421,14 @@ function hideShell() {
 function pageSurfaceClear() {
   const shell = $("shell-view");
   const marks = $("bookmarks-view");
-  return home.hidden && $("browser-settings").hidden && (!shell || shell.hidden) && (!marks || marks.hidden);
+  const filesPage = $("files-view");
+  return home.hidden && $("browser-settings").hidden && (!shell || shell.hidden) && (!marks || marks.hidden) && (!filesPage || filesPage.hidden);
 }
 
 function showBrowserSettings() {
   hideShell();
   hideBookmarksView();
+  hideFilesView();
   hideBookmarkRow();
   hideSuggestions();
   closePopovers();
@@ -450,6 +455,10 @@ function normalizeSettingsPage(page) {
 }
 
 function showSettingsPage(page) {
+  if (page === "explorer") {
+    showFilesView();
+    return;
+  }
   const next = normalizeSettingsPage(page);
   const wasHidden = $("browser-settings").hidden;
   if (wasHidden) showBrowserSettings();
@@ -473,6 +482,8 @@ function showSettingsPage(page) {
   if (next === "files" || next === "tailscale") {
     desktopCommand("containers:share-status");
   }
+  if (next === "files") renderFilesRoots();
+  if (next === "tailscale") desktopCommand("containers:samba-status");
   if (next === "mining") refreshMining();
   if (next === "general") {
     desktopCommand("containers:browser-default");
@@ -1083,6 +1094,292 @@ function hideBookmarkRow() {
 function bookmarkRowItem() {
   const id = $("bookmark-row").dataset.id;
   return bmLoad().items.find((item) => item.id === id) || null;
+}
+
+// ---------- hog://files ----------
+
+let filesView = null;
+
+function files() {
+  if (!filesView) {
+    filesView = createFilesView({
+      desktopCommand: (command) => desktopCommand(command),
+      openSettings: (page) => showSettingsPage(page),
+      copyText: (text) => copyPlainText(text),
+    });
+  }
+  return filesView;
+}
+
+function filesViewOpen() {
+  return Boolean(filesView && filesView.isOpen());
+}
+
+function hideFilesView() {
+  if (!filesViewOpen()) return;
+  filesView.close();
+  if (/^hog:\/\/files/i.test(addressInput.value)) addressInput.value = activeTab()?.url || "";
+}
+
+function showFilesView(target = {}) {
+  hideShell();
+  hideSuggestions();
+  closePopovers();
+  hideBrowserSettings();
+  hideBookmarkRow();
+  viewSeq += 1;
+  home.hidden = true;
+  status.hidden = true;
+  frame.hidden = true;
+  $("view").classList.remove("is-page");
+  frame.removeAttribute("srcdoc");
+  if (frame.getAttribute("src")) frame.src = "about:blank";
+  parkNode();
+  addressInput.value = "hog://files";
+  files().open(target).catch((error) => showToast(error.message || "Files did not open.", "error"));
+  reportView(false);
+  // Same as hog://bookmarks: later frames must keep the page view hidden.
+  requestAnimationFrame(() => {
+    if (filesViewOpen()) reportView(false);
+    requestAnimationFrame(() => { if (filesViewOpen()) reportView(false); });
+  });
+}
+
+async function copyPlainText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
+}
+
+async function filesApi(route, { method = "GET", body } = {}) {
+  const init = { method, headers: {}, credentials: "same-origin", cache: "no-store" };
+  if (method !== "GET") init.headers["x-hog-files"] = "1";
+  if (body !== undefined) {
+    init.headers["content-type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const response = await fetch(`/api/files/${route}`, init);
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+  if (!response.ok || data.ok === false) throw new Error(data.error || `Files answered ${response.status}.`);
+  return data;
+}
+
+function filesRootStatus(message, error = false) {
+  const box = $("files-root-status");
+  if (!box) return;
+  box.textContent = message || "";
+  box.classList.toggle("error", Boolean(error));
+}
+
+function paintFilesRoots(roots) {
+  const list = $("files-roots-list");
+  if (!list) return;
+  list.replaceChildren();
+  for (const root of roots) {
+    const row = document.createElement("li");
+    const text = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = root.name;
+    const path = document.createElement("small");
+    path.textContent = root.ok === false ? `${root.path} · ${root.error || "offline"}` : root.path;
+    text.append(name, path);
+    row.append(text);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "tiny";
+    open.textContent = "Open";
+    open.addEventListener("click", () => showFilesView({ root: root.id, path: "" }));
+    row.append(open);
+    if (!root.builtin) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "tiny";
+      remove.textContent = "Remove";
+      remove.title = "Take it out of Files. Nothing on disk is deleted.";
+      remove.addEventListener("click", async () => {
+        try {
+          const data = await filesApi("roots", { method: "POST", body: { action: "remove", id: root.id } });
+          paintFilesRoots(data.roots || []);
+          filesRootStatus(`Removed ${root.name} from Files. Its files are untouched.`);
+          if (filesView) filesView.refreshRoots();
+        } catch (error) {
+          filesRootStatus(error.message, true);
+        }
+      });
+      row.append(remove);
+    }
+    list.append(row);
+  }
+}
+
+async function renderFilesRoots() {
+  try {
+    const data = await filesApi("roots");
+    paintFilesRoots(data.roots || []);
+  } catch (error) {
+    filesRootStatus(error.message, true);
+  }
+}
+
+async function addFilesRoot(path) {
+  const text = String(path || "").trim();
+  if (!text) {
+    filesRootStatus("Type a folder path, or press Browse.", true);
+    return;
+  }
+  try {
+    const data = await filesApi("roots", { method: "POST", body: { action: "add", path: text } });
+    paintFilesRoots(data.roots || []);
+    const added = (data.roots || []).find((root) => root.id === data.added);
+    filesRootStatus(added ? `Added ${added.name}. It shows in hog://files.` : "Added.");
+    const input = $("files-root-path");
+    if (input) input.value = "";
+    if (filesView) filesView.refreshRoots();
+  } catch (error) {
+    filesRootStatus(error.message, true);
+  }
+}
+
+window.__hogFilesRoot = (path) => {
+  if (typeof path === "string") addFilesRoot(path);
+};
+
+window.__hogFilesSaved = (name) => {
+  if (typeof name === "string" && name) showToast(`Saved ${name}.`);
+};
+
+function bindFilesSettings() {
+  const form = $("files-root-form");
+  if (!form) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    addFilesRoot($("files-root-path").value);
+  });
+  $("files-root-browse").addEventListener("click", () => {
+    if (window.__hogDesktop) desktopCommand("files:pick-root");
+    else filesRootStatus("Type the folder path. The folder picker needs the Hog app.", true);
+  });
+  $("files-open").addEventListener("click", () => showFilesView());
+}
+
+// ---------- Samba (tailnet network drive) ----------
+
+let sambaState = null;
+let sambaBusy = false;
+
+function sambaMessage(text, error = false) {
+  const box = $("samba-error");
+  if (!box) return;
+  box.textContent = text || "";
+  box.classList.toggle("is-notice", !error && Boolean(text));
+}
+
+function paintSambaCard() {
+  const card = $("samba-card");
+  if (!card) return;
+  const samba = sambaState || {};
+  const stateText = $("samba-state");
+  const toggle = $("samba-toggle");
+  const user = $("samba-user");
+  if (user && document.activeElement !== user && samba.user) user.value = samba.user;
+  const pass = $("samba-pass");
+  if (pass) pass.placeholder = samba.passwordSet ? "Saved. Type to change it" : "8 characters or more";
+  if (sambaBusy) {
+    stateText.textContent = "Working…";
+  } else if (samba.running) {
+    stateText.textContent = `On. ~/hog-shares is shared as “${samba.share || "hog-shares"}” on ${samba.ip || "the Tailscale address"} and 127.0.0.1 only. Sign in as ${samba.user}.`;
+  } else if (samba.enabled) {
+    stateText.textContent = "Samba was on but is not running. Turn it on again once Tailscale is up.";
+  } else {
+    stateText.textContent = "Off. Turn it on to open ~/hog-shares as a drive on your phone or another computer in your tailnet.";
+  }
+  toggle.textContent = samba.running ? "Turn off" : samba.exists ? "Turn on" : "Download and turn on";
+  toggle.disabled = sambaBusy || (!samba.running && (!samba.user || !samba.passwordSet));
+  toggle.title = !samba.user || !samba.passwordSet ? "Save a user and password first." : "";
+  card.classList.toggle("is-on", Boolean(samba.running));
+  const list = $("samba-links");
+  list.replaceChildren();
+  list.hidden = !samba.running;
+  if (samba.running) {
+    for (const link of smbLinks({ dns: samba.dns, ip: samba.ip, share: samba.share || "hog-shares" })) {
+      const row = document.createElement("li");
+      const label = document.createElement("small");
+      label.textContent = link.label;
+      const code = document.createElement("code");
+      code.textContent = link.value;
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "tiny";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", () => {
+        copyPlainText(link.value);
+        copy.textContent = "Copied";
+        setTimeout(() => { copy.textContent = "Copy"; }, 1500);
+      });
+      row.append(label, code, copy);
+      list.append(row);
+    }
+  }
+}
+
+window.__hogSamba = (payload) => {
+  if (!payload || typeof payload !== "object") return;
+  if (payload.imagePull && payload.imagePull.status) {
+    sambaMessage(`${payload.imagePull.status} ${payload.imagePull.image || ""}`.trim());
+    return;
+  }
+  sambaBusy = false;
+  if (payload.samba) sambaState = payload.samba;
+  if (payload.error) sambaMessage(payload.error, true);
+  else sambaMessage(payload.notice || "");
+  paintSambaCard();
+  if (filesView) filesView.onSamba(payload);
+};
+
+function bindSambaCard() {
+  const form = $("samba-form");
+  if (!form) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const user = $("samba-user").value.trim();
+    const password = $("samba-pass").value;
+    if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) {
+      sambaMessage("Use a user name of lowercase letters, digits, - or _, starting with a letter.", true);
+      return;
+    }
+    if (password && (password.length < 8 || password.length > 128 || /[\r\n\0]/.test(password))) {
+      sambaMessage("Use a password of 8 to 128 characters, on one line.", true);
+      return;
+    }
+    if (!password && !(sambaState && sambaState.passwordSet)) {
+      sambaMessage("Type a password.", true);
+      return;
+    }
+    sambaBusy = true;
+    paintSambaCard();
+    desktopCommand(`containers:samba-save:${JSON.stringify(password ? { user, password } : { user })}`);
+    $("samba-pass").value = "";
+  });
+  $("samba-toggle").addEventListener("click", () => {
+    const on = !(sambaState && sambaState.running);
+    sambaBusy = true;
+    sambaMessage(on ? "Starting Samba…" : "Stopping Samba…");
+    paintSambaCard();
+    desktopCommand(on ? "containers:samba-on" : "containers:samba-off");
+  });
+  paintSambaCard();
 }
 
 // ---------- hog://bookmarks ----------
@@ -1853,8 +2150,8 @@ function onPageMessage(msg) {
   }
   renderTabs();
   if (tab.id !== activeId) return;
-  // A page finishing in the background must not close hog://bookmarks.
-  if (bookmarksViewOpen()) {
+  // A page finishing in the background must not close hog://bookmarks or hog://files.
+  if (bookmarksViewOpen() || filesViewOpen()) {
     updateNav();
     updateStar();
     return;
@@ -1872,6 +2169,16 @@ async function openUrl(raw, { push = true, method, fields } = {}) {
   let text = String(raw || "").trim();
   if (/^hog:\/\/bookmarks\/?$/i.test(text)) {
     showBookmarksView();
+    return;
+  }
+  if (/^hog:\/\/files(\/.*)?$/i.test(text)) {
+    let path = text.replace(/^hog:\/\/files\/?/i, "");
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      path = "";
+    }
+    showFilesView(path ? { root: "shares", path: path.replace(/\/+$/, "") } : {});
     return;
   }
   if (/^hog:\/\/settings\/?/i.test(text)) {
@@ -5624,7 +5931,7 @@ function menuItems(kind) {
     return [...$("settings-menu").querySelectorAll("[data-settings]")].map((button) => ({
       title: button.querySelector("span")?.textContent || "",
       sub: button.querySelector("small")?.textContent || "",
-      accent: button.dataset.settings === "files" || button.dataset.settings === "tailscale"
+      accent: button.dataset.settings === "files" || button.dataset.settings === "tailscale" || button.dataset.settings === "explorer"
         ? "flare"
         : button.dataset.settings === "general"
           ? "gold"
@@ -6032,6 +6339,8 @@ function bind() {
   document.querySelectorAll("#home [data-settings]").forEach((button) => {
     button.addEventListener("click", () => showSettingsPage(button.dataset.settings));
   });
+  bindFilesSettings();
+  bindSambaCard();
   restoreAccordions();
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.addEventListener("click", () => {

@@ -28,7 +28,7 @@ function rootVar(name) {
   return found ? found[1].trim().toLowerCase() : "";
 }
 
-const SURFACES = ["home", "bookmarks-view", "browser-settings", "status", "shell-view"];
+const SURFACES = ["home", "bookmarks-view", "files-view", "browser-settings", "status", "shell-view"];
 
 test("every Hog page section exists in index.html", () => {
   for (const id of SURFACES) assert.match(html, new RegExp(`id="${id}"`), `#${id} is in index.html`);
