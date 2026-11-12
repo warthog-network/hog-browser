@@ -5,7 +5,7 @@
 //   stage/hog/opfs-polyfill.js
 //   gen/preload-page.cjs   page preload with the Linux shell's page scripts
 // Run `npm run build` at the repo root first (wallet bundles).
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -34,7 +34,17 @@ await esbuild.build({
   banner: { js: 'import { createRequire as __hogCr } from "node:module"; const require = __hogCr(import.meta.url);' },
   logLevel: "warning",
 });
-cpSync(join(root, "public"), join(out, "public"), { recursive: true });
+cpSync(join(root, "public"), join(out, "public"), { recursive: true, dereference: true });
+// public/wartlogorun-wallet.mp4 is a git symlink; a Windows checkout without
+// symlink support leaves a one-line text file. Ship the real video.
+for (const name of readdirSync(join(out, "public"))) {
+  const file = join(out, "public", name);
+  const st = lstatSync(file);
+  if (st.isFile() && st.size < 256 && /\.(mp4|png|svg|js|css)$/.test(name)) {
+    const target = readFileSync(file, "utf8").trim();
+    if (/^[\w.-]+$/.test(target) && target !== name && existsSync(join(root, "public", target))) cpSync(join(root, "public", target), file);
+  }
+}
 for (const net of ["node-defi", "node-mainnet"]) cpSync(join(root, net), join(out, net), { recursive: true });
 cpSync(join(root, "opfs-polyfill.js"), join(out, "opfs-polyfill.js"));
 writeFileSync(join(out, "package.json"), '{"type":"module","private":true}\n');
