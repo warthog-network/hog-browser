@@ -11,6 +11,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
 import { createStratumBridge, headHeights, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
+import { createFilesService, handleFilesRequest } from "./files.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -51,6 +52,13 @@ const SERVER_VERSION = (() => {
 export function serverVersionInfo() {
   return { app: "hog-browser", version: SERVER_VERSION, pid: process.pid };
 }
+
+// ---------- hog://files (confined to ~/hog-shares and folders the user adds) ----------
+const FILES = createFilesService({
+  dataDir: process.env.HOG_DATA || join(homedir(), ".local/share/hog-browser"),
+  sharesDir: process.env.HOG_SHARES_DIR || join(homedir(), "hog-shares"),
+  configFile: process.env.HOG_FILES_CONFIG || join(homedir(), ".local/share/hog-browser/files.json"),
+});
 
 // ---------- Solo mining (BzMiner -> 127.0.0.1:HOG_MINING_PORT -> node tab) ----------
 const MINING_STATE_FILE = join(homedir(), ".local/share/hog-browser/mining.json");
@@ -1492,6 +1500,16 @@ async function handle(req, res, runtime) {
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
     if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining") && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
+      return;
+    }
+
+    if (url.pathname === "/api/files" || url.pathname.startsWith("/api/files/")) {
+      if (!walletRequest) {
+        send(res, 403, { ok: false, error: "Open Hog to use Files" });
+        return;
+      }
+      const address = req.socket.localPort || PORT;
+      await handleFilesRequest(FILES, req, res, url, { origin: `http://${WALLET_HOST}:${address}` });
       return;
     }
 

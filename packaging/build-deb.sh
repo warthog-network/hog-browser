@@ -94,6 +94,7 @@ cp -a \
   "${HB}/mining.mjs" \
   "${HB}/stratum.mjs" \
   "${HB}/tailnet.mjs" \
+  "${HB}/files.mjs" \
   "${HB}/opfs-polyfill.js" \
   "${HB}/package.json" \
   "${HB}/package-lock.json" \
