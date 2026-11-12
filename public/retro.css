@@ -694,7 +694,9 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
   background: rgba(253, 185, 19, 0.06);
   font-size: 13px;
 }
-.fx-selbar[hidden], .fx-clip[hidden] { display: none; }
+/* The selection bar keeps its row when empty, so selecting never shifts the list under the pointer. */
+.fx-selbar.is-empty { visibility: hidden; }
+.fx-clip[hidden] { display: none; }
 .fx-selbar strong { margin-right: 8px; font-family: var(--mono); color: var(--accent); }
 .fx-selbar button, .fx-clip button { height: 28px; padding: 0 12px; border-radius: var(--pill); border: 1px solid var(--line-strong); }
 .fx-selbar .danger-text { border-color: rgba(242, 97, 122, 0.45); }
@@ -907,11 +909,14 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
 
 .fx-viewer {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
   z-index: 70;
   display: grid;
-  grid-template-columns: 56px 1fr 56px;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: 56px minmax(0, 1fr) 56px;
+  grid-template-rows: auto minmax(0, 1fr);
   background: rgba(5, 5, 5, 0.96);
 }
 .fx-viewer[hidden] { display: none; }
@@ -923,12 +928,14 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--chrome);
+  position: relative;
+  z-index: 2;
 }
 .fx-viewer-bar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fx-viewer-bar .note { margin: 0 auto 0 0; font-family: var(--mono); font-size: 12px; }
 .fx-viewer-bar .tiny { height: 28px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--pill); }
-.fx-viewer-stage { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 16px; overflow: auto; }
-.fx-viewer-stage img, .fx-viewer-stage video { max-width: 100%; max-height: calc(100vh - 100px); object-fit: contain; box-shadow: 0 0 0 1px var(--line); }
+.fx-viewer-stage { grid-row: 2; grid-column: 2; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 16px; overflow: hidden; }
+.fx-viewer-stage img, .fx-viewer-stage video { max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 0 0 1px var(--line); }
 .fx-viewer-audio { display: flex; flex-direction: column; align-items: center; gap: 18px; }
 .fx-viewer-audio .fx-icon { width: 120px; height: 120px; color: var(--accent); }
 .fx-viewer-audio audio { width: min(520px, 80vw); }
@@ -949,7 +956,7 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
   border-radius: var(--r);
 }
 .fx-viewer-note { position: absolute; bottom: 24px; }
-.fx-viewer-step { align-self: center; justify-self: center; width: 44px; height: 64px; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--panel); color: var(--accent); font-size: 28px; }
+.fx-viewer-step { grid-row: 2; align-self: center; justify-self: center; width: 44px; height: 64px; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--panel); color: var(--accent); font-size: 28px; }
 .fx-viewer-step:disabled { opacity: 0.2; }
 
 /* Settings: Files folders and the Samba card */
@@ -972,6 +979,8 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
 }
 .files-root-form input:focus, .samba-form input:focus { outline: none; border-color: var(--accent); box-shadow: var(--glow-soft); }
 .samba-form label { display: flex; flex-direction: column; gap: 4px; flex: 1 1 180px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.samba-form label input { flex: none; width: 100%; }
+.samba-form button { height: var(--ctl-h); }
 .samba-card.is-on { border-color: rgba(253, 185, 19, 0.45); }
 #samba-error.is-notice { color: var(--blue-ink); }
 #files-open { margin-top: 4px; }

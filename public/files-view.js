@@ -501,7 +501,8 @@ export function createFilesView({ desktopCommand = () => {}, openSettings = () =
   function paintSelection() {
     const picked = selectedEntries();
     const bar = $("fx-selbar");
-    bar.hidden = picked.length === 0;
+    bar.classList.toggle("is-empty", picked.length === 0);
+    bar.setAttribute("aria-hidden", picked.length === 0 ? "true" : "false");
     $("fx-sel-count").textContent = selectionSummary(picked);
     const one = picked.length === 1;
     const files = picked.filter((entry) => entry.type === "file");
@@ -898,7 +899,20 @@ export function createFilesView({ desktopCommand = () => {}, openSettings = () =
     if (index < 0) return;
     state.viewer = { list, index };
     $("fx-viewer").hidden = false;
+    placeViewer();
     await paintViewer();
+  }
+
+  /** Cover the page area only, so Hog's tab bar and address bar stay usable. */
+  function placeViewer() {
+    const viewer = $("fx-viewer");
+    const area = document.getElementById("view") || $("files-view");
+    if (!viewer || !area) return;
+    const box = area.getBoundingClientRect();
+    viewer.style.top = `${Math.round(box.top)}px`;
+    viewer.style.left = `${Math.round(box.left)}px`;
+    viewer.style.width = `${Math.round(box.width)}px`;
+    viewer.style.height = `${Math.round(box.height)}px`;
   }
 
   function stopMedia(stage) {
@@ -1849,6 +1863,9 @@ export function createFilesView({ desktopCommand = () => {}, openSettings = () =
 
     view.addEventListener("keydown", (event) => {
       if (onKey(event)) event.stopPropagation();
+    });
+    window.addEventListener("resize", () => {
+      if (state.viewer) placeViewer();
     });
   }
 
