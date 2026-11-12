@@ -1,7 +1,7 @@
 {
   "name": "hog-browser",
   "private": true,
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "A small local browser with a Warthog wallet in the sidebar.",
   "type": "module",
   "scripts": {

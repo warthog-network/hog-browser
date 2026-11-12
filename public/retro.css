@@ -1,15 +1,14 @@
-/* Hog theme: matte Warthog night.
+/* Hog theme: matte Warthog black and gold.
    Palette sources:
    - Warthog brand kit swatches (warthog-network/website public/brand-colors/,
      listed in src/utils/numberDisplay.js BRAND_PALETTE): gold #FDB913,
      orange #E79300, blue #035AA6, navy #033298, gray #E9E9E9.
-   - warthog.network site tokens (website src/styles.css :root): page
-     #01030a, text #f8fafc, purple accent --color-accent-2 #c084fc.
-   - asset-metadata-frontend tailwind brand-bg-1 #111b2e for raised surfaces.
-   The kit has no purple; #c084fc is the purple the official site uses.
-   One primary (purple), one secondary (brand blue), gold only for the logo,
-   favorites and the edge grips. Flat surfaces, glow only on focus, hover,
-   active and the logo. Loads after app.css and styles only Hog's own pages. */
+   - warthog.network site tokens (website src/styles.css): text #f8fafc and
+     the purple --color-accent-2 #c084fc, kept here only as a rare accent.
+   Gold is the primary accent (buttons, active tab and nav, focus, stars,
+   logo). Brand blue is secondary (links, folder chips, info). Surfaces are
+   flat black and neutral charcoal. Glow only on focus, hover, active and the
+   logo. Loads after app.css and styles only Hog's own pages. */
 
 @font-face {
   font-family: "Orbitron";
@@ -28,37 +27,39 @@
 
 :root {
   color-scheme: dark;
-  /* Surfaces: flat navy-black, a step lighter per layer. */
-  --deep: #01030a;
-  --bg: #070a18;
-  --chrome: #0a0e1f;
-  --panel: #0d1326;
-  --wallet: #0a0e1f;
-  --raised: #111b2e;
-  --hover: rgba(192, 132, 252, 0.08);
-  /* Lines are faintly purple so every surface reads as one family. */
-  --line: rgba(192, 132, 252, 0.12);
-  --line-strong: rgba(192, 132, 252, 0.24);
+  /* Surfaces: flat black, a neutral charcoal step lighter per layer. */
+  --deep: #050505;
+  --bg: #0b0b0d;
+  --chrome: #0e0f11;
+  --panel: #111214;
+  --wallet: #0e0f11;
+  --raised: #17181b;
+  --hover: rgba(253, 185, 19, 0.07);
+  /* Lines are neutral so gold only shows where it means something. */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.14);
   --text: #f8fafc;
-  --muted: #a7b0c6;
-  /* Accents. */
+  --muted: #a3a7b0;
+  /* Accents: gold primary, brand blue secondary, purple rare. */
+  --accent: #fdb913;
+  --accent-press: #e79300;
+  --accent-ink: #1a1203;
   --purple: #c084fc;
-  --purple-ink: #14082a;
   --blue: #035aa6;
   --navy: #033298;
   --blue-ink: #7fb2e5; /* #035AA6 lifted for readable text on dark */
   --gold: #fdb913;
   --amber: #e79300;
-  --flare: #e79300;
-  --gold-ink: #241703;
+  --flare: #7fb2e5;
+  --gold-ink: #1a1203;
   --danger: #f2617a;
   --brand-gold: #fdb913;
-  /* app.css tints its controls with this; here it is the purple. */
-  --accent-rgb: 192, 132, 252;
+  /* app.css tints its controls with this: Warthog gold. */
+  --accent-rgb: 253, 185, 19;
   /* Glow: soft, single color, used sparingly. */
-  --glow: 0 0 0 1px rgba(192, 132, 252, 0.5), 0 0 16px -2px rgba(192, 132, 252, 0.45);
-  --glow-soft: 0 0 14px -4px rgba(192, 132, 252, 0.55);
-  --glow-text: 0 0 10px rgba(192, 132, 252, 0.55);
+  --glow: 0 0 0 1px rgba(253, 185, 19, 0.5), 0 0 16px -2px rgba(253, 185, 19, 0.4);
+  --glow-soft: 0 0 14px -4px rgba(253, 185, 19, 0.5);
+  --glow-text: 0 0 10px rgba(253, 185, 19, 0.5);
   --glow-gold: 0 0 10px rgba(253, 185, 19, 0.45);
   /* Shape and rhythm. */
   --r-sm: 6px;
@@ -69,15 +70,6 @@
   --display: "Orbitron", "Montserrat", "Inter", sans-serif;
   --mono: "Share Tech Mono", "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, monospace;
   font-family: "Montserrat", "Inter", "Ubuntu", "Segoe UI", "Helvetica Neue", sans-serif;
-}
-
-/* Inside Hog's pages and menus the old gold accents become the purple and
-   blue. Real gold stays on the logo, favorites stars and the wallet. */
-.view, .suggestions, .popover, .bookmark-row {
-  --gold: var(--purple);
-  --amber: var(--purple);
-  --flare: var(--blue-ink);
-  --gold-ink: var(--purple-ink);
 }
 
 /* The wallet keeps Warthog gold. */
@@ -91,20 +83,20 @@ html, body, .app, .view, .home, .status, #home, #bookmarks-view, #browser-settin
 }
 .home, .status { background-image: none; }
 
-::selection { background: rgba(192, 132, 252, 0.35); color: #fff; }
+::selection { background: rgba(3, 90, 166, 0.6); color: #fff; }
 
 /* One focus ring everywhere. */
 :focus-visible {
-  outline: 1px solid var(--purple);
+  outline: 1px solid var(--accent);
   outline-offset: 2px;
   box-shadow: var(--glow-soft);
 }
 button:focus:not(:focus-visible) { outline: none; }
 
-* { scrollbar-color: rgba(192, 132, 252, 0.28) transparent; }
+* { scrollbar-color: rgba(255, 255, 255, 0.18) transparent; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: rgba(192, 132, 252, 0.22); border-radius: var(--pill); border: 2px solid transparent; background-clip: padding-box; }
-::-webkit-scrollbar-thumb:hover { background-color: rgba(192, 132, 252, 0.4); }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: var(--pill); border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.28); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* ---------- Toolbar ---------- */
@@ -116,7 +108,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .icon, .tiny, .zoom { transition: background-color .15s ease, color .15s ease, text-shadow .15s ease; }
 .icon:hover, .zoom:hover, .tab-x:hover {
   background: var(--hover);
-  color: var(--purple);
+  color: var(--accent);
   text-shadow: var(--glow-text);
 }
 .icon:disabled:hover { background: transparent; color: inherit; text-shadow: none; }
@@ -129,9 +121,9 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
 }
-.omnibox input:focus { outline: none; border-color: var(--purple); box-shadow: var(--glow); }
+.omnibox input:focus { outline: none; border-color: var(--accent); box-shadow: var(--glow); }
 #star.star-on { color: var(--brand-gold); text-shadow: var(--glow-gold); }
-#bookmarks-btn.is-open, #settings-btn.is-open, #settings-btn[aria-expanded="true"] { color: var(--purple); text-shadow: var(--glow-text); }
+#bookmarks-btn.is-open, #settings-btn.is-open, #settings-btn[aria-expanded="true"] { color: var(--accent); text-shadow: var(--glow-text); }
 
 /* Favorites strip in the toolbar. */
 .bookmarks {
@@ -170,11 +162,11 @@ img.chip-icon { background: rgba(248, 250, 252, 0.9); padding: 1px; }
   gap: 12px;
   padding: 6px 16px;
 }
-.bookmark-row strong { font-family: var(--mono); color: var(--purple); font-weight: 400; }
+.bookmark-row strong { font-family: var(--mono); color: var(--accent); font-weight: 400; }
 .bookmark-row-name { min-width: 0; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .bookmark-row-folder { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .bookmark-row .tiny { border: 1px solid var(--line-strong); border-radius: var(--pill); height: 24px; padding: 0 12px; }
-.bookmark-row .tiny:hover { border-color: var(--purple); color: var(--purple); }
+.bookmark-row .tiny:hover { border-color: var(--accent); color: var(--accent); }
 #bookmark-row-fav[aria-pressed="true"] { color: var(--brand-gold); border-color: rgba(253, 185, 19, 0.5); }
 .danger-text { color: var(--danger); }
 #bookmark-row-done { margin-left: auto; }
@@ -186,15 +178,15 @@ select {
   border-radius: var(--r-sm);
   padding: 3px 8px;
 }
-select:focus { outline: none; border-color: var(--purple); box-shadow: var(--glow-soft); }
+select:focus { outline: none; border-color: var(--accent); box-shadow: var(--glow-soft); }
 
 /* ---------- Tabs ---------- */
 .tabbar { background: var(--deep); border-right: 1px solid var(--line); }
 .tab-wrap { border-radius: var(--r); transition: background-color .15s ease, color .15s ease; }
 .tab-wrap:hover { background: var(--hover); color: var(--text); }
 .tab-wrap.is-active {
-  background: rgba(192, 132, 252, 0.12);
-  box-shadow: inset 2px 0 0 var(--purple);
+  background: rgba(253, 185, 19, 0.12);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 #isolate-tab { font-family: var(--mono); color: var(--blue-ink); }
 /* The thin side edges stay Warthog gold, flat. */
@@ -205,15 +197,15 @@ select:focus { outline: none; border-color: var(--purple); box-shadow: var(--glo
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
-  box-shadow: 0 18px 40px -18px #000, 0 0 24px -14px rgba(192, 132, 252, 0.6);
+  box-shadow: 0 18px 40px -18px #000;
 }
 .suggestions button, .popover li button { border-radius: var(--r); }
 .suggestions button:hover, .popover li button:hover,
 .popover.settings-menu button[aria-current="page"] { background: var(--hover); }
-.popover-head strong { font-family: var(--mono); font-weight: 400; letter-spacing: 0.1em; text-transform: uppercase; color: var(--purple); }
+.popover-head strong { font-family: var(--mono); font-weight: 400; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
 .suggestions small, .popover small { color: var(--muted); }
 .popover.settings-menu li:nth-child(n) button { box-shadow: none; }
-.popover.settings-menu li:nth-child(n) button[aria-current="page"] { box-shadow: inset 2px 0 0 var(--purple); }
+.popover.settings-menu li:nth-child(n) button[aria-current="page"] { box-shadow: inset 2px 0 0 var(--accent); }
 .shield-row { background: var(--panel); }
 
 /* ---------- Pages: new tab, bookmarks, settings ---------- */
@@ -229,7 +221,7 @@ h1 {
   color: var(--text);
   text-shadow: none;
 }
-.eyebrow, .w-k { font-family: var(--mono); font-weight: 400; letter-spacing: 0.14em; font-size: 12px; color: var(--purple); }
+.eyebrow, .w-k { font-family: var(--mono); font-weight: 400; letter-spacing: 0.14em; font-size: 12px; color: var(--accent); }
 .lede { color: var(--muted); line-height: 1.55; }
 .note { line-height: 1.45; color: var(--muted); }
 
@@ -257,7 +249,7 @@ h1 {
   transition: border-color .15s ease, box-shadow .15s ease, color .15s ease;
 }
 .shortcuts button:nth-child(n) { border-color: var(--line-strong); color: var(--text); }
-.shortcuts button:hover { background: var(--panel); border-color: var(--purple); color: var(--purple); box-shadow: var(--glow-soft); }
+.shortcuts button:hover { background: var(--panel); border-color: var(--accent); color: var(--accent); box-shadow: var(--glow-soft); }
 
 /* Favorites grid on the new tab page. */
 .favs { max-width: 900px; margin-top: 32px; }
@@ -274,8 +266,8 @@ h1 {
   background: var(--panel);
 }
 .favs-actions .tiny:hover, .bm-head-actions > button:not(.primary):hover, .bm-more-anchor > button:hover, #bm-rename-cancel:hover, #bm-edit-cancel:hover {
-  border-color: var(--purple);
-  color: var(--purple);
+  border-color: var(--accent);
+  color: var(--accent);
   box-shadow: var(--glow-soft);
 }
 .fav-grid {
@@ -294,7 +286,7 @@ h1 {
   background: var(--panel);
   transition: border-color .15s ease, box-shadow .15s ease;
 }
-.fav-tile:hover, .fav-tile:focus-within { border-color: rgba(192, 132, 252, 0.55); box-shadow: var(--glow-soft); }
+.fav-tile:hover, .fav-tile:focus-within { border-color: rgba(253, 185, 19, 0.55); box-shadow: var(--glow-soft); }
 .fav-tile.is-dragging { opacity: 0.45; }
 .fav-tile.is-drop { border-color: var(--blue-ink); box-shadow: 0 0 0 1px var(--blue), 0 0 16px -4px var(--blue); }
 .fav-open {
@@ -334,7 +326,7 @@ img.fav-icon { padding: 4px; background: rgba(248, 250, 252, 0.92); width: 38px;
   font-family: var(--display);
   font-weight: 600;
   font-size: 16px;
-  color: var(--tile, var(--purple));
+  color: var(--tile, var(--accent));
   border: 1px solid currentColor;
   background: var(--deep);
   text-shadow: none;
@@ -369,7 +361,7 @@ img.fav-icon { padding: 4px; background: rgba(248, 250, 252, 0.92); width: 38px;
 }
 .fav-tool:nth-child(2) { margin-right: auto; margin-left: 4px; }
 .fav-tool:nth-child(3) { margin-right: 4px; }
-.fav-tool:hover:not(:disabled) { color: var(--purple); border-color: var(--purple); }
+.fav-tool:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .fav-tool:last-child:hover { color: var(--danger); border-color: var(--danger); }
 .fav-tool:disabled { opacity: 0.3; cursor: default; }
 .favs-hint { margin: 12px 0 0; font-size: 12px; }
@@ -383,7 +375,7 @@ img.fav-icon { padding: 4px; background: rgba(248, 250, 252, 0.92); width: 38px;
   box-shadow: none;
 }
 .settings-sub { background: var(--bg); }
-.connect-card::before { background: var(--purple); opacity: 0.7; height: 2px; }
+.connect-card::before { background: var(--blue); opacity: 0.8; height: 2px; }
 .settings-block > summary, .settings-sub > summary, .connect-card > details > summary {
   font-family: var(--mono);
   letter-spacing: 0.08em;
@@ -394,15 +386,15 @@ img.fav-icon { padding: 4px; background: rgba(248, 250, 252, 0.92); width: 38px;
 .settings-nav button span { font-family: var(--mono); letter-spacing: 0.05em; }
 .settings-nav button:hover { background: var(--hover); }
 .settings-nav button[aria-current="page"] {
-  background: rgba(192, 132, 252, 0.12);
-  box-shadow: inset 2px 0 0 var(--purple);
+  background: rgba(253, 185, 19, 0.12);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
-.settings-nav button[aria-current="page"] span { color: var(--purple); }
+.settings-nav button[aria-current="page"] span { color: var(--accent); }
 .status-pills > *, .pill { border-radius: var(--pill); }
 .primary {
-  background: var(--purple);
-  color: var(--purple-ink);
-  border: 1px solid var(--purple);
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent);
   border-radius: var(--pill);
   height: var(--ctl-h);
   padding: 0 16px;
@@ -410,15 +402,16 @@ img.fav-icon { padding: 4px; background: rgba(248, 250, 252, 0.92); width: 38px;
   box-shadow: none;
   transition: box-shadow .15s ease, background-color .15s ease;
 }
-.primary:hover { background: #cc9bfd; box-shadow: var(--glow); }
+.primary:hover { background: var(--accent); box-shadow: var(--glow); }
+.primary:active { background: var(--accent-press); border-color: var(--accent-press); }
 .primary:disabled { opacity: 0.5; box-shadow: none; }
 /* The wallet keeps Warthog gold for its own actions. */
-.wallet .primary { background: var(--brand-gold); border-color: var(--brand-gold); color: #241703; }
+.wallet .primary { background: var(--brand-gold); border-color: var(--brand-gold); color: var(--accent-ink); }
 .wallet .primary:hover { background: #ffc93d; box-shadow: 0 0 0 1px rgba(253, 185, 19, 0.5), 0 0 16px -2px rgba(253, 185, 19, 0.45); }
-.hog-progress-fill { background: var(--purple); }
+.hog-progress-fill { background: var(--accent); }
 input[type="text"]:focus, input[type="search"]:focus, input[type="url"]:focus, textarea:focus {
   outline: none;
-  border-color: var(--purple);
+  border-color: var(--accent);
   box-shadow: var(--glow-soft);
 }
 a { color: var(--blue-ink); }
@@ -455,8 +448,8 @@ a:hover { color: var(--purple); }
 }
 .bm-folder-list button:hover { background: var(--hover); }
 .bm-folder-list button[aria-current="page"] {
-  background: rgba(192, 132, 252, 0.12);
-  box-shadow: inset 2px 0 0 var(--purple);
+  background: rgba(253, 185, 19, 0.12);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .bm-folder-list button.is-drop { border-color: var(--blue-ink); box-shadow: 0 0 0 1px var(--blue), 0 0 16px -4px var(--blue); }
 .bm-glyph { width: 14px; flex: none; color: var(--blue-ink); text-align: center; font-size: 12px; }
@@ -476,11 +469,11 @@ a:hover { color: var(--purple); }
 }
 .bm-folder-form input:focus, .bm-toolbar input:focus, .bm-editor input:focus, .bm-inline-form input:focus {
   outline: none;
-  border-color: var(--purple);
+  border-color: var(--accent);
   box-shadow: var(--glow-soft);
 }
-.bm-folder-form .tiny { border: 1px solid var(--line-strong); border-radius: var(--r); width: var(--ctl-h); height: var(--ctl-h); flex: none; color: var(--purple); }
-.bm-folder-form .tiny:hover { border-color: var(--purple); box-shadow: var(--glow-soft); }
+.bm-folder-form .tiny { border: 1px solid var(--line-strong); border-radius: var(--r); width: var(--ctl-h); height: var(--ctl-h); flex: none; color: var(--accent); }
+.bm-folder-form .tiny:hover { border-color: var(--accent); box-shadow: var(--glow-soft); }
 .bm-main { flex: 1; min-width: 0; }
 .bm-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .bm-heading { min-width: 0; }
@@ -501,12 +494,12 @@ a:hover { color: var(--purple); }
 .bm-editor-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-family: var(--mono); letter-spacing: 0.03em; }
 .bm-editor-grid select { height: var(--ctl-h); padding: 0 8px; border-radius: var(--r); }
 .bm-editor-grid .bm-check { flex-direction: row; align-items: center; gap: 8px; align-self: end; padding-bottom: 8px; color: var(--text); }
-.bm-check input { accent-color: var(--purple); width: 16px; height: 16px; }
+.bm-check input { accent-color: var(--accent); width: 16px; height: 16px; }
 .bm-editor .row { margin-top: 8px; }
 .bm-editor .danger-text { margin-left: auto; background: transparent; border: 1px solid rgba(242, 97, 122, 0.45); border-radius: var(--pill); padding: 0 14px; height: var(--ctl-h); }
 .bm-status { min-height: 1.4em; margin: 4px 0 8px; font-family: var(--mono); font-size: 12px; color: var(--blue-ink); }
 .bm-status.is-error { color: var(--danger); }
-.bm-undo { border: 1px solid var(--purple); border-radius: var(--pill); height: 22px; color: var(--purple); margin-left: 8px; }
+.bm-undo { border: 1px solid var(--accent); border-radius: var(--pill); height: 22px; color: var(--accent); margin-left: 8px; }
 .bm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .bm-row {
   display: flex;
@@ -519,7 +512,7 @@ a:hover { color: var(--purple); }
   padding: 2px 8px 2px 2px;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
-.bm-row:hover, .bm-row:focus-within { border-color: rgba(192, 132, 252, 0.45); box-shadow: var(--glow-soft); }
+.bm-row:hover, .bm-row:focus-within { border-color: rgba(253, 185, 19, 0.45); box-shadow: var(--glow-soft); }
 .bm-row.is-dragging { opacity: 0.45; }
 .bm-open {
   display: flex;
@@ -567,7 +560,7 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
   color: var(--muted);
   padding: 0;
 }
-.bm-tool:hover:not(:disabled) { border-color: var(--line-strong); color: var(--purple); background: var(--hover); }
+.bm-tool:hover:not(:disabled) { border-color: var(--line-strong); color: var(--accent); background: var(--hover); }
 .bm-tool:disabled { opacity: 0.3; cursor: default; }
 .bm-tool[aria-pressed="true"] { color: var(--brand-gold); opacity: 1; }
 .bm-row.is-fav .bm-tools { opacity: 1; }
@@ -591,6 +584,6 @@ img.bm-icon { padding: 2px; background: rgba(248, 250, 252, 0.92); border-radius
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
 @media (prefers-contrast: more) {
-  :root { --muted: #d5dbe8; --line: rgba(210, 180, 255, 0.4); --line-strong: rgba(210, 180, 255, 0.6); }
+  :root { --muted: #d4d7dd; --line: rgba(255, 255, 255, 0.35); --line-strong: rgba(255, 255, 255, 0.55); }
   .bm-tools, .fav-tools { opacity: 1 !important; pointer-events: auto !important; }
 }

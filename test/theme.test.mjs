@@ -69,20 +69,62 @@ test("the theme is matte: no scanlines, horizon grid or big gradients", () => {
   }
 });
 
-test("the palette is Warthog's: brand blue and navy, site purple, gold kept for accents", () => {
-  assert.equal(rootVar("purple"), "#c084fc");
+test("the palette is Warthog's: gold primary, brand blue and navy secondary, black surfaces", () => {
+  assert.equal(rootVar("accent"), "#fdb913");
+  assert.equal(rootVar("accent-press"), "#e79300");
+  assert.equal(rootVar("brand-gold"), "#fdb913");
   assert.equal(rootVar("blue"), "#035aa6");
   assert.equal(rootVar("navy"), "#033298");
-  assert.equal(rootVar("brand-gold"), "#fdb913");
-  assert.equal(rootVar("deep"), "#01030a");
-  assert.equal(rootVar("raised"), "#111b2e");
-  for (const off of ["#ff4fd8", "#3ef0ff", "#ff5ca8", "#ff8ae6", "62, 240, 255", "255, 79, 216"]) {
-    assert.ok(!retro.toLowerCase().includes(off), `retro.css drops the off-brand ${off}`);
+  assert.equal(rootVar("blue-ink"), "#7fb2e5");
+  assert.equal(rootVar("deep"), "#050505");
+  assert.equal(rootVar("bg"), "#0b0b0d");
+  assert.equal(rootVar("panel"), "#111214");
+  assert.equal(rootVar("raised"), "#17181b");
+  for (const off of ["#ff4fd8", "#3ef0ff", "#ff5ca8", "#ff8ae6", "62, 240, 255", "255, 79, 216", "#070a18", "#0d1326", "#111b2e", "#01030a"]) {
+    assert.ok(!retro.toLowerCase().includes(off), `retro.css drops ${off}`);
   }
   const tiles = appJs.match(/const BM_TILE_COLORS = \[([^\]]*)\]/);
   assert.ok(tiles, "letter tile colors are declared");
-  const allowed = new Set(["#c084fc", "#7fb2e5", "#e9e9e9", "#fdb913"]);
+  const allowed = new Set(["#fdb913", "#7fb2e5", "#e9e9e9"]);
   for (const color of tiles[1].match(/#[0-9a-f]{6}/gi)) assert.ok(allowed.has(color.toLowerCase()), `${color} is a theme color`);
+});
+
+test("purple is only a rare accent, never the primary accent", () => {
+  const body = css(retro);
+  assert.equal(rootVar("accent-rgb").replace(/\s+/g, ""), "253,185,19", "--accent-rgb is Warthog gold");
+  for (const name of ["accent", "gold", "amber", "hover", "line", "line-strong", "glow", "glow-soft", "glow-text"]) {
+    const value = rootVar(name);
+    assert.ok(!/purple|c084fc|192,\s*132,\s*252/.test(value), `--${name} is not purple`);
+  }
+  assert.doesNotMatch(body, /--(gold|accent|amber)\s*:\s*var\(--purple\)/, "no rule remaps the accent to purple");
+  assert.doesNotMatch(body, /192,\s*132,\s*252/, "no purple tints for borders or glows");
+  assert.match(body, /\.primary\s*\{[^}]*background:\s*var\(--accent\)/, "primary buttons are gold");
+  assert.match(body, /\.primary\s*\{[^}]*color:\s*var\(--accent-ink\)/, "gold buttons carry dark text");
+  assert.match(body, /:focus-visible\s*\{[^}]*outline:\s*1px solid var\(--accent\)/, "focus ring is gold");
+  assert.match(body, /\.tab-wrap\.is-active\s*\{[^}]*inset 2px 0 0 var\(--accent\)/, "active tab is gold");
+  const uses = body.match(/var\(--purple\)/g) || [];
+  assert.ok(uses.length <= 2, `purple is used at most twice (found ${uses.length})`);
+});
+
+function luminance(hex) {
+  const [r, g, b] = hex.match(/[0-9a-f]{2}/gi).map((c) => {
+    const v = parseInt(c, 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (a, b) => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+test("theme colors keep readable contrast", () => {
+  assert.ok(contrast(rootVar("accent-ink"), rootVar("accent")) >= 7, "dark text on gold buttons");
+  assert.ok(contrast(rootVar("accent-ink"), rootVar("accent-press")) >= 4.5, "dark text on pressed buttons");
+  assert.ok(contrast(rootVar("text"), rootVar("panel")) >= 7, "body text on panels");
+  assert.ok(contrast(rootVar("muted"), rootVar("panel")) >= 4.5, "muted text on panels");
+  assert.ok(contrast(rootVar("blue-ink"), rootVar("bg")) >= 4.5, "blue links on the page");
+  assert.ok(contrast(rootVar("accent"), rootVar("bg")) >= 4.5, "gold labels on the page");
 });
 
 test("one shape and rhythm: shared radius and control height tokens", () => {

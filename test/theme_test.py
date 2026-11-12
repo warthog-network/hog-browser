@@ -20,7 +20,16 @@ class ChromeBackgroundTest(unittest.TestCase):
         hog = (ROOT / "hog").read_text()
         self.assertNotIn("255,79,216", hog)
         self.assertNotIn("62,240,255", hog)
-        self.assertIn("#0d1326", hog)
+        self.assertIn("#111214", hog)
+        self.assertNotIn("192,132,252", hog)
+        self.assertNotIn("#c084fc", hog)
+
+    def test_chrome_view_background_is_black_family(self):
+        retro = (ROOT / "public" / "retro.css").read_text()
+        theme_bg = re.search(r"--bg:\s*(#[0-9a-fA-F]{6});", retro).group(1)
+        r, g, b = (int(theme_bg[i:i + 2], 16) for i in (1, 3, 5))
+        self.assertLessEqual(max(r, g, b), 0x14, "the page background is near black")
+        self.assertLessEqual(max(r, g, b) - min(r, g, b), 4, "the page background is neutral, not navy")
 
 
 if __name__ == "__main__":
