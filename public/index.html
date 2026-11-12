@@ -39,7 +39,8 @@
           <ul>
             <li><button type="button" role="menuitem" data-settings="bookmarks"><span>Bookmarks</span><small>Folders, favorites, import and export · Ctrl+Shift+O</small></button></li>
             <li><button type="button" role="menuitem" data-settings="general"><span>General</span><small>Updates and default browser</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
-            <li><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="explorer"><span>Files</span><small>Browse, upload and share ~/hog-shares · hog://files</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="files"><span>Library</span><small>Jellyfin library and Files folders</small></button></li>
             <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
             <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
             <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
@@ -113,7 +114,8 @@
             <p class="eyebrow">Toolbox</p>
             <div class="shortcuts toolbox-shortcuts">
               <button type="button" data-settings="containers">Containers</button>
-              <button type="button" data-settings="files">Files</button>
+              <button type="button" data-settings="explorer">Files</button>
+              <button type="button" data-settings="files">Library</button>
               <button type="button" data-settings="tailscale">Tailscale</button>
             </div>
           </div>
@@ -191,6 +193,136 @@
               <p id="bm-empty" class="note bm-empty" hidden></p>
               <input id="bm-file" type="file" accept=".html,.htm,text/html" hidden>
             </div>
+          </div>
+        </section>
+        <section class="home fx-page" id="files-view" aria-label="Files" hidden>
+          <div class="fx-shell">
+            <aside class="fx-side" aria-label="Places">
+              <p class="eyebrow">Places</p>
+              <div id="fx-roots" class="bm-folder-list fx-roots"></div>
+              <div class="bm-folder-list">
+                <button type="button" id="fx-trash-btn" data-fx-trash="1"><span class="bm-glyph fx-glyph" id="fx-trash-glyph"></span><span class="bm-name">Trash</span><small id="fx-trash-count"></small></button>
+              </div>
+              <button type="button" id="fx-add-root" class="tiny fx-add-root">+ Add a folder…</button>
+              <div class="fx-space" id="fx-space" hidden>
+                <p class="eyebrow">Disk</p>
+                <div class="fx-meter"><span id="fx-space-fill"></span></div>
+                <p id="fx-space-text" class="note"></p>
+              </div>
+              <div class="fx-smb" id="fx-smb">
+                <p class="eyebrow">Network share</p>
+                <p id="fx-smb-state" class="note">Samba is off. Turn it on to open these files from your phone or another computer on your tailnet.</p>
+                <ul id="fx-smb-links" class="fx-links"></ul>
+                <button type="button" id="fx-smb-setup" class="tiny fx-add-root">Set up Samba…</button>
+              </div>
+            </aside>
+            <div class="fx-main">
+              <div class="bm-head fx-head">
+                <div class="bm-heading">
+                  <p class="eyebrow">hog://files</p>
+                  <h1 id="fx-title">hog-shares</h1>
+                  <p id="fx-subtitle" class="note"></p>
+                </div>
+                <div class="bm-head-actions fx-head-actions">
+                  <button type="button" id="fx-upload" class="primary" title="Upload files (Ctrl+U)">↑ Upload</button>
+                  <button type="button" id="fx-upload-dir" title="Upload a whole folder">Folder…</button>
+                  <button type="button" id="fx-new-folder" title="New folder (Ctrl+Shift+N)">+ New folder</button>
+                </div>
+              </div>
+              <div class="fx-bar">
+                <div class="fx-nav" role="group" aria-label="Navigate">
+                  <button type="button" id="fx-back" class="icon" aria-label="Back (Alt+Left)" title="Back (Alt+Left)">←</button>
+                  <button type="button" id="fx-forward" class="icon" aria-label="Forward (Alt+Right)" title="Forward (Alt+Right)">→</button>
+                  <button type="button" id="fx-up" class="icon" aria-label="Up one folder (Backspace)" title="Up one folder (Backspace)">↑</button>
+                  <button type="button" id="fx-refresh" class="icon" aria-label="Refresh" title="Refresh">↻</button>
+                </div>
+                <nav id="fx-crumbs" class="fx-crumbs" aria-label="Folder path"></nav>
+              </div>
+              <div class="bm-toolbar fx-toolbar">
+                <input id="fx-search" type="search" autocomplete="off" spellcheck="false" placeholder="Filter this folder (Ctrl+F)" aria-label="Filter files">
+                <label class="bm-sort fx-deep" title="Search every folder below this one"><input id="fx-deep" type="checkbox"> Subfolders</label>
+                <label class="bm-sort">Sort
+                  <select id="fx-sort">
+                    <option value="name">Name</option>
+                    <option value="mtime">Modified</option>
+                    <option value="size">Size</option>
+                    <option value="kind">Type</option>
+                  </select>
+                </label>
+                <button type="button" id="fx-dir" class="tiny fx-tool" aria-label="Reverse order" title="Reverse order">↓</button>
+                <div class="segment-control fx-views" role="group" aria-label="View">
+                  <button type="button" data-fx-view="list" aria-pressed="true" title="List (Ctrl+1)">☰ List</button>
+                  <button type="button" data-fx-view="grid" aria-pressed="false" title="Grid (Ctrl+2)">▦ Grid</button>
+                </div>
+                <button type="button" id="fx-info-toggle" class="tiny fx-tool" aria-pressed="false" title="Details panel (Ctrl+I)">ⓘ</button>
+              </div>
+              <div id="fx-selbar" class="fx-selbar" hidden>
+                <strong id="fx-sel-count"></strong>
+                <button type="button" data-fx-act="open">Open</button>
+                <button type="button" data-fx-act="download">Download</button>
+                <button type="button" data-fx-act="cut">Cut</button>
+                <button type="button" data-fx-act="copy">Copy</button>
+                <button type="button" data-fx-act="rename">Rename</button>
+                <button type="button" data-fx-act="trash" class="danger-text">Delete</button>
+                <button type="button" data-fx-act="restore" hidden>Restore</button>
+                <button type="button" data-fx-act="purge" class="danger-text" hidden>Delete forever</button>
+                <button type="button" data-fx-act="clear" class="fx-sel-clear">✕ Clear</button>
+              </div>
+              <div id="fx-clip" class="fx-clip" hidden>
+                <span id="fx-clip-text"></span>
+                <button type="button" id="fx-paste" class="primary">Paste here</button>
+                <button type="button" id="fx-clip-clear">Cancel</button>
+              </div>
+              <p id="fx-status" class="note bm-status" role="status"></p>
+              <div id="fx-uploads" class="fx-uploads" hidden>
+                <div class="fx-uploads-head"><strong id="fx-uploads-title">Uploads</strong><button type="button" id="fx-uploads-clear" class="tiny">Clear finished</button></div>
+                <ul id="fx-upload-list"></ul>
+              </div>
+              <div class="fx-body">
+                <div id="fx-pane" class="fx-pane is-list" tabindex="0" role="listbox" aria-multiselectable="true" aria-label="Files">
+                  <div class="fx-list-head" id="fx-list-head" aria-hidden="true">
+                    <span></span><span data-fx-sort="name">Name</span><span data-fx-sort="kind">Type</span><span data-fx-sort="size">Size</span><span data-fx-sort="mtime">Modified</span>
+                  </div>
+                  <div id="fx-items" class="fx-items"></div>
+                  <p id="fx-empty" class="note bm-empty" hidden></p>
+                  <div id="fx-drop" class="fx-drop" hidden><span id="fx-drop-text">Drop to upload here</span></div>
+                </div>
+                <aside id="fx-info" class="fx-info" aria-label="Details" hidden>
+                  <div id="fx-info-preview" class="fx-info-preview"></div>
+                  <h2 id="fx-info-name"></h2>
+                  <dl id="fx-info-list"></dl>
+                  <div class="row fx-info-actions">
+                    <button type="button" data-fx-act="open">Open</button>
+                    <button type="button" data-fx-act="download">Download</button>
+                    <button type="button" id="fx-copy-path">Copy path</button>
+                  </div>
+                </aside>
+              </div>
+              <input id="fx-file" type="file" multiple hidden>
+              <input id="fx-dir-input" type="file" webkitdirectory multiple hidden>
+            </div>
+          </div>
+          <div id="fx-menu" class="popover fx-menu" role="menu" hidden></div>
+          <form id="fx-dialog" class="connect-card fx-dialog" role="dialog" aria-modal="true" aria-labelledby="fx-dialog-title" hidden>
+            <p class="eyebrow" id="fx-dialog-title">New folder</p>
+            <p id="fx-dialog-text" class="note"></p>
+            <input id="fx-dialog-input" autocomplete="off" spellcheck="false" maxlength="255" aria-label="Name">
+            <p id="fx-dialog-error" class="error" role="status"></p>
+            <div class="row">
+              <button type="submit" class="primary" id="fx-dialog-ok">Create</button>
+              <button type="button" id="fx-dialog-cancel">Cancel</button>
+            </div>
+          </form>
+          <div id="fx-viewer" class="fx-viewer" role="dialog" aria-modal="true" aria-label="Preview" hidden>
+            <div class="fx-viewer-bar">
+              <strong id="fx-viewer-name"></strong>
+              <span id="fx-viewer-meta" class="note"></span>
+              <button type="button" id="fx-viewer-download" class="tiny">Download</button>
+              <button type="button" id="fx-viewer-close" class="tiny" aria-label="Close preview (Esc)">✕</button>
+            </div>
+            <button type="button" id="fx-viewer-prev" class="fx-viewer-step" aria-label="Previous">‹</button>
+            <div id="fx-viewer-stage" class="fx-viewer-stage"></div>
+            <button type="button" id="fx-viewer-next" class="fx-viewer-step is-next" aria-label="Next">›</button>
           </div>
         </section>
         <section class="home" id="browser-settings" hidden>
