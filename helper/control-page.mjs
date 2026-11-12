@@ -42,7 +42,7 @@ code, .mono { font: 12px ui-monospace, Menlo, Consolas, monospace; color: #e6e1d
 ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
 </style></head>
 <body><div class="frame">
-<h1>Warthog mining helper</h1>
+<div class="row" style="justify-content:space-between"><h1>Warthog mining helper</h1><button class="danger" id="quit" title="Stop the helper and its ports">Quit helper</button></div>
 <p class="sub">Solo mine with BzMiner to a Warthog browser node running in Brave. Everything stays on 127.0.0.1.</p>
 
 <div class="route">
@@ -156,6 +156,10 @@ ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
   };
   $("toggle").onclick = function () {
     api("/api/settings", { enabled: !(current && current.enabled) }).then(render, function (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; });
+  };
+  $("quit").onclick = function () {
+    if (!confirm("Stop the mining helper? Miners connected to it will disconnect.")) return;
+    api("/api/quit", {}).then(function () { document.body.innerHTML = '<div class="frame"><h1>Warthog mining helper</h1><p class="sub">Stopped. Start it again from your app menu.</p></div>'; });
   };
   $("tailnet").onchange = function () {
     api("/api/settings", { tailnet: $("tailnet").checked }).then(render, function (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; });

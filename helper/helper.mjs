@@ -368,13 +368,19 @@ export function createHelper(opts = {}) {
         "referrer-policy": "no-referrer",
       });
     }
-    if (url.pathname !== "/api/status" && url.pathname !== "/api/settings") return send(res, 404, "Not found");
+    if (!["/api/status", "/api/settings", "/api/quit"].includes(url.pathname)) return send(res, 404, "Not found");
     // Only the control page may call the API: same origin and the per-launch token.
     if (String(req.headers.origin || controlOrigin) !== controlOrigin) return send(res, 403, "Origin not allowed");
     if (!sameToken(req.headers["x-helper-token"], controlToken)) return send(res, 403, "Bad token");
     if (req.method === "GET" && url.pathname === "/api/status") {
       refreshDnsName();
       return send(res, 200, JSON.stringify(status()), "application/json");
+    }
+    if (req.method === "POST" && url.pathname === "/api/quit") {
+      // The AppImage runs without a terminal; this is how the user stops it.
+      send(res, 200, JSON.stringify({ ok: true }), "application/json");
+      if (opts.onQuit) setTimeout(opts.onQuit, 100);
+      return;
     }
     if (req.method === "POST" && url.pathname === "/api/settings") {
       if (!/application\/json/i.test(String(req.headers["content-type"] || ""))) return send(res, 415, "JSON only");
@@ -494,18 +500,31 @@ if (isMain || process.env.WARTHOG_HELPER_MAIN === "1") {
     console.log("warthog-mining-helper [--page-port 43180] [--control-port 43181] [--stratum-port 3456] [--no-open]");
     process.exit(0);
   }
+  const controlPort = portArg("--control-port", "WARTHOG_HELPER_CONTROL_PORT", DEFAULT_CONTROL_PORT);
+  const noOpen = process.argv.includes("--no-open");
+  let quit = () => process.exit(0);
   const helper = createHelper({
     pagePort: portArg("--page-port", "WARTHOG_HELPER_PAGE_PORT", DEFAULT_PAGE_PORT),
-    controlPort: portArg("--control-port", "WARTHOG_HELPER_CONTROL_PORT", DEFAULT_CONTROL_PORT),
+    controlPort,
     stratumPort: portArg("--stratum-port", "WARTHOG_HELPER_STRATUM_PORT", DEFAULT_STRATUM_PORT),
+    onQuit: () => quit(),
   });
   helper.start().then(() => {
-    if (!process.argv.includes("--no-open")) openInBrowser(`${helper.controlOrigin}/`);
-  }, (e) => {
-    console.error(e?.code === "EADDRINUSE" ? `A helper port is already in use (${e.port}). Is the helper already running?` : e);
+    if (!noOpen) openInBrowser(`${helper.controlOrigin}/`);
+  }, async (e) => {
+    if (e?.code === "EADDRINUSE") {
+      // Launched twice (double-click again): show the running helper's page.
+      const running = await fetch(`http://${HOST}:${controlPort}/`).then((r) => r.text()).then((t) => t.includes("<title>Warthog mining helper</title>"), () => false);
+      if (running) {
+        console.log(`The helper is already running: http://${HOST}:${controlPort}/`);
+        if (!noOpen) openInBrowser(`http://${HOST}:${controlPort}/`);
+        process.exit(0);
+      }
+      console.error(`A helper port is already in use (${e.port}). Close what uses it, or pass --page-port / --control-port.`);
+    } else console.error(e);
     process.exit(1);
   });
-  const quit = () => helper.close().finally(() => process.exit(0));
+  quit = () => helper.close().finally(() => process.exit(0));
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
 }

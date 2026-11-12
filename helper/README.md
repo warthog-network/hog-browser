@@ -55,6 +55,22 @@ Options: `--page-port`, `--control-port`, `--stratum-port`, `--no-open`.
 If Hog's own solo mining is on, it already holds port 3456: turn one off or
 pass `--stratum-port`.
 
+## Linux AppImage (Node inside)
+
+`helper/build-appimage.sh` writes `dist/Warthog_Mining_Helper-x86_64.AppImage`
+(and a `.sha256`). It bundles the helper as above, then puts the official
+Node linux-x64 binary inside (default v22.23.1, `NODE_VERSION=` to change),
+checked against nodejs.org's SHASUMS256.txt, and packs it with appimagetool,
+fetched the same way as browser-wallet's forwarder AppImage build. Downloads
+are cached in `~/.cache/warthog-mining-helper-build/`; nothing is installed.
+
+The AppImage needs no system Node. Double-click it (or run it): it starts the
+helper and opens the control page in the default browser. Launching it again
+just reopens the control page. Stop it with **Quit helper** on the control
+page. The same options work: `./Warthog_Mining_Helper-x86_64.AppImage --stratum-port 3466 --no-open`.
+To add it to the app menu, use AppImageLauncher or Gear Lever, or copy the
+`.desktop` from `--appimage-extract`.
+
 ## Build
 
 `node helper/build.mjs` writes `dist/warthog-mining-helper/` (one bundled

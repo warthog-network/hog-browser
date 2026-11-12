@@ -197,3 +197,18 @@ test("helper tailnet toggle: off by default, listens on the tailnet address when
     await helper.close();
   }
 });
+
+test("quit is token-locked and calls onQuit", async () => {
+  let quit = 0;
+  const { helper, controlPort } = await startHelper({ onQuit: () => { quit += 1; } });
+  const base = `http://127.0.0.1:${controlPort}`;
+  try {
+    assert.equal((await fetch(`${base}/api/quit`, { method: "POST" })).status, 403);
+    const ok = await fetch(`${base}/api/quit`, { method: "POST", headers: { "x-helper-token": helper.controlToken, "content-type": "application/json" }, body: "{}" });
+    assert.equal(ok.status, 200);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(quit, 1);
+  } finally {
+    await helper.close();
+  }
+});
