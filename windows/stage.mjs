@@ -5,7 +5,7 @@
 //   stage/hog/opfs-polyfill.js
 //   gen/preload-page.cjs   page preload with the Linux shell's page scripts
 // Run `npm run build` at the repo root first (wallet bundles).
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, realpathSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -39,7 +39,13 @@ cpSync(join(root, "public"), join(out, "public"), { recursive: true, dereference
 // symlink support leaves a one-line text file. Ship the real video.
 for (const name of readdirSync(join(out, "public"))) {
   const file = join(out, "public", name);
-  const st = lstatSync(file);
+  let st = lstatSync(file);
+  if (st.isSymbolicLink()) {
+    const real = realpathSync(file);
+    rmSync(file);
+    copyFileSync(real, file);
+    st = lstatSync(file);
+  }
   if (st.isFile() && st.size < 256 && /\.(mp4|png|svg|js|css)$/.test(name)) {
     const target = readFileSync(file, "utf8").trim();
     if (/^[\w.-]+$/.test(target) && target !== name && existsSync(join(root, "public", target))) cpSync(join(root, "public", target), file);
