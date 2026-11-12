@@ -421,7 +421,7 @@ function showBrowserSettings() {
   requestAnimationFrame(reportShareDrop);
 }
 
-const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "ai", "tailscale"];
+const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale"];
 
 function normalizeSettingsPage(page) {
   if (page === "docker") return "containers";
@@ -455,16 +455,6 @@ function showSettingsPage(page) {
   if (next === "general") {
     desktopCommand("containers:browser-default");
     desktopCommand("containers:update-status");
-  }
-  if (next === "ai") {
-    const empty = $("ai-models-empty");
-    if (empty && !($("ai-model-list")?.children.length)) {
-      empty.hidden = false;
-      empty.classList.add("is-loading");
-      empty.classList.remove("is-error");
-      empty.textContent = "Loading models…";
-    }
-    desktopCommand("containers:ai-models");
   }
 }
 
@@ -1830,7 +1820,7 @@ function composeCommand(spec) {
 
 function imageBringsCommand(image) {
   const text = String(image || "").toLowerCase();
-  return text.includes("wireguard") || text.includes("tailscale") || text.includes("cartesi") || text.includes("jellyfin") || text.includes("ollama") || text.includes("open-webui");
+  return text.includes("wireguard") || text.includes("tailscale") || text.includes("cartesi") || text.includes("jellyfin");
 }
 
 function allowedLaunchNetwork(name, image, network) {
@@ -1838,10 +1828,6 @@ function allowedLaunchNetwork(name, image, network) {
   const img = String(image || "").toLowerCase();
   if (network === "hog-tailscale" || network === "host") {
     return name === "tailscale" && img.includes("tailscale");
-  }
-  if (network === "hog-ai") {
-    return (name === "hog-ollama" && img.startsWith("ollama/ollama"))
-      || (name === "hog-open-webui" && img.includes("open-webui/open-webui"));
   }
   return false;
 }
@@ -1963,7 +1949,7 @@ function readLaunch(text) {
     }
     if (token === "--network" || token === "--net" || token.startsWith("--network=") || token.startsWith("--net=")) {
       const value = token === "--network" || token === "--net" ? tokens[index + 1] : token.slice(token.indexOf("=") + 1);
-      if ((value !== "hog-tailscale" && value !== "host" && value !== "hog-ai") || network) return null;
+      if ((value !== "hog-tailscale" && value !== "host") || network) return null;
       network = value;
       index += token === "--network" || token === "--net" ? 2 : 1;
       continue;
@@ -2970,40 +2956,6 @@ function openHogRelease(url) {
 }
 
 
-function openVscodeDownload(url) {
-  let allowed = "";
-  try {
-    const parsed = new URL(String(url || "https://code.visualstudio.com/"));
-    if (parsed.protocol !== "https:") return;
-    if (parsed.hostname !== "code.visualstudio.com" && parsed.hostname !== "www.code.visualstudio.com") return;
-    if (parsed.pathname && parsed.pathname !== "/") return;
-    if (parsed.search || parsed.hash || parsed.port) return;
-    if (parsed.username || parsed.password) return;
-    allowed = `https://${parsed.hostname}/`;
-  } catch {
-    return;
-  }
-  if (typeof createTab === "function") createTab();
-  if (typeof openUrl === "function") openUrl(allowed);
-}
-
-function openOllamaLibrary(url) {
-  let allowed = "";
-  try {
-    const parsed = new URL(String(url || "https://ollama.com/library"));
-    if (parsed.protocol !== "https:") return;
-    if (parsed.hostname !== "ollama.com" && parsed.hostname !== "www.ollama.com") return;
-    if (parsed.pathname !== "/library" && !parsed.pathname.startsWith("/library/")) return;
-    if (parsed.search || parsed.hash || parsed.port) return;
-    if (parsed.username || parsed.password) return;
-    allowed = `https://${parsed.hostname}${parsed.pathname}`;
-  } catch {
-    return;
-  }
-  if (typeof createTab === "function") createTab();
-  if (typeof openUrl === "function") openUrl(allowed);
-}
-
 const ACCORDION_KEY = "hog-settings-accordions";
 const ACCORDION_DEFAULTS = {
   "container-images": true,
@@ -3011,8 +2963,6 @@ const ACCORDION_DEFAULTS = {
   "network-create-wrap": false,
   "network-attach-wrap": false,
   "exit-node-guide": false,
-  "ai-group-large": false,
-  "ai-editor-advanced": false,
 };
 
 function accordionOpen(id, fallback) {
@@ -3042,7 +2992,29 @@ function rememberAccordion(el) {
   });
 }
 
+function pruneAccordions() {
+  // Older versions saved panels that no longer exist (for example the AI page).
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACCORDION_KEY) || "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) {
+      localStorage.removeItem(ACCORDION_KEY);
+      return;
+    }
+    let changed = false;
+    for (const id of Object.keys(saved)) {
+      if (id.startsWith("ai-")) {
+        delete saved[id];
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(ACCORDION_KEY, JSON.stringify(saved));
+  } catch {
+    try { localStorage.removeItem(ACCORDION_KEY); } catch {}
+  }
+}
+
 function restoreAccordions() {
+  pruneAccordions();
   document.querySelectorAll("#browser-settings details[id]").forEach((el) => {
     el.open = accordionOpen(el.id, el.open);
     rememberAccordion(el);
@@ -3101,124 +3073,6 @@ function setProgress(barId, fillId, textId, info) {
   }
 }
 
-const MODEL_NAME_RE = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;
-
-function startAiPull(name) {
-  const model = String(name || "").trim().toLowerCase();
-  if (!MODEL_NAME_RE.test(model) || model.length > 80 || model.includes("..")) {
-    showToast("Use a model name like qwen2.5:14b.", "error");
-    const error = $("ai-error");
-    if (error) error.textContent = "Use a model name like qwen2.5:14b.";
-    return;
-  }
-  const warning = $("ai-disk-warning");
-  if (warning && !warning.hidden && !window.confirm(`${warning.textContent} Pull ${model} anyway?`)) return;
-  const input = $("ai-pull-name");
-  if (input) input.value = model;
-  const error = $("ai-error");
-  if (error) error.textContent = "";
-  setProgress("ai-pull-bar", "ai-pull-bar-fill", "ai-pull-progress", { name: model, status: "Starting download…", percent: null });
-  desktopCommand(`containers:ai-pull:${model}`);
-}
-
-function mergeManagedContainers(items, ai) {
-  const rows = Array.isArray(items) ? items.slice() : [];
-  const have = new Set(rows.map((item) => item && item.name).filter(Boolean));
-  const presets = [
-    { name: "hog-ollama", image: "ollama/ollama:latest", from: "ollama" },
-    { name: "hog-open-webui", image: "ghcr.io/open-webui/open-webui:main", from: "openWebui" },
-  ];
-  const extras = [];
-  for (const preset of presets) {
-    if (have.has(preset.name)) continue;
-    const live = ai && ai[preset.from];
-    extras.push({
-      name: preset.name,
-      image: (live && live.image) || preset.image,
-      state: (live && live.state) || "missing",
-      runtime: (live && live.runtime) || "engine",
-      reason: (live && live.reason) || "Not created yet. Press Run to start it from the AI page or Images.",
-      placeholder: true,
-    });
-  }
-  return extras.concat(rows);
-}
-
-function fitPill(fit) {
-  if (fit === "fits") return statusPill("Fits GPU", "fits");
-  if (fit === "tight") return statusPill("Tight", "tight");
-  if (fit === "over") return statusPill("Needs more VRAM", "over");
-  return statusPill("CPU", "cpu");
-}
-
-function paintAiCatalog(ai) {
-  const host = $("ai-catalog");
-  if (!host) return;
-  host.replaceChildren();
-  const groups = Array.isArray(ai.groups) && ai.groups.length
-    ? ai.groups
-    : [
-        { id: "mid", title: "Around 9–10 GB", blurb: "A good fit for 12 GB of video memory." },
-        { id: "small", title: "Smaller and faster", blurb: "Lighter models that leave more room for context." },
-        { id: "large", title: "Larger (partly CPU, slow)", blurb: "These usually spill into system RAM on a 12 GB card and run slowly." },
-      ];
-  const suggestions = Array.isArray(ai.suggestions) ? ai.suggestions : [];
-  for (const group of groups) {
-    const rows = suggestions.filter((item) => item && item.group === group.id);
-    if (!rows.length) continue;
-    const isLarge = group.id === "large";
-    const wrap = document.createElement(isLarge ? "details" : "section");
-    wrap.className = "ai-group";
-    wrap.dataset.group = group.id;
-    if (isLarge) {
-      wrap.id = "ai-group-large";
-      wrap.open = accordionOpen("ai-group-large", false);
-      const summary = document.createElement("summary");
-      summary.textContent = group.title;
-      wrap.append(summary);
-      rememberAccordion(wrap);
-    } else {
-      const title = document.createElement("h3");
-      title.textContent = group.title;
-      wrap.append(title);
-    }
-    if (group.blurb) {
-      const blurb = document.createElement("p");
-      blurb.className = "note";
-      blurb.textContent = group.blurb;
-      wrap.append(blurb);
-    }
-    const list = document.createElement("ul");
-    list.className = "ai-model-list";
-    for (const item of rows) {
-      const li = document.createElement("li");
-      li.className = "ai-model";
-      const copy = document.createElement("div");
-      copy.className = "ai-model-copy";
-      const title = document.createElement("strong");
-      title.textContent = item.label || item.name;
-      const meta = document.createElement("small");
-      meta.textContent = [item.blurb, item.name, item.disk ? `~${item.disk} download` : "", item.category].filter(Boolean).join(" · ");
-      copy.append(title, meta);
-      const actions = document.createElement("div");
-      actions.className = "ai-model-actions";
-      if (item.installed) actions.append(statusPill("Installed", "running"));
-      actions.append(fitPill(item.fit));
-      const pull = document.createElement("button");
-      pull.type = "button";
-      pull.className = "tiny";
-      pull.textContent = item.installed ? "Pull again" : "Pull";
-      pull.addEventListener("click", () => startAiPull(item.name));
-      actions.append(pull);
-      li.append(copy, actions);
-      list.append(li);
-    }
-    wrap.append(list);
-    host.append(wrap);
-  }
-}
-
-
 function closeKebabs(except) {
   document.querySelectorAll(".kebab-menu").forEach((menu) => {
     if (except && menu === except) return;
@@ -3235,309 +3089,119 @@ function statusPill(label, kind) {
   return pill;
 }
 
-function runAiPreset(kind) {
-  const ollama = kind === "hog-open-webui" ? false : true;
-  const name = ollama ? "hog-ollama" : "hog-open-webui";
-  const image = ollama ? "ollama/ollama:latest" : "ghcr.io/open-webui/open-webui:main";
-  const existing = (lastContainerItems || []).find((item) => item && item.name === name);
-  const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
-  const runtime = preferEngine ? "engine" : (runtimeOk("desktop") ? "desktop" : "engine");
-  const status = ollama
-    ? (preferEngine
-      ? "Ollama will run on Docker Engine. The GPU is used when the toolkit is ready. Its API stays on 127.0.0.1."
-      : "Ollama will run on Docker Desktop on the CPU. Its API stays on 127.0.0.1.")
-    : "Open WebUI will join the hog-ai network, listen on 127.0.0.1, and be served to your phone over Tailscale only. The first account you create becomes the admin.";
-  fillLaunch(name, image, status, {
-    ports: ollama
-      ? [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }]
-      : [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }],
-    command: [],
-    env: ollama ? [] : ["OLLAMA_BASE_URL=http://hog-ollama:11434"],
-    network: "hog-ai",
-    runtime,
-  });
-  sendLaunch(false);
+const SERVICE_LINK_KINDS = ["local", "lan", "tailnet"];
+
+function serviceLinkHostOk(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (host === "127.0.0.1") return true;
+  const parts = host.split(".");
+  if (parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    const [a, b] = parts.map(Number);
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+  return /^[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*\.ts\.net$/.test(host);
 }
 
-
-function paintAiEditor(ai) {
-  const editor = (ai && ai.editor) || {};
-  const host = $("ai-editor-pills");
-  if (host) {
-    host.replaceChildren();
-    host.append(statusPill(editor.found ? "Editor found" : "Editor missing", editor.found ? "running" : "stopped"));
-    host.append(statusPill(editor.continueInstalled ? "Continue installed" : "Continue not installed", editor.continueInstalled ? "running" : "stopped"));
-    host.append(statusPill(editor.ollamaRunning ? "Ollama running" : "Ollama not running", editor.ollamaRunning ? "running" : "stopped"));
-  }
-  const missing = Array.isArray(editor.missingModels) ? editor.missingModels.filter(Boolean) : [];
-  const note = $("ai-editor-note");
-  if (note) {
-    let text = "";
-    if (editor.found && editor.label) text = editor.label;
-    if (editor.modelsKnown && missing.length) {
-      const list = missing.join(", ");
-      text = text ? `${text}. Missing models: ${list}.` : `Missing models: ${list}.`;
-    }
-    note.hidden = !text;
-    note.textContent = text;
-  }
-  const missingWrap = $("ai-editor-missing");
-  if (missingWrap) missingWrap.hidden = Boolean(editor.found);
-  const install = $("ai-editor-install");
-  if (install) {
-    install.hidden = !editor.found;
-    install.disabled = false;
-    install.textContent = editor.continueInstalled ? "Continue is installed" : "Install Continue";
-    if (editor.continueInstalled) install.disabled = true;
-  }
-  const reinstall = $("ai-editor-reinstall");
-  if (reinstall) reinstall.hidden = !(editor.found);
-  const connect = $("ai-editor-connect");
-  if (connect) connect.disabled = false;
-  const pull = $("ai-editor-pull");
-  if (pull) {
-    const show = Boolean(editor.modelsKnown && missing.length);
-    pull.hidden = !show;
-    pull.disabled = false;
-    if (show) pull.textContent = missing.length === 1 ? `Pull ${missing[0]}` : `Pull missing models (${missing.length})`;
-  }
-  const href = (editor.downloadUrl || "https://code.visualstudio.com/").trim();
-  ["ai-editor-get", "ai-editor-download-link"].forEach((id) => {
-    const link = $(id);
-    if (link) link.setAttribute("href", href);
-  });
-}
-
-const CODE_CHAT_DEFAULT_MODEL = "qwen2.5-coder:14b";
-const CODE_CHAT_PORTS = ["8501", "8502", "8503", "8504"];
-const CODE_CHAT_MODEL_RE = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/){0,2}[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[a-z0-9]+(?:[._-][a-z0-9]+)*)?$/;
-let codeChatBusy = false;
-let codeChatImage = null;
-
-function codeChatUrl(raw) {
+function serviceLinkUrl(raw) {
   let parsed;
   try {
     parsed = new URL(String(raw || ""));
   } catch {
     return "";
   }
-  if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") return "";
-  if (!CODE_CHAT_PORTS.includes(parsed.port)) return "";
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
   if (parsed.username || parsed.password || parsed.search || parsed.hash) return "";
   if (parsed.pathname && parsed.pathname !== "/") return "";
-  return `http://127.0.0.1:${parsed.port}/`;
+  if (!parsed.port) return "";
+  if (!serviceLinkHostOk(parsed.hostname)) return "";
+  return `${parsed.protocol}//${parsed.hostname}:${parsed.port}/`;
 }
 
-function codeChatModelOptions(code) {
-  const info = code || {};
-  const names = [];
-  const add = (value) => {
-    const name = String(value || "").trim().toLowerCase();
-    if (!name || name.length > 80 || name.includes("embed") || !CODE_CHAT_MODEL_RE.test(name)) return;
-    if (!names.includes(name)) names.push(name);
-  };
-  (Array.isArray(info.models) ? info.models : []).forEach(add);
-  if (!names.length) add(info.model || info.defaultModel || CODE_CHAT_DEFAULT_MODEL);
-  const preferred = String(info.model || info.defaultModel || CODE_CHAT_DEFAULT_MODEL).toLowerCase();
-  const selected = names.includes(preferred) ? preferred : (names.includes(CODE_CHAT_DEFAULT_MODEL) ? CODE_CHAT_DEFAULT_MODEL : (names[0] || ""));
-  return { names, selected };
+function serviceLinksFor(item) {
+  const rows = item && Array.isArray(item.links) ? item.links : [];
+  const seen = new Set();
+  const out = [];
+  for (const link of rows) {
+    if (!link || typeof link !== "object") continue;
+    const url = serviceLinkUrl(link.url);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const kind = SERVICE_LINK_KINDS.includes(link.kind) ? link.kind : "local";
+    const fallback = kind === "local" ? "This computer" : kind === "lan" ? "Home network" : "Tailnet";
+    const label = typeof link.label === "string" && link.label.trim() ? link.label.trim().slice(0, 40) : fallback;
+    out.push({ kind, label, url, text: url.replace(/^https?:\/\//, "").replace(/\/$/, "") });
+  }
+  return out;
 }
 
-function codeChatStartCommand(model, folder) {
-  const name = String(model || "").trim().toLowerCase();
-  const path = String(folder || "").trim();
-  if (!name || name.length > 80 || name.includes("embed") || !CODE_CHAT_MODEL_RE.test(name)) return "";
-  if (!path || path.length > 1024 || /[\n\r\0]/.test(path)) return "";
-  if (!path.startsWith("/") && !path.startsWith("~/")) return "";
-  return `containers:ai-code-start:${JSON.stringify({ model: name, folder: path })}`;
+function openServiceLink(raw) {
+  const url = serviceLinkUrl(raw);
+  if (!url) return;
+  if (typeof createTab === "function") createTab();
+  if (typeof openUrl === "function") openUrl(url);
 }
 
-function paintAiCode(ai, payload) {
-  const code = (ai && ai.code) || null;
-  if (!code) return;
-  const running = Boolean(code.running);
-  const pills = $("ai-code-pills");
-  if (pills) {
-    pills.replaceChildren();
-    if (code.imagePresent === true || code.imagePresent === false) codeChatImage = code.imagePresent;
-    if (running) codeChatImage = true;
-    if (codeChatImage === true) pills.append(statusPill("Image ready", "running"));
-    else if (codeChatImage === false) pills.append(statusPill("Image not downloaded", "stopped"));
-    else pills.append(statusPill("Image", "stopped"));
-    pills.append(statusPill(running ? "Running" : (code.state && code.state !== "missing" ? code.state : "Stopped"), running ? "running" : "stopped"));
-    const shownModel = running ? (code.runningModel || code.model) : code.model;
-    if (shownModel) pills.append(statusPill(`Model: ${shownModel}`, "engine"));
+async function copyServiceLink(button, url) {
+  const text = String(url || "").replace(/\/$/, "");
+  if (!text) return;
+  const label = button.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = "Copied";
+  } catch {
+    button.textContent = "Copy failed";
   }
-  const select = $("ai-code-model");
-  const keepOptions = !code.modelsKnown && select && select.options.length > 1;
-  if (select && !keepOptions && select.dataset.dirty !== "1" && document.activeElement !== select) {
-    const { names, selected } = codeChatModelOptions(code);
-    select.replaceChildren();
-    for (const name of names) {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      select.append(option);
-    }
-    if (selected) select.value = selected;
-  }
-  const input = $("ai-code-folder");
-  if (input && input.dataset.dirty !== "1" && document.activeElement !== input && code.folder) {
-    input.value = code.folder;
-  }
-  const gitNote = $("ai-code-git-note");
-  if (gitNote) {
-    let text = "";
-    if (code.folderError) text = code.folderError;
-    else if (code.folder && code.git === "none") text = "This folder is not a git repo. Aider will run git init and commit each edit, which is how you undo changes. Run git init yourself first if you prefer.";
-    gitNote.hidden = !text;
-    gitNote.textContent = text;
-  }
-  const note = $("ai-code-note");
-  if (note) {
-    let text = "";
-    if (running && code.runningFolder) text = `Chatting about ${code.runningFolder}${code.localUrl ? ` at ${code.localUrl}` : ""}.`;
-    else if (!code.ollamaRunning) text = "Start Ollama first. Code chat uses its models.";
-    else if (code.modelsKnown && !(code.models || []).length) text = "No chat models are installed yet. Pull qwen2.5-coder:14b from the library below.";
-    note.hidden = !text;
-    note.textContent = text;
-  }
-  const pull = payload && payload.codePull;
-  const pulling = Boolean(pull && pull.status && pull.percent !== 100);
-  if (pull) setProgress("ai-code-bar", "ai-code-bar-fill", "ai-code-progress", pull.status ? pull : null);
-  if (pull && !pull.status) codeChatBusy = false;
-  if (payload && payload.ok === false) codeChatBusy = false;
-  const start = $("ai-code-start");
-  if (start) {
-    start.disabled = codeChatBusy;
-    start.textContent = codeChatBusy ? (pulling ? "Downloading…" : "Starting…") : (running ? "Restart" : "Start");
-  }
-  const open = $("ai-code-open");
-  if (open) {
-    const url = codeChatUrl(code.localUrl);
-    open.hidden = !(running && url);
-    open.dataset.url = url;
-  }
-  const stop = $("ai-code-stop");
-  if (stop) {
-    stop.hidden = !running;
-    stop.disabled = false;
-  }
-  const browse = $("ai-code-browse");
-  if (browse) browse.disabled = false;
+  setTimeout(() => { button.textContent = label; }, 1200);
 }
 
-function paintAi(payload) {
-  if (!payload || !payload.ai) return;
-  const ai = payload.ai;
-  const gpu = ai.gpu || {};
-  const notice = $("ai-gpu-notice");
-  if (notice) notice.textContent = gpu.notice || "";
-  const disk = $("ai-disk-warning");
-  if (disk) {
-    const warning = (ai.disk && ai.disk.warning) || "";
-    disk.hidden = !warning;
-    disk.textContent = warning;
+function renderServiceLinks(links, name) {
+  const host = document.createElement("div");
+  host.className = "service-links";
+  host.setAttribute("role", "group");
+  host.setAttribute("aria-label", `Addresses for ${name || "this container"}`);
+  for (const link of links) {
+    const row = document.createElement("div");
+    row.className = "service-link-row";
+    const pill = statusPill(link.label, link.kind === "tailnet" ? "tailnet" : (link.kind === "lan" ? "lan" : "running"));
+    const anchor = document.createElement("a");
+    anchor.className = "service-link";
+    anchor.href = link.url;
+    anchor.textContent = link.text;
+    anchor.title = `Open ${link.text} in a new tab`;
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openServiceLink(link.url);
+    });
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "tiny service-link-copy";
+    copy.textContent = "Copy";
+    copy.setAttribute("aria-label", `Copy ${link.text}`);
+    copy.addEventListener("click", (event) => {
+      event.stopPropagation();
+      copyServiceLink(copy, link.url);
+    });
+    row.append(pill, anchor, copy);
+    host.append(row);
   }
-  const status = $("ai-status");
-  if (status && Object.prototype.hasOwnProperty.call(payload, "notice")) {
-    status.textContent = payload.notice || "";
-  }
-  const error = $("ai-error");
-  if (error && (Object.prototype.hasOwnProperty.call(payload, "ai") || Object.prototype.hasOwnProperty.call(payload, "error"))) {
-    error.textContent = payload.ok === false ? (payload.error || "") : (ai.modelsError || "");
-  }
-  const paintService = (id, item, extra) => {
-    const host = $(id);
-    if (!host || !item) return;
-    host.replaceChildren();
-    const state = item.state || "missing";
-    host.append(statusPill(state === "running" ? "Running" : state === "missing" ? "Not created" : state, state === "running" ? "running" : "stopped"));
-    if (item.runtime) host.append(statusPill(item.runtime === "engine" ? "Engine" : "Desktop", item.runtime === "engine" ? "engine" : "desktop"));
-    if (item.gpu) host.append(statusPill("GPU", "gpu"));
-    (extra || []).forEach((pill) => host.append(pill));
-  };
-  paintService("ai-ollama-pills", ai.ollama);
-  const webuiExtra = [];
-  if (ai.openWebui && ai.openWebui.phoneUrl) webuiExtra.push(statusPill("Tailnet", "tailnet"));
-  paintService("ai-webui-pills", ai.openWebui, webuiExtra);
-  paintAiEditor(ai);
-  paintAiCode(ai, payload);
-  const urlLine = $("ai-webui-url");
-  const openBtn = $("ai-open-webui");
-  const copyBtn = $("ai-copy-webui");
-  const local = ai.openWebui && ai.openWebui.localUrl;
-  const phone = ai.openWebui && ai.openWebui.phoneUrl;
-  if (urlLine) {
-    urlLine.hidden = !local && !phone;
-    urlLine.textContent = [local ? `This computer: ${local}` : "", phone ? `Phone: ${phone}` : ""].filter(Boolean).join(" · ");
-  }
-  if (openBtn) {
-    openBtn.hidden = !local;
-    openBtn.dataset.url = local || "";
-  }
-  if (copyBtn) {
-    copyBtn.hidden = !phone;
-    copyBtn.dataset.url = phone || "";
-  }
-  const runOllama = $("ai-run-ollama");
-  if (runOllama) runOllama.textContent = ai.ollama && ai.ollama.state === "running" ? "Ollama is running" : "Run Ollama";
-  const runWebui = $("ai-run-webui");
-  if (runWebui) runWebui.textContent = ai.openWebui && ai.openWebui.state === "running" ? "Open WebUI is running" : "Run Open WebUI";
-  paintAiCatalog(ai);
-  const library = $("ai-library-link");
-  if (library) {
-    const href = (ai.libraryUrl || "https://ollama.com/library").trim();
-    library.setAttribute("href", href);
-  }
-  maybeToast(payload);
-  if (payload.ok !== false) {
-    const status = $("ai-status");
-    if (status && payload.notice) status.textContent = "";
-    const error = $("ai-error");
-    if (error && !ai.modelsError) error.textContent = "";
-  }
-  const pull = payload.aiPull;
-  if (pull && pull.status) setProgress("ai-pull-bar", "ai-pull-bar-fill", "ai-pull-progress", pull);
-  else if (payload.ok !== false) setProgress("ai-pull-bar", "ai-pull-bar-fill", "ai-pull-progress", null);
-  const models = Array.isArray(ai.models) ? ai.models : [];
-  const empty = $("ai-models-empty");
-  const list = $("ai-model-list");
-  if (empty) {
-    const ollamaState = ai.ollama && ai.ollama.state;
-    const waiting = ollamaState !== "running";
-    empty.hidden = models.length > 0 && !waiting && !ai.modelsError;
-    empty.classList.remove("is-loading");
-    empty.classList.toggle("is-error", Boolean(ai.modelsError) && waiting === false);
-    if (waiting) empty.textContent = "Ollama is not running yet, so installed models cannot be listed. Press Run Ollama above. It will also appear in Containers and Images.";
-    else if (ai.modelsError) empty.textContent = ai.modelsError;
-    else empty.textContent = "No models installed yet. Press Pull on a model in the library, or type a name from ollama.com/library.";
-  }
-  if (list) {
-    list.replaceChildren();
-    for (const item of models) {
-      if (!item || !item.name) continue;
-      const li = document.createElement("li");
-      const name = document.createElement("span");
-      name.className = "media-name";
-      name.textContent = item.name;
-      const meta = document.createElement("span");
-      meta.className = "media-size";
-      const fit = item.fit === "fits" ? "fits GPU" : item.fit === "tight" ? "tight on GPU" : item.fit === "over" ? "needs more VRAM" : "CPU";
-      meta.textContent = [item.sizeLabel, item.parameter, fit].filter(Boolean).join(" · ");
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "tiny";
-      remove.textContent = "Delete";
-      remove.addEventListener("click", () => {
-        if (!window.confirm(`Delete model ${item.name}? This removes the downloaded files.`)) return;
-        desktopCommand(`containers:ai-delete:${item.name}`);
-      });
-      li.append(name, meta, remove);
-      list.append(li);
-    }
-  }
+  return host;
 }
+
+function paintJellyfinLinks(items) {
+  const host = $("jellyfin-links");
+  if (!host || !Array.isArray(items)) return;
+  const jellyfin = items.find((item) => item && item.name === "jellyfin");
+  const links = jellyfin && jellyfin.state === "running" && !jellyfin.reason ? serviceLinksFor(jellyfin) : [];
+  host.replaceChildren();
+  host.hidden = !links.length;
+  if (links.length) host.append(...renderServiceLinks(links, "Jellyfin").children);
+}
+
 
 function renderContainers(payload) {
   const list = $("container-list");
@@ -3560,7 +3224,10 @@ function renderContainers(payload) {
   paintDocker(payload);
   paintDefaultBrowser(payload);
   paintJellyfinGpu(payload);
-  if (Array.isArray(payload.items)) lastContainerItems = payload.items;
+  if (Array.isArray(payload.items)) {
+    lastContainerItems = payload.items;
+    paintJellyfinLinks(payload.items);
+  }
   paintNetworks(payload);
   launchBusy(false);
   maybeToast(payload);
@@ -3601,18 +3268,17 @@ function renderContainers(payload) {
     logs.textContent = payload.logs.trim() || "No logs.";
   }
   if (payload.qr != null) paintQr(payload.qr);
-  if (payload.ai) paintAi(payload);
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.disabled = false;
   });
   if (!Array.isArray(payload.items)) return;
-  const items = mergeManagedContainers(payload.items, payload.ai);
+  const items = payload.items.filter((item) => item && item.name);
   list.replaceChildren();
   if (!items.length) {
     const empty = document.createElement("li");
     const note = document.createElement("p");
     note.className = "empty-state";
-    note.textContent = "No containers yet. Open Images to run Ollama, Open WebUI, or another image.";
+    note.textContent = "No containers yet. Open Images to run Jellyfin, Tailscale, or another image.";
     empty.append(note);
     list.append(empty);
     return;
@@ -3628,13 +3294,11 @@ function renderContainers(payload) {
     const pills = document.createElement("div");
     pills.className = "status-pills";
     const running = item.state === "running";
-    const missing = item.placeholder || item.state === "missing";
-    if (item.placeholder) li.classList.add("is-placeholder");
+    const missing = item.state === "missing";
     pills.append(statusPill(running ? "Running" : (missing ? "Not created" : (item.state || "unknown")), running ? "running" : (missing ? "missing" : "stopped")));
     const runtimeLabel = item.runtime === "engine" ? "Engine" : "Desktop";
     pills.append(statusPill(runtimeLabel, item.runtime === "engine" ? "engine" : "desktop"));
     if (item.name === "jellyfin" && running) pills.append(statusPill("Tailnet", "tailnet"));
-    if (item.name === "hog-ollama" && payload.ai && payload.ai.ollama && payload.ai.ollama.gpu) pills.append(statusPill("GPU", "gpu"));
     if (item.image) {
       const image = statusPill(item.image);
       image.title = item.image;
@@ -3671,18 +3335,6 @@ function renderContainers(payload) {
         openTailscaleShares();
       });
     }
-    if (item.name === "hog-ollama" || item.name === "hog-open-webui") {
-      line.classList.add("is-share");
-      line.tabIndex = 0;
-      line.setAttribute("role", "button");
-      line.title = "Open the AI toolbox";
-      line.addEventListener("click", () => showSettingsPage("ai"));
-      line.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        showSettingsPage("ai");
-      });
-    }
     const kebab = document.createElement("button");
     kebab.type = "button";
     kebab.className = "kebab";
@@ -3702,18 +3354,14 @@ function renderContainers(payload) {
       kebab.setAttribute("aria-expanded", willOpen ? "true" : "false");
     });
     const actions = [["Command", "command"]];
-    if (missing && (item.name === "hog-ollama" || item.name === "hog-open-webui")) {
-      actions.unshift(["Run", "ai-run"]);
-    } else {
-      const other = item.runtime === "engine" ? "desktop" : "engine";
-      const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
-      if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
-      if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
-      actions.push(...(running
-        ? [["Stop", "stop"], ["Logs", "logs"]]
-        : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
-      if (running) actions.push(["Recreate", "recreate-prompt"]);
-    }
+    const other = item.runtime === "engine" ? "desktop" : "engine";
+    const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
+    if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
+    if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
+    actions.push(...(running
+      ? [["Stop", "stop"], ["Logs", "logs"]]
+      : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
+    if (running) actions.push(["Recreate", "recreate-prompt"]);
     for (const [label, action] of actions) {
       const button = document.createElement("button");
       button.type = "button";
@@ -3723,13 +3371,6 @@ function renderContainers(payload) {
       button.addEventListener("click", (event) => {
         event.stopPropagation();
         closeKebabs();
-        if (action === "ai-run") {
-          const status = $("container-status");
-          if (status) status.textContent = item.name === "hog-open-webui" ? "Starting Open WebUI…" : "Starting Ollama…";
-          showSettingsPage("ai");
-          runAiPreset(item.name);
-          return;
-        }
         if (action === "command") {
           const image = item.image && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,200}$/.test(item.image) && !item.image.includes("..")
             ? item.image
@@ -3744,14 +3385,6 @@ function renderContainers(payload) {
             if (extra.runtime !== "engine") {
               extra.sysctls = ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.src_valid_mark=1", "net.ipv6.conf.all.forwarding=1"];
             }
-          } else if (item.name === "hog-ollama" || item.name === "hog-open-webui") {
-            extra.command = [];
-            extra.runtime = item.runtime === "engine" ? "engine" : "desktop";
-            extra.network = "hog-ai";
-            extra.ports = item.name === "hog-ollama"
-              ? [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }]
-              : [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }];
-            if (item.name === "hog-open-webui") extra.env = ["OLLAMA_BASE_URL=http://hog-ollama:11434"];
           } else if (item.runtime) {
             extra.runtime = item.runtime;
           }
@@ -3793,7 +3426,9 @@ function renderContainers(payload) {
       menu.append(button);
     }
     wrap.append(line, kebab);
-    li.append(wrap, menu);
+    const links = running && !item.reason ? serviceLinksFor(item) : [];
+    if (links.length) li.append(wrap, renderServiceLinks(links, item.name), menu);
+    else li.append(wrap, menu);
     list.append(li);
   }
 
@@ -3801,7 +3436,6 @@ function renderContainers(payload) {
   if (payload.commit) noteCommit(payload.commit);
 }
 window.__hogContainers = renderContainers;
-window.__hogAi = paintAi;
 window.__hogUpdate = paintUpdate;
 
 function syncNetworkActions() {
@@ -5223,7 +4857,7 @@ function menuItems(kind) {
       sub: button.querySelector("small")?.textContent || "",
       accent: button.dataset.settings === "files" || button.dataset.settings === "tailscale"
         ? "flare"
-        : button.dataset.settings === "general" || button.dataset.settings === "ai"
+        : button.dataset.settings === "general"
           ? "gold"
           : "amber",
       current: button.getAttribute("aria-current") === "page",
@@ -5624,179 +5258,6 @@ function bind() {
   document.querySelectorAll("#home [data-settings]").forEach((button) => {
     button.addEventListener("click", () => showSettingsPage(button.dataset.settings));
   });
-  const bindAiRun = (id, kind) => {
-    const button = $(id);
-    if (!button) return;
-    button.addEventListener("click", () => {
-      showSettingsPage("ai");
-      const status = $("ai-status");
-      if (status) status.textContent = kind === "hog-ollama" ? "Starting Ollama…" : "Starting Open WebUI…";
-      runAiPreset(kind);
-    });
-  };
-  bindAiRun("ai-run-ollama", "hog-ollama");
-  bindAiRun("ai-run-webui", "hog-open-webui");
-  const openWebui = $("ai-open-webui");
-  if (openWebui) {
-    openWebui.addEventListener("click", () => {
-      const url = openWebui.dataset.url || "";
-      if (!url.startsWith("http://127.0.0.1:")) return;
-      if (typeof createTab === "function") createTab();
-      if (typeof openUrl === "function") openUrl(url);
-    });
-  }
-  const copyWebui = $("ai-copy-webui");
-  if (copyWebui) {
-    copyWebui.addEventListener("click", async () => {
-      const url = copyWebui.dataset.url || "";
-      if (!url) return;
-      try {
-        await navigator.clipboard.writeText(url);
-        copyWebui.textContent = "Copied";
-        setTimeout(() => { copyWebui.textContent = "Copy phone address"; }, 1200);
-      } catch {
-        copyWebui.textContent = url;
-      }
-    });
-  }
-  const pullForm = $("ai-pull-form");
-  if (pullForm) {
-    pullForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      startAiPull(($("ai-pull-name")?.value || "").trim().toLowerCase());
-    });
-  }
-  const libraryLink = $("ai-library-link");
-  if (libraryLink) {
-    libraryLink.addEventListener("click", (event) => {
-      event.preventDefault();
-      openOllamaLibrary(libraryLink.getAttribute("href") || "https://ollama.com/library");
-    });
-  }
-
-  const bindEditorDownload = (id) => {
-    const link = $(id);
-    if (!link) return;
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      openVscodeDownload(link.getAttribute("href") || "https://code.visualstudio.com/");
-    });
-  };
-  bindEditorDownload("ai-editor-get");
-  bindEditorDownload("ai-editor-download-link");
-  const editorMenuBtn = $("ai-editor-menu-btn");
-  const editorMenu = $("ai-editor-menu");
-  if (editorMenuBtn && editorMenu) {
-    editorMenuBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const willOpen = editorMenu.hidden;
-      closeKebabs();
-      editorMenu.hidden = !willOpen;
-      editorMenuBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
-    });
-  }
-  const editorDownload = $("ai-editor-download");
-  if (editorDownload) {
-    editorDownload.addEventListener("click", () => {
-      closeKebabs();
-      openVscodeDownload(($("ai-editor-download-link")?.getAttribute("href")) || "https://code.visualstudio.com/");
-    });
-  }
-  const startEditorInstall = () => {
-    const install = $("ai-editor-install");
-    if (install) {
-      install.disabled = true;
-      install.textContent = "Installing Continue…";
-    }
-    desktopCommand("containers:ai-editor-install");
-  };
-  const editorInstall = $("ai-editor-install");
-  if (editorInstall) editorInstall.addEventListener("click", startEditorInstall);
-  const editorReinstall = $("ai-editor-reinstall");
-  if (editorReinstall) {
-    editorReinstall.addEventListener("click", () => {
-      closeKebabs();
-      startEditorInstall();
-    });
-  }
-  const editorConnect = $("ai-editor-connect");
-  if (editorConnect) {
-    editorConnect.addEventListener("click", () => {
-      editorConnect.disabled = true;
-      desktopCommand("containers:ai-editor-connect");
-    });
-  }
-  const editorPull = $("ai-editor-pull");
-  if (editorPull) {
-    editorPull.addEventListener("click", () => {
-      editorPull.disabled = true;
-      desktopCommand("containers:ai-editor-pull");
-    });
-  }
-
-  const codeModel = $("ai-code-model");
-  if (codeModel) codeModel.addEventListener("change", () => { codeModel.dataset.dirty = "1"; });
-  const codeFolder = $("ai-code-folder");
-  const sendCodeFolder = () => {
-    if (!codeFolder) return;
-    const value = codeFolder.value.trim();
-    if (!value || /[\n\r\0]/.test(value)) return;
-    codeFolder.dataset.dirty = "";
-    desktopCommand(`containers:ai-code-folder:${value}`);
-  };
-  if (codeFolder) {
-    codeFolder.addEventListener("input", () => { codeFolder.dataset.dirty = "1"; });
-    codeFolder.addEventListener("change", sendCodeFolder);
-    codeFolder.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        sendCodeFolder();
-      }
-    });
-  }
-  const codeBrowse = $("ai-code-browse");
-  if (codeBrowse) {
-    codeBrowse.addEventListener("click", () => {
-      const current = (codeFolder && codeFolder.value.trim()) || "";
-      if (codeFolder) codeFolder.dataset.dirty = "";
-      desktopCommand(`containers:ai-code-pick:${/[\n\r\0]/.test(current) ? "" : current}`);
-    });
-  }
-  const codeStart = $("ai-code-start");
-  if (codeStart) {
-    codeStart.addEventListener("click", () => {
-      const command = codeChatStartCommand(codeModel ? codeModel.value : "", codeFolder ? codeFolder.value : "");
-      const error = $("ai-error");
-      if (!command) {
-        if (error) error.textContent = "Pick a model and a project folder inside your home folder first.";
-        return;
-      }
-      codeChatBusy = true;
-      codeStart.disabled = true;
-      codeStart.textContent = "Starting…";
-      if (codeModel) codeModel.dataset.dirty = "";
-      if (codeFolder) codeFolder.dataset.dirty = "";
-      const status = $("ai-status");
-      if (status) status.textContent = "Starting Code chat. The first start downloads the Aider image, which takes a while.";
-      desktopCommand(command);
-    });
-  }
-  const codeStop = $("ai-code-stop");
-  if (codeStop) {
-    codeStop.addEventListener("click", () => {
-      codeStop.disabled = true;
-      desktopCommand("containers:ai-code-stop");
-    });
-  }
-  const codeOpen = $("ai-code-open");
-  if (codeOpen) {
-    codeOpen.addEventListener("click", () => {
-      const url = codeChatUrl(codeOpen.dataset.url || "");
-      if (!url) return;
-      if (typeof createTab === "function") createTab();
-      if (typeof openUrl === "function") openUrl(url);
-    });
-  }
   restoreAccordions();
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -5865,35 +5326,6 @@ function bind() {
           ports: [{ bind: "127.0.0.1", host: "8096", dest: "8096", proto: "tcp" }],
           command: [],
         });
-        return;
-      }
-      if (kind === "hog-ollama") {
-        const existing = (lastContainerItems || []).find((item) => item && item.name === "hog-ollama");
-        const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
-        fillLaunch(kind, button.dataset.image, preferEngine
-          ? "Ollama will run on Docker Engine and use the GPU when it is ready. The API stays on 127.0.0.1. Open the AI page to pull models."
-          : "Ollama will run on this runtime. Without a GPU it uses the CPU. The API stays on 127.0.0.1.", {
-          ports: [{ bind: "127.0.0.1", host: "11434", dest: "11434", proto: "tcp" }],
-          command: [],
-          network: "hog-ai",
-          runtime: preferEngine ? "engine" : "desktop",
-        });
-        const advanced = $("container-advanced");
-        if (advanced) advanced.open = true;
-        return;
-      }
-      if (kind === "hog-open-webui") {
-        const existing = (lastContainerItems || []).find((item) => item && item.name === "hog-open-webui");
-        const preferEngine = runtimeOk("engine") && (!existing || existing.runtime === "engine");
-        fillLaunch(kind, button.dataset.image, "Open WebUI joins the hog-ai network so it can reach Ollama by name. It listens on 127.0.0.1 and is served to your phone over Tailscale only. The first account you create becomes the admin.", {
-          ports: [{ bind: "127.0.0.1", host: "3000", dest: "8080", proto: "tcp" }],
-          command: [],
-          env: ["OLLAMA_BASE_URL=http://hog-ollama:11434"],
-          network: "hog-ai",
-          runtime: preferEngine ? "engine" : "desktop",
-        });
-        const advanced = $("container-advanced");
-        if (advanced) advanced.open = true;
         return;
       }
       fillLaunch(kind, button.dataset.image, `Command for ${button.dataset.image} as ${kind}. Add a port or the VPN interface, then Run.`);

@@ -38,7 +38,6 @@
             <li><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
             <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
             <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="ai"><span>AI</span><small>Local models and chat</small></button></li>
             <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
           </ul>
         </div>
@@ -87,7 +86,6 @@
           <div class="toolbox">
             <p class="eyebrow">Toolbox</p>
             <div class="shortcuts toolbox-shortcuts">
-              <button type="button" data-settings="ai">AI chat</button>
               <button type="button" data-settings="containers">Containers</button>
               <button type="button" data-settings="files">Files</button>
               <button type="button" data-settings="tailscale">Tailscale</button>
@@ -101,7 +99,6 @@
               <button type="button" data-settings="files"><span>Files</span><small>Library</small></button>
               <button type="button" data-settings="containers"><span>Containers</span><small>Images and logs</small></button>
               <button type="button" data-settings="networks"><span>Networks</span><small>Docker networks</small></button>
-              <button type="button" data-settings="ai"><span>AI</span><small>Models and chat</small></button>
               <button type="button" data-settings="tailscale"><span>Tailscale</span><small>Phone access</small></button>
             </nav>
             <div class="settings-panes">
@@ -184,8 +181,6 @@
             <div class="picker">
             <div class="popover-head"><strong>Images</strong></div>
             <ul class="menu-list">
-              <li><button type="button" class="has-step" data-launch="hog-ollama" data-image="ollama/ollama:latest"><span>Ollama</span><small>Local model runner on Docker Engine, with the GPU when it is available. This is the app; models are pulled on the AI page.</small></button></li>
-              <li><button type="button" class="has-step" data-launch="hog-open-webui" data-image="ghcr.io/open-webui/open-webui:main"><span>Open WebUI</span><small>Chat page for Ollama. It stays on 127.0.0.1 and is served to your phone over Tailscale only.</small></button></li>
               <li><button type="button" data-launch="ubuntu" data-image="ubuntu:24.04"><span>Flat Ubuntu</span><small>ubuntu:24.04 · name ubuntu</small></button></li>
               <li><button type="button" data-launch="fedora" data-image="fedora:latest"><span>Fedora</span><small>fedora:latest · name fedora</small></button></li>
               <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
@@ -341,154 +336,10 @@
               </details>
             </section>
           </div>
-          <div id="settings-ai" hidden>
-            <p class="eyebrow">AI</p>
-            <h1>Local AI box</h1>
-            <p class="lede">Run language models on this computer and chat from Hog or your phone over Tailscale. Ollama stays private. Open WebUI is published only on 127.0.0.1 and served to your tailnet. Funnel stays off.</p>
-            <p id="ai-gpu-notice" class="note" role="status">Checking whether a GPU is available…</p>
-            <p id="ai-disk-warning" class="note" role="status" hidden></p>
-            <p id="ai-status" class="note" role="status"></p>
-            <p id="ai-error" class="error" role="status"></p>
-            <section class="connect-card" aria-label="Ollama">
-              <div class="card-head">
-                <div class="card-label">
-                  <p class="eyebrow">App</p>
-                  <strong>Ollama</strong>
-                </div>
-              </div>
-              <div class="engine-row default-browser-row">
-                <div class="default-browser-copy">
-                  <p class="note">This is the model runner, not a model. It runs on Docker Engine, with the NVIDIA GPU when it is ready. The API is only on 127.0.0.1, and Open WebUI reaches it by name on the hog-ai network.</p>
-                  <div id="ai-ollama-pills" class="status-pills"></div>
-                </div>
-                <button type="button" id="ai-run-ollama" class="primary">Run Ollama</button>
-              </div>
-            </section>
-            <section class="connect-card" aria-label="Open WebUI">
-              <div class="card-head">
-                <div class="card-label">
-                  <p class="eyebrow">Chat</p>
-                  <strong>Open WebUI</strong>
-                </div>
-              </div>
-              <div class="engine-row default-browser-row">
-                <div class="default-browser-copy">
-                  <p class="note">A ChatGPT-style page for the models on Ollama. The first account you create becomes the admin.</p>
-                  <div id="ai-webui-pills" class="status-pills"></div>
-                  <p id="ai-webui-url" class="note" hidden></p>
-                </div>
-                <div class="hog-update-actions">
-                  <button type="button" id="ai-run-webui" class="primary">Run Open WebUI</button>
-                  <button type="button" id="ai-open-webui" hidden>Open on this computer</button>
-                  <button type="button" id="ai-copy-webui" hidden>Copy phone address</button>
-                </div>
-              </div>
-            </section>
-
-            <section class="connect-card" aria-label="Code editor">
-              <div class="card-head">
-                <div class="card-label">
-                  <p class="eyebrow">Editor</p>
-                  <strong>Code editor</strong>
-                </div>
-                <div class="card-menu">
-                  <button type="button" class="kebab" id="ai-editor-menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Code editor actions">⋯</button>
-                  <div id="ai-editor-menu" class="kebab-menu" hidden role="menu">
-                    <button type="button" id="ai-editor-download" role="menuitem">Get Visual Studio Code</button>
-                    <button type="button" id="ai-editor-reinstall" role="menuitem" hidden>Reinstall Continue</button>
-                  </div>
-                </div>
-              </div>
-              <div class="engine-row default-browser-row">
-                <div class="default-browser-copy">
-                  <p class="note">The Continue extension in Visual Studio Code talks to local Ollama for chat, edits, and autocomplete.</p>
-                  <div id="ai-editor-pills" class="status-pills"></div>
-                  <p id="ai-editor-note" class="note" hidden></p>
-                  <p id="ai-editor-missing" class="note" hidden><a id="ai-editor-get" href="https://code.visualstudio.com/">Get Visual Studio Code</a></p>
-                </div>
-                <div class="hog-update-actions">
-                  <button type="button" id="ai-editor-install" class="primary">Install Continue</button>
-                  <button type="button" id="ai-editor-connect">Connect to Ollama</button>
-                  <button type="button" id="ai-editor-pull" hidden>Pull missing models</button>
-                </div>
-              </div>
-              <details class="settings-sub" id="ai-editor-advanced">
-                <summary>Advanced</summary>
-                <p class="note">Continue uses qwen2.5-coder:14b for chat and edits, qwen2.5-coder:1.5b for autocomplete, and nomic-embed-text for embeddings, all at http://127.0.0.1:11434. Connect to Ollama writes ~/.continue/config.yaml and keeps a backup if that file already exists.</p>
-                <p class="note"><a id="ai-editor-download-link" href="https://code.visualstudio.com/">Get Visual Studio Code</a></p>
-              </details>
-            </section>
-            <section class="connect-card" aria-label="Code chat">
-              <div class="card-head">
-                <div class="card-label">
-                  <p class="eyebrow">Chat + files</p>
-                  <strong>Code chat</strong>
-                </div>
-              </div>
-              <div class="engine-row default-browser-row">
-                <div class="default-browser-copy">
-                  <p class="note">Chat with a local model in a Hog tab while it edits a project folder. Powered by Aider's browser mode in a container. Each edit becomes a git commit, so you can undo it.</p>
-                  <div id="ai-code-pills" class="status-pills"></div>
-                </div>
-                <div class="hog-update-actions">
-                  <button type="button" id="ai-code-start" class="primary">Start</button>
-                  <button type="button" id="ai-code-open" hidden>Open</button>
-                  <button type="button" id="ai-code-stop" hidden>Stop</button>
-                </div>
-              </div>
-              <div class="code-chat-fields">
-                <label for="ai-code-model">Model
-                  <select id="ai-code-model" aria-label="Code chat model">
-                    <option value="qwen2.5-coder:14b">qwen2.5-coder:14b</option>
-                  </select>
-                </label>
-                <label for="ai-code-folder">Project folder
-                  <span class="code-chat-folder-row">
-                    <input id="ai-code-folder" type="text" autocomplete="off" spellcheck="false" placeholder="~/webdev/my-project" aria-label="Project folder">
-                    <button type="button" id="ai-code-browse">Browse…</button>
-                  </span>
-                </label>
-              </div>
-              <p id="ai-code-git-note" class="note warn" hidden></p>
-              <p id="ai-code-note" class="note" hidden></p>
-              <div id="ai-code-bar" class="hog-progress" hidden>
-                <div class="hog-progress-track"><div id="ai-code-bar-fill" class="hog-progress-fill"></div></div>
-                <p id="ai-code-progress" class="note" role="status"></p>
-              </div>
-              <details class="settings-sub" id="ai-code-advanced">
-                <summary>Advanced</summary>
-                <p class="note">The first Start downloads paulgauthier/aider-full (a few GB). Hog runs it as hog-aider on the hog-ai network with your user id, every capability dropped, and only the project folder mounted at /app. The chat page listens on 127.0.0.1 only and is not shared to your tailnet. Ollama is reached at http://hog-ollama:11434 and the model is used as ollama_chat/&lt;model&gt;.</p>
-                <p class="note">If the folder is not a git repo, Aider runs git init there and commits each edit. Pick the top folder of a repo, not a subfolder. Stop removes the container; your files and commits stay.</p>
-              </details>
-            </section>
-            <section class="connect-card" aria-label="Model library">
-              <div class="card-head">
-                <div class="card-label">
-                  <p class="eyebrow">Model library</p>
-                  <strong>Models for Ollama</strong>
-                </div>
-              </div>
-              <p class="note">These are downloadable models, not the Ollama app itself. Run Ollama above first. The 9–10 GB options are a good fit for 12 GB of video memory. You can also type another Ollama model name.</p>
-              <div id="ai-catalog" class="ai-catalog"></div>
-              <p class="note"><a id="ai-library-link" href="https://ollama.com/library">Browse more models on ollama.com/library</a></p>
-              <form id="ai-pull-form" class="ai-pull-form">
-                <label>Model name
-                  <input id="ai-pull-name" autocomplete="off" spellcheck="false" placeholder="qwen2.5:14b" maxlength="80">
-                </label>
-                <button type="submit" id="ai-pull">Pull model</button>
-              </form>
-              <div id="ai-pull-bar" class="hog-progress" hidden>
-                <div class="hog-progress-track"><div id="ai-pull-bar-fill" class="hog-progress-fill"></div></div>
-                <p id="ai-pull-progress" class="note" role="status"></p>
-              </div>
-              <p id="ai-models-empty" class="empty-state">No models yet. Pull one from the list above.</p>
-              <ul id="ai-model-list" class="media-list"></ul>
-            </section>
-          </div>
           <div id="settings-tailscale" hidden>
             <p class="eyebrow">Tailscale</p>
             <h1>Phone access</h1>
-            <p class="lede">Sign in to Tailscale, then reach Jellyfin, shared folders, and the AI chat page from your phone. Funnel stays off.</p>
+            <p class="lede">Sign in to Tailscale, then reach Jellyfin and shared folders from your phone. Funnel stays off.</p>
             <section id="jellyfin-connect" class="connect-card" aria-label="Tailscale IP">
               <p class="eyebrow">Tailscale IP</p>
               <div class="connect-addr">
@@ -502,7 +353,7 @@
                 <button type="button" id="tailscale-login-link" class="inline-link" hidden>Open sign-in link</button>
               </div>
               <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
-              <p class="note">On this computer, Jellyfin is 127.0.0.1:8096.</p>
+              <div id="jellyfin-links" class="service-links" hidden></div>
               <p id="jellyfin-gpu-hint" class="note" hidden>Jellyfin is using the NVIDIA GPU on Docker Engine. In Dashboard → Playback → Transcoding, pick NVIDIA NVENC.</p>
             </section>
             <details id="exit-node-guide" class="connect-card exit-node-guide">

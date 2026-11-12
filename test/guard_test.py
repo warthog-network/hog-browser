@@ -2316,96 +2316,8 @@ class RuntimeAndNetworkTest(unittest.TestCase):
             self.assertEqual(created[1], guard.engine_sock())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class AiToolboxTest(unittest.TestCase):
-    def test_model_catalog_lists_mid_size_and_large_groups(self):
-        from guard import (
-            AI_MODEL_GROUPS,
-            AI_MODEL_SUGGESTIONS,
-            OLLAMA_LIBRARY_URL,
-            _model_is_installed,
-            allowed_ollama_library_url,
-            valid_model_name,
-        )
-        names = [item["name"] for item in AI_MODEL_SUGGESTIONS]
-        expected = (
-            "qwen2.5:14b",
-            "qwen2.5-coder:14b",
-            "deepseek-r1:14b",
-            "phi4:14b",
-            "gemma2:9b",
-            "llama3.1:8b",
-            "qwen2.5:7b",
-            "mistral",
-            "gemma2:27b",
-            "qwen2.5:32b",
-            "deepseek-r1:32b",
-        )
-        for name in expected:
-            self.assertIn(name, names)
-            self.assertTrue(valid_model_name(name))
-        mid = [item["name"] for item in AI_MODEL_SUGGESTIONS if item["group"] == "mid"]
-        self.assertEqual(mid, ["qwen2.5:14b", "qwen2.5-coder:14b", "deepseek-r1:14b", "phi4:14b"])
-        large = [item["name"] for item in AI_MODEL_SUGGESTIONS if item["group"] == "large"]
-        self.assertEqual(large, ["gemma2:27b", "qwen2.5:32b", "deepseek-r1:32b"])
-        self.assertTrue(all(item.get("blurb") and item.get("disk") and "vramMb" in item for item in AI_MODEL_SUGGESTIONS))
-        self.assertEqual([item[0] for item in AI_MODEL_GROUPS], ["mid", "small", "large"])
-        self.assertEqual(OLLAMA_LIBRARY_URL, "https://ollama.com/library")
-        self.assertTrue(_model_is_installed("mistral", {"mistral:latest"}))
-        self.assertTrue(_model_is_installed("mistral", {"mistral"}))
-        self.assertTrue(_model_is_installed("llama3.1:8b", {"llama3.1:8b"}))
-        self.assertFalse(_model_is_installed("qwen2.5:14b", {"qwen2.5:7b"}))
-        self.assertFalse(_model_is_installed("phi4:14b", {"phi4"}))
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library"), "https://ollama.com/library")
-        self.assertEqual(
-            allowed_ollama_library_url("https://www.ollama.com/library/llama3.1"),
-            "https://www.ollama.com/library/llama3.1",
-        )
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library?q=1"), "")
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library#top"), "")
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/blog"), "")
-        self.assertEqual(allowed_ollama_library_url("http://ollama.com/library"), "")
-        self.assertEqual(allowed_ollama_library_url("https://evil.example/library"), "")
-        self.assertEqual(allowed_ollama_library_url("https://user@ollama.com/library"), "")
-
-    def test_ai_status_marks_installed_suggestions_and_exposes_library(self):
-        from guard import Guard
-        with tempfile.TemporaryDirectory() as folder:
-            guard = Guard(folder, docker="docker")
-            guard.ai_gpu_fields = lambda: {
-                "ready": True,
-                "name": "NVIDIA GeForce RTX 3060",
-                "memoryMb": 12288,
-                "notice": "ready",
-            }
-            guard.ai_disk_fields = lambda: {"warning": "", "freeBytes": 100 * 1024 * 1024 * 1024}
-            guard.list_ai_models = lambda: (
-                [{"name": "qwen2.5:14b", "sizeLabel": "9.0 GB", "fit": "fits"}],
-                "",
-            )
-            guard.ollama_host_port = lambda: 11434
-            guard.openwebui_host_port = lambda: 3000
-            guard.tailscale_ipv4 = lambda: ""
-            payload = guard.ai_status_fields(
-                models=True,
-                items=[{"name": "hog-ollama", "state": "running", "runtime": "engine", "reason": ""}],
-            )
-            ai = payload["ai"]
-            self.assertEqual(ai["libraryUrl"], "https://ollama.com/library")
-            self.assertEqual([row["id"] for row in ai["groups"]], ["mid", "small", "large"])
-            by_name = {row["name"]: row for row in ai["suggestions"]}
-            self.assertTrue(by_name["qwen2.5:14b"]["installed"])
-            self.assertEqual(by_name["qwen2.5:14b"]["fit"], "fits")
-            self.assertEqual(by_name["qwen2.5:14b"]["blurb"], "Best all-rounder")
-            self.assertFalse(by_name["qwen2.5:32b"]["installed"])
-            self.assertEqual(by_name["qwen2.5:32b"]["fit"], "over")
-            self.assertEqual(by_name["qwen2.5:32b"]["group"], "large")
-
+class ContainerPullAndServeTest(unittest.TestCase):
     def test_apply_command_pulls_missing_image_before_run(self):
-        from guard import AI_NETWORK, OLLAMA_IMAGE, OLLAMA_NAME, RUNTIME_ENGINE
         with tempfile.TemporaryDirectory() as folder:
             guard = Guard(folder, docker="docker")
             calls = []
@@ -2414,24 +2326,14 @@ class AiToolboxTest(unittest.TestCase):
             events = []
 
             def inspect(name):
-                if name != OLLAMA_NAME or not state["up"]:
+                if name != "box" or not state["up"]:
                     return None, "missing"
                 return {
-                    "Name": f"/{OLLAMA_NAME}",
+                    "Name": "/box",
                     "State": {"Status": "running", "Running": True},
-                    "Config": {"Image": OLLAMA_IMAGE},
-                    "HostConfig": {
-                        "Privileged": False,
-                        "NetworkMode": AI_NETWORK,
-                        "PidMode": "",
-                        "IpcMode": "private",
-                        "CapAdd": None,
-                        "Binds": None,
-                        "Devices": None,
-                    },
-                    "Mounts": [
-                        {"Name": "hog-ollama", "Source": "/var/lib/docker/volumes/hog-ollama/_data", "Destination": "/root/.ollama", "Type": "volume"},
-                    ],
+                    "Config": {"Image": "ubuntu:24.04"},
+                    "HostConfig": {"Privileged": False, "NetworkMode": "bridge", "PidMode": "", "IpcMode": "private"},
+                    "Mounts": [],
                 }, ""
 
             def run(args, timeout=8):
@@ -2446,216 +2348,27 @@ class AiToolboxTest(unittest.TestCase):
             guard.container_run = lambda name, args, timeout=8: run(args, timeout)
             guard.items = lambda: []
             guard.docker_running = lambda: True
-            guard.ensure_ai_network = lambda sock=None: ""
-            guard.port_open = lambda port: False
-            guard.ai_gpu_fields = lambda: {"ready": True, "name": "NVIDIA GeForce RTX 3060", "memoryMb": 12288, "notice": "ready"}
-            guard.container_runtime = lambda name="": RUNTIME_ENGINE
+            guard.runtime_available = lambda side: True
+            guard.container_runtime = lambda name="": "engine"
             guard.container_sock = lambda name="": None
             guard.prepare_tailscale_firewall = lambda name, info: ""
             guard._attach_gpu = lambda payload: payload
             guard.image_exists = lambda image, sock=None: False
+
             def pull(image, sock=None, progress=None):
                 pulled.append(image)
                 if progress:
                     progress({"ok": True, "imagePull": {"image": image, "status": "Downloading image…", "percent": None}})
                 return ""
+
             guard.pull_image = pull
-            line = canonical_command(OLLAMA_NAME, OLLAMA_IMAGE, (("127.0.0.1", "11434", "11434", "tcp"),), False, (), (), (), (), AI_NETWORK)
+            line = canonical_command("box", "ubuntu:24.04", (), False, ("sleep", "infinity"))
             result = guard.handle("run", line, "engine", progress=events.append)
             self.assertTrue(result["ok"], result.get("error"))
-            self.assertEqual(pulled, [OLLAMA_IMAGE])
+            self.assertEqual(pulled, ["ubuntu:24.04"])
             self.assertTrue(any(item and item.get("imagePull") for item in events))
             self.assertTrue(any(item and item[0] == "run" for item in calls))
             self.assertFalse(any(item and item[0] == "pull" for item in calls))
-
-    def test_model_name_validation(self):
-        from guard import valid_model_name
-        self.assertTrue(valid_model_name("llama3.1:8b"))
-        self.assertTrue(valid_model_name("qwen2.5:14b"))
-        self.assertTrue(valid_model_name("qwen2.5-coder:14b"))
-        self.assertTrue(valid_model_name("deepseek-r1:32b"))
-        self.assertTrue(valid_model_name("phi4:14b"))
-        self.assertTrue(valid_model_name("mistral"))
-        self.assertTrue(valid_model_name("gemma2:9b"))
-        self.assertTrue(valid_model_name("library/llama3.1:8b-instruct-q4_k_m"))
-        self.assertFalse(valid_model_name(""))
-        self.assertFalse(valid_model_name("llama 3"))
-        self.assertFalse(valid_model_name("../escape"))
-        self.assertFalse(valid_model_name("http://evil.example"))
-        self.assertFalse(valid_model_name("name;rm"))
-        self.assertFalse(valid_model_name("a" * 81))
-        self.assertFalse(valid_model_name("-starts-with-dash"))
-        self.assertFalse(valid_model_name("foo:"))
-        self.assertFalse(valid_model_name(":tag"))
-
-    def test_ollama_command_uses_gpu_volume_network_and_loopback(self):
-        from guard import (
-            AI_MEMORY,
-            AI_NETWORK,
-            NVIDIA_CAPS_ENV,
-            NVIDIA_VISIBLE_ENV,
-            OLLAMA_BASE_ENV,
-            OLLAMA_IMAGE,
-            OLLAMA_MOUNT,
-            OLLAMA_NAME,
-            OPENWEBUI_IMAGE,
-            OPENWEBUI_MOUNT,
-            OPENWEBUI_NAME,
-            compose_run,
-            parse_run,
-        )
-        ollama_ports = (("127.0.0.1", "11434", "11434", "tcp"),)
-        args = compose_run(
-            OLLAMA_NAME,
-            OLLAMA_IMAGE,
-            ports=ollama_ports,
-            mounts=(OLLAMA_MOUNT,),
-            network=AI_NETWORK,
-            gpus=True,
-            memory=AI_MEMORY,
-            command=(),
-        )
-        self.assertIn("--gpus", args)
-        self.assertEqual(args[args.index("--gpus") + 1], "all")
-        self.assertIn("--network", args)
-        self.assertEqual(args[args.index("--network") + 1], AI_NETWORK)
-        self.assertIn("-v", args)
-        self.assertEqual(args[args.index("-v") + 1], OLLAMA_MOUNT)
-        self.assertIn("-p", args)
-        self.assertEqual(args[args.index("-p") + 1], "127.0.0.1:11434:11434/tcp")
-        self.assertNotIn("0.0.0.0", " ".join(args))
-        self.assertIn("--memory", args)
-        self.assertEqual(args[args.index("--memory") + 1], "16g")
-        joined = " ".join(args)
-        self.assertNotIn("-p 11434:", joined)
-        self.assertNotIn("-p 0.0.0.0:", joined)
-
-        text = canonical_command(OLLAMA_NAME, OLLAMA_IMAGE, ollama_ports, False, (), (), (), (), AI_NETWORK)
-        parsed = parse_run(text)
-        self.assertEqual(parsed[0], OLLAMA_NAME)
-        self.assertEqual(parsed[2], ollama_ports)
-        self.assertEqual(parsed[8], AI_NETWORK)
-        self.assertEqual(parse_run(canonical_command(*parsed)), parsed)
-
-        webui_ports = (("127.0.0.1", "3000", "8080", "tcp"),)
-        webui = compose_run(
-            OPENWEBUI_NAME,
-            OPENWEBUI_IMAGE,
-            ports=webui_ports,
-            env=(OLLAMA_BASE_ENV,),
-            mounts=(OPENWEBUI_MOUNT,),
-            network=AI_NETWORK,
-            memory=AI_MEMORY,
-            command=(),
-        )
-        self.assertEqual(webui[webui.index("-p") + 1], "127.0.0.1:3000:8080/tcp")
-        self.assertNotIn("--gpus", webui)
-        self.assertIn(OLLAMA_BASE_ENV, webui)
-        self.assertEqual(webui[webui.index("-v") + 1], OPENWEBUI_MOUNT)
-        self.assertNotIn("0.0.0.0", " ".join(webui))
-        with self.assertRaises(CommandError):
-            parse_run("docker run --name ubuntu --network hog-ai ubuntu:24.04 sleep infinity")
-        with self.assertRaises(CommandError):
-            parse_run(f"docker run --name {OLLAMA_NAME} --network host {OLLAMA_IMAGE}")
-
-    def test_prepare_ai_container_binds_loopback_and_skips_public_publish(self):
-        from guard import (
-            AI_NETWORK,
-            NVIDIA_VISIBLE_ENV,
-            OLLAMA_BASE_ENV,
-            OLLAMA_IMAGE,
-            OLLAMA_MOUNT,
-            OLLAMA_NAME,
-            OPENWEBUI_IMAGE,
-            OPENWEBUI_NAME,
-            RUNTIME_ENGINE,
-        )
-        with tempfile.TemporaryDirectory() as folder:
-            guard = Guard(folder, docker="docker")
-            guard.ensure_ai_network = lambda sock=None: ""
-            guard.port_open = lambda port: False
-            guard.ai_gpu_fields = lambda: {"ready": True, "name": "NVIDIA GeForce RTX 3060", "memoryMb": 12288, "notice": "ready"}
-            prepared, error = guard._prepare_ai_container(OLLAMA_NAME, OLLAMA_IMAGE, (), (), RUNTIME_ENGINE)
-            self.assertEqual(error, "")
-            mounts, env, ports, network, gpus, memory = prepared
-            self.assertEqual(mounts, (OLLAMA_MOUNT,))
-            self.assertEqual(network, AI_NETWORK)
-            self.assertTrue(gpus)
-            self.assertEqual(memory, "16g")
-            self.assertEqual(ports, (("127.0.0.1", "11434", "11434", "tcp"),))
-            self.assertTrue(all(port[0] == "127.0.0.1" for port in ports))
-            self.assertIn(NVIDIA_VISIBLE_ENV, env)
-            cpu, error = guard._prepare_ai_container(OLLAMA_NAME, OLLAMA_IMAGE, (), (), "desktop")
-            self.assertEqual(error, "")
-            self.assertFalse(cpu[4])
-            webui, error = guard._prepare_ai_container(OPENWEBUI_NAME, OPENWEBUI_IMAGE, (), (), RUNTIME_ENGINE)
-            self.assertEqual(error, "")
-            mounts, env, ports, network, gpus, memory = webui
-            self.assertIn(OLLAMA_BASE_ENV, env)
-            self.assertEqual(ports[0][0], "127.0.0.1")
-            self.assertEqual(ports[0][2], "8080")
-            self.assertFalse(gpus)
-            self.assertEqual(network, AI_NETWORK)
-
-    def test_apply_command_starts_ollama_without_publishing_on_all_interfaces(self):
-        from guard import AI_NETWORK, OLLAMA_IMAGE, OLLAMA_MOUNT, OLLAMA_NAME, RUNTIME_ENGINE
-        with tempfile.TemporaryDirectory() as folder:
-            guard = Guard(folder, docker="docker")
-            calls = []
-            state = {"up": False}
-
-            def inspect(name):
-                if name != OLLAMA_NAME or not state["up"]:
-                    return None, "missing"
-                return {
-                    "Name": f"/{OLLAMA_NAME}",
-                    "State": {"Status": "running", "Running": True},
-                    "Config": {"Image": OLLAMA_IMAGE},
-                    "HostConfig": {
-                        "Privileged": False,
-                        "NetworkMode": AI_NETWORK,
-                        "PidMode": "",
-                        "IpcMode": "private",
-                        "CapAdd": None,
-                        "Binds": None,
-                        "Devices": None,
-                    },
-                    "Mounts": [
-                        {"Name": "hog-ollama", "Source": "/var/lib/docker/volumes/hog-ollama/_data", "Destination": "/root/.ollama", "Type": "volume"},
-                    ],
-                }, ""
-
-            def run(args, timeout=8):
-                calls.append(list(args))
-                if args[0] == "run":
-                    state["up"] = True
-                return subprocess.CompletedProcess(args, 0, "", "")
-
-            guard.inspect = inspect
-            guard.run = run
-            guard.run_on = lambda args, timeout=8, sock=None: run(args, timeout)
-            guard.container_run = lambda name, args, timeout=8: run(args, timeout)
-            guard.items = lambda: []
-            guard.docker_running = lambda: True
-            guard.ensure_ai_network = lambda sock=None: ""
-            guard.port_open = lambda port: False
-            guard.ai_gpu_fields = lambda: {"ready": True, "name": "NVIDIA GeForce RTX 3060", "memoryMb": 12288, "notice": "ready"}
-            guard.container_runtime = lambda name="": RUNTIME_ENGINE
-            guard.container_sock = lambda name="": None
-            guard.prepare_tailscale_firewall = lambda name, info: ""
-            guard._attach_gpu = lambda payload: payload
-            line = canonical_command(OLLAMA_NAME, OLLAMA_IMAGE, (("127.0.0.1", "11434", "11434", "tcp"),), False, (), (), (), (), AI_NETWORK)
-            result = guard.handle("run", line, "engine")
-            self.assertTrue(result["ok"], result.get("error"))
-            run_args = next(item for item in calls if item and item[0] == "run")
-            publish = run_args[run_args.index("-p") + 1]
-            self.assertTrue(publish.startswith("127.0.0.1:"))
-            self.assertIn(":11434/tcp", publish)
-            self.assertNotIn("0.0.0.0", " ".join(run_args))
-            self.assertEqual(run_args[run_args.index("-v") + 1], OLLAMA_MOUNT)
-            self.assertEqual(run_args[run_args.index("--network") + 1], AI_NETWORK)
-            self.assertIn("--gpus", run_args)
-            self.assertEqual(run_args[run_args.index("--memory") + 1], "16g")
 
     def test_publish_port_keeps_other_services(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -2667,21 +2380,21 @@ class AiToolboxTest(unittest.TestCase):
                 return "ok", 0
 
             guard.capture = capture
-            problem, url = guard.publish_services(({"port": 8096, "kind": "tcp"}, {"port": 3000, "kind": "https"}))
+            problem, url = guard.publish_services(({"port": 8096, "kind": "tcp"}, {"port": 8101, "kind": "https"}))
             self.assertEqual((problem, url), ("", ""))
             text = " ".join(" ".join(item) for item in seen)
             self.assertIn("--tcp=8096", text)
-            self.assertIn("--https=3000", text)
+            self.assertIn("--https=8101", text)
             self.assertNotIn("funnel", text)
             self.assertTrue(any(item[-1] == "tcp://host.docker.internal:8096" for item in seen))
-            self.assertTrue(any(item[-1] == "http://host.docker.internal:3000" for item in seen))
-            # Publishing Open WebUI must not turn off Jellyfin's tcp serve.
+            self.assertTrue(any(item[-1] == "http://host.docker.internal:8101" for item in seen))
+            # Publishing a shared folder must not turn off Jellyfin's tcp serve.
             off_calls = [item for item in seen if item and item[-1] == "off"]
             self.assertTrue(any("--https=8096" in item for item in off_calls))
             self.assertFalse(any("--tcp=8096" in item and item[-1] == "off" for item in seen))
-            self.assertFalse(any("--https=3000" in item and item[-1] == "off" for item in seen))
+            self.assertFalse(any("--https=8101" in item and item[-1] == "off" for item in seen))
 
-    def test_publish_port_engine_uses_loopback_for_open_webui(self):
+    def test_publish_port_engine_uses_loopback(self):
         with tempfile.TemporaryDirectory() as folder:
             guard = Guard(folder, docker="docker")
             guard.container_runtime = lambda name="": "engine"
@@ -2692,491 +2405,222 @@ class AiToolboxTest(unittest.TestCase):
                 return "ok", 0
 
             guard.capture = capture
-            problem, url = guard.publish_port(3000, kind="https")
+            problem, url = guard.publish_port(8101, kind="https")
             self.assertEqual((problem, url), ("", ""))
-            self.assertEqual(seen[0][-1], "http://127.0.0.1:3000")
+            self.assertEqual(seen[0][-1], "http://127.0.0.1:8101")
             self.assertNotIn("funnel", seen[0])
 
 
-class AiEditorTest(unittest.TestCase):
-    def test_allowed_vscode_download_url_is_strict(self):
-        from guard import allowed_continue_marketplace_uri, allowed_vscode_download_url
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/"), "https://code.visualstudio.com/")
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com"), "https://code.visualstudio.com/")
+SERVE_STATUS = {
+    "TCP": {
+        "3000": {"HTTPS": True},
+        "8096": {"TCPForward": "127.0.0.1:8096"},
+    },
+    "Web": {
+        "hog.tail314642.ts.net:3000": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}},
+    },
+}
+
+
+def running_info(ports, running=True):
+    return {
+        "Name": "/svc",
+        "State": {"Status": "running" if running else "exited", "Running": running},
+        "Config": {"Image": "example/web:latest"},
+        "HostConfig": {"Privileged": False, "NetworkMode": "bridge"},
+        "NetworkSettings": {"Ports": ports},
+        "Mounts": [],
+    }
+
+
+class ServiceLinksTest(unittest.TestCase):
+    def test_published_ports_reads_tcp_bindings(self):
+        from guard import published_ports
+
+        info = running_info({
+            "8096/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8096"}],
+            "80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8080"}, {"HostIp": "::", "HostPort": "8080"}],
+            "51820/udp": [{"HostIp": "0.0.0.0", "HostPort": "51820"}],
+            "9000/tcp": None,
+            "7000/tcp": [{"HostIp": "evil host", "HostPort": "7000"}, {"HostIp": "", "HostPort": "abc"}],
+        })
         self.assertEqual(
-            allowed_vscode_download_url("https://www.code.visualstudio.com/"),
-            "https://www.code.visualstudio.com/",
+            published_ports(info),
+            [
+                {"bind": "0.0.0.0", "port": 8080, "containerPort": 80},
+                {"bind": "127.0.0.1", "port": 8096, "containerPort": 8096},
+            ],
         )
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/download"), "")
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/?q=1"), "")
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/#top"), "")
-        self.assertEqual(allowed_vscode_download_url("http://code.visualstudio.com/"), "")
-        self.assertEqual(allowed_vscode_download_url("https://evil.example/"), "")
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com.evil/"), "")
-        self.assertEqual(allowed_vscode_download_url("https://user@code.visualstudio.com/"), "")
+        self.assertEqual(published_ports(running_info({"80/tcp": [{"HostPort": "8080"}]}, running=False)), [])
+        self.assertEqual(published_ports(None), [])
+        self.assertEqual(published_ports({"State": {"Running": True}}), [])
+
+    def test_serve_ports_maps_local_ports(self):
+        from guard import serve_ports
+
         self.assertEqual(
-            allowed_continue_marketplace_uri("vscode:extension/Continue.continue"),
-            "vscode:extension/Continue.continue",
+            serve_ports(SERVE_STATUS),
+            {8096: {"kind": "tcp", "port": 8096}, 3000: {"kind": "https", "port": 3000}},
         )
-        self.assertEqual(allowed_continue_marketplace_uri("vscode:extension/Evil.evil"), "")
-        self.assertEqual(allowed_continue_marketplace_uri("https://marketplace.visualstudio.com/items?itemName=Continue.continue"), "")
-        self.assertEqual(allowed_continue_marketplace_uri("vscode:extension/Continue.continue;rm -rf /"), "")
+        mapped = serve_ports({
+            "TCP": {"443": {"HTTPS": True}},
+            "Web": {"hog.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://host.docker.internal:8101"}}}},
+        })
+        self.assertEqual(mapped, {8101: {"kind": "https", "port": 443}})
+        self.assertEqual(serve_ports(None), {})
+        self.assertEqual(serve_ports({"TCP": "bad", "Web": []}), {})
 
-    def test_detects_editor_and_continue_from_home(self):
-        from guard import (
-            CONTINUE_EXTENSION_ID,
-            continue_extension_installed,
-            continue_install_argv,
-            continue_marketplace_argv,
-            detect_code_editor,
+    def test_links_for_jellyfin_on_loopback_with_tailscale_tcp(self):
+        from guard import service_links
+
+        hosts = {
+            "lan": "192.168.1.223",
+            "tailscaleIp": "100.119.132.89",
+            "tailscaleDns": "hog.tail314642.ts.net.",
+            "serve": {8096: {"kind": "tcp", "port": 8096}},
+            "hostNetwork": True,
+        }
+        links = service_links([{"bind": "127.0.0.1", "port": 8096, "containerPort": 8096}], hosts)
+        self.assertEqual(
+            [(item["kind"], item["label"], item["url"]) for item in links],
+            [
+                ("local", "This computer", "http://127.0.0.1:8096"),
+                ("tailnet", "Tailnet", "http://hog.tail314642.ts.net:8096"),
+                ("tailnet", "Tailnet IP", "http://100.119.132.89:8096"),
+            ],
         )
+        # A loopback-only port is not offered on the home network.
+        self.assertFalse(any(item["kind"] == "lan" for item in links))
+
+    def test_links_for_wildcard_bind_and_https_serve(self):
+        from guard import service_links
+
+        hosts = {
+            "lan": "192.168.1.223",
+            "tailscaleIp": "100.119.132.89",
+            "tailscaleDns": "hog.tail314642.ts.net",
+            "serve": {3000: {"kind": "https", "port": 3000}},
+            "hostNetwork": True,
+        }
+        wide = service_links([{"bind": "0.0.0.0", "port": 8080, "containerPort": 80}], hosts)
+        self.assertEqual(
+            [item["url"] for item in wide],
+            ["http://127.0.0.1:8080", "http://192.168.1.223:8080", "http://100.119.132.89:8080"],
+        )
+        self.assertEqual([item["kind"] for item in wide], ["local", "lan", "tailnet"])
+        served = service_links([{"bind": "127.0.0.1", "port": 3000, "containerPort": 8080}], hosts)
+        self.assertEqual([item["url"] for item in served], ["http://127.0.0.1:3000", "https://hog.tail314642.ts.net:3000"])
+        # Without host networking a wildcard port is not assumed to be on the tailnet.
+        desktop = service_links([{"bind": "0.0.0.0", "port": 8080, "containerPort": 80}], dict(hosts, hostNetwork=False))
+        self.assertEqual([item["kind"] for item in desktop], ["local", "lan"])
+
+    def test_links_skip_non_web_ports_and_bad_hosts(self):
+        from guard import service_links
+
+        self.assertEqual(service_links([{"bind": "127.0.0.1", "port": 5433, "containerPort": 5432}], {}), [])
+        self.assertEqual(service_links([{"bind": "0.0.0.0", "port": 2222, "containerPort": 22}], {}), [])
+        bad = service_links(
+            [{"bind": "0.0.0.0", "port": 8096, "containerPort": 8096}],
+            {
+                "lan": "8.8.8.8",
+                "tailscaleIp": "1.2.3.4",
+                "tailscaleDns": "evil.example.com",
+                "serve": {8096: {"kind": "tcp", "port": 8096}},
+                "hostNetwork": True,
+            },
+        )
+        self.assertEqual([item["url"] for item in bad], ["http://127.0.0.1:8096"])
+        self.assertEqual(service_links([{"port": "x"}, None, {"port": 70000}], {}), [])
+        self.assertEqual(service_links(None, None), [])
+
+    def test_snapshot_reports_ports_and_payload_gets_links(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
-            self.assertFalse(continue_extension_installed(home))
-            ext = home / ".vscode" / "extensions" / "continue.continue-1.2.3"
-            ext.mkdir(parents=True)
-            self.assertTrue(continue_extension_installed(home))
-            oss = home / ".vscode-oss" / "extensions" / "Continue.continue-0.9.0"
-            # still true from .vscode
-            self.assertTrue(continue_extension_installed(home))
-
-            def no_bins(name):
-                return None
-
-            self.assertFalse(detect_code_editor(home=home, which=no_bins)["found"])
-
-            def which_code(name):
-                return "/usr/bin/code" if name == "code" else None
-
-            found = detect_code_editor(home=home, which=which_code)
-            self.assertEqual(found["command"], "code")
-            self.assertEqual(found["label"], "Visual Studio Code")
-            argv = continue_install_argv(found)
-            self.assertEqual(argv, ("/usr/bin/code", "--install-extension", CONTINUE_EXTENSION_ID))
-            self.assertNotIn("sudo", argv)
-            self.assertNotIn("apt", argv)
-
-            def which_codium(name):
-                return "/usr/bin/codium" if name == "codium" else None
-
-            codium = detect_code_editor(home=home, which=which_codium)
-            self.assertEqual(codium["command"], "codium")
-            self.assertEqual(
-                continue_install_argv(codium),
-                ("/usr/bin/codium", "--install-extension", CONTINUE_EXTENSION_ID),
-            )
-
-            def which_flatpak(name):
-                return "/usr/bin/flatpak" if name == "flatpak" else None
-
-            def runner(args, timeout=8):
-                self.assertEqual(list(args)[:3], ["/usr/bin/flatpak", "list", "--app"])
-                return subprocess.CompletedProcess(args, 0, "com.visualstudio.code\n", "")
-
-            flatpak = detect_code_editor(home=home, which=which_flatpak, runner=runner)
-            self.assertEqual(flatpak["command"], "flatpak")
-            self.assertEqual(flatpak["appId"], "com.visualstudio.code")
-            self.assertEqual(
-                continue_install_argv(flatpak),
-                ("/usr/bin/flatpak", "run", "com.visualstudio.code", "--install-extension", CONTINUE_EXTENSION_ID),
-            )
-            market = continue_marketplace_argv(which=lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
-            self.assertEqual(market, ("/usr/bin/xdg-open", "vscode:extension/Continue.continue"))
-
-    def test_write_continue_config_backs_up_and_rejects_bad_paths(self):
-        from guard import (
-            CONTINUE_AUTOCOMPLETE_MODEL,
-            CONTINUE_CHAT_MODEL,
-            CONTINUE_EMBED_MODEL,
-            continue_config_yaml,
-            write_continue_config_file,
-        )
-        text = continue_config_yaml("http://127.0.0.1:11434")
-        self.assertIn("provider: ollama", text)
-        self.assertIn(f"model: {CONTINUE_CHAT_MODEL}", text)
-        self.assertIn(f"model: {CONTINUE_AUTOCOMPLETE_MODEL}", text)
-        self.assertIn(f"model: {CONTINUE_EMBED_MODEL}", text)
-        self.assertIn("apiBase: http://127.0.0.1:11434", text)
-        self.assertIn("- chat", text)
-        self.assertIn("- autocomplete", text)
-        self.assertIn("- embed", text)
-        self.assertNotIn("apiBase: http://127.0.0.1:9999", continue_config_yaml("http://127.0.0.1:9999"))
-        self.assertIn("apiBase: http://127.0.0.1:11434", continue_config_yaml("http://127.0.0.1:9999"))
-        with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
-            path, backup = write_continue_config_file(home=home)
-            self.assertIsNone(backup)
-            self.assertEqual(path, home / ".continue" / "config.yaml")
-            self.assertEqual(path.read_text(encoding="utf-8"), text)
-            path.write_text("old: true\n", encoding="utf-8")
-            again, backup = write_continue_config_file(home=home, api_base="http://127.0.0.1:11435")
-            self.assertIsNotNone(backup)
-            self.assertTrue(backup.name.startswith("config.yaml.hog-backup-"))
-            self.assertEqual(backup.read_text(encoding="utf-8"), "old: true\n")
-            self.assertIn("apiBase: http://127.0.0.1:11435", again.read_text(encoding="utf-8"))
-            link = home / ".continue" / "sneaky.yaml"
-            target = home / "elsewhere.yaml"
-            target.write_text("nope\n", encoding="utf-8")
-            # replace config.yaml with a symlink and refuse
-            path.unlink()
-            path.symlink_to(target)
-            with self.assertRaises(OSError):
-                write_continue_config_file(home=home)
-
-    def test_editor_status_and_actions(self):
-        from guard import (
-            CONTINUE_AUTOCOMPLETE_MODEL,
-            CONTINUE_CHAT_MODEL,
-            CONTINUE_EMBED_MODEL,
-            CONTINUE_EXTENSION_ID,
-            Guard,
-        )
-        with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
             guard = Guard(folder, docker="docker")
-            guard._user_home = lambda: home
-            guard._which = lambda name: None
-            guard.docker_running = lambda: False
-            guard.items = lambda: []
-            guard._offline_items = lambda: []
-            guard.container_runtime = lambda name="": ""
-            guard.list_ai_models = lambda: ([], "")
-            guard.ollama_host_port = lambda: 11434
-            guard.openwebui_host_port = lambda: 0
-            guard.tailscale_ipv4 = lambda: ""
-            guard.ai_gpu_fields = lambda: {"ready": False, "name": "", "memoryMb": 0, "notice": ""}
-            guard.ai_disk_fields = lambda: {"warning": "", "freeBytes": 100 * 1024 * 1024 * 1024}
-            fields = guard.editor_status_fields(None, "missing")
-            self.assertFalse(fields["found"])
-            self.assertFalse(fields["continueInstalled"])
-            self.assertFalse(fields["ollamaRunning"])
-            self.assertFalse(fields["modelsKnown"])
-            self.assertEqual(fields["missingModels"], [])
-            self.assertEqual(fields["downloadUrl"], "https://code.visualstudio.com/")
+            info = running_info({"8096/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8096"}]})
+            info["Name"] = "/jellyfin"
+            guard.inspect = lambda name: (info, "")
+            guard.container_runtime = lambda name="": "engine"
+            row = guard.snapshot("jellyfin")
+            self.assertEqual(row["ports"], [{"bind": "127.0.0.1", "port": 8096, "containerPort": 8096}])
+            calls = []
 
-            guard.engine_status = lambda: {"ok": True, "error": "", "items": []}
-            refused = guard.install_continue_extension()
-            self.assertIs(refused.get("ok"), False)
-            self.assertIn("Install Visual Studio Code first", refused["error"])
-
-            guard._which = lambda name: "/usr/bin/code" if name == "code" else None
-            seen = []
-
-            def run_argv(args, timeout=8, env=None):
-                seen.append(list(args))
-                return subprocess.CompletedProcess(args, 0, "installed", "")
-
-            guard.run_argv = run_argv
-            (home / ".vscode" / "extensions").mkdir(parents=True)
-            installed = guard.handle("ai-editor-install")
-            self.assertIn(["/usr/bin/code", "--install-extension", CONTINUE_EXTENSION_ID], seen)
-            self.assertIn("Installed Continue", installed.get("notice") or "")
-
-            connected = guard.handle("ai-editor-connect")
-            self.assertIn("Wrote ~/.continue/config.yaml", connected.get("notice") or "")
-            config = home / ".continue" / "config.yaml"
-            self.assertTrue(config.is_file())
-            self.assertIn(CONTINUE_CHAT_MODEL, config.read_text(encoding="utf-8"))
-            again = guard.handle("ai-editor-connect")
-            self.assertIn("Previous file saved as", again.get("notice") or "")
-            backups = list((home / ".continue").glob("config.yaml.hog-backup-*"))
-            self.assertTrue(backups)
-
-            # fallback opens the marketplace URI with a fixed argv
-            seen.clear()
-
-            def fail_then_open(args, timeout=8, env=None):
-                seen.append(list(args))
-                if args and args[0] == "/usr/bin/code":
-                    return subprocess.CompletedProcess(args, 1, "", "failed")
-                return subprocess.CompletedProcess(args, 0, "", "")
-
-            guard._which = lambda name: "/usr/bin/code" if name == "code" else ("/usr/bin/xdg-open" if name == "xdg-open" else None)
-            guard.run_argv = fail_then_open
-            fallback = guard.install_continue_extension()
-            commands = [item for item in seen if item and item[0] != "docker"]
-            self.assertEqual(commands[0], ["/usr/bin/code", "--install-extension", CONTINUE_EXTENSION_ID])
-            self.assertEqual(commands[1], ["/usr/bin/xdg-open", "vscode:extension/Continue.continue"])
-            self.assertIn("opened the Continue extension", fallback.get("notice") or "")
-
-            # pull missing uses existing pull flow
-            pulled = []
-
-            def fake_pull(name, progress=None):
-                pulled.append(name)
-                return {"ok": True, "error": "", "notice": f"Downloaded {name}.", "ai": {"editor": {}}}
-
-            guard.pull_ai_model = fake_pull
-            guard.ai_status = lambda models=False: {
-                "ai": {
-                    "editor": {
-                        "ollamaRunning": True,
-                        "missingModels": [CONTINUE_EMBED_MODEL, CONTINUE_AUTOCOMPLETE_MODEL, CONTINUE_CHAT_MODEL],
-                    }
+            def hosts(items=None, force=False):
+                calls.append(items)
+                return {
+                    "tailscaleIp": "100.119.132.89",
+                    "tailscaleDns": "hog.tail314642.ts.net",
+                    "serve": {8096: {"kind": "tcp", "port": 8096}},
                 }
-            }
-            pulled_payload = guard.handle("ai-editor-pull")
-            self.assertEqual(pulled, [CONTINUE_EMBED_MODEL, CONTINUE_AUTOCOMPLETE_MODEL, CONTINUE_CHAT_MODEL])
-            self.assertIn("Downloaded", pulled_payload.get("notice") or "")
 
-            guard.ai_status = lambda models=False: {"ai": {"editor": {"ollamaRunning": False, "missingModels": [CONTINUE_CHAT_MODEL]}}}
-            blocked = guard.handle("ai-editor-pull")
-            self.assertEqual(blocked.get("error"), "Start Ollama first.")
-
-
-class CodeChatTest(unittest.TestCase):
-    def _home(self, folder):
-        home = Path(folder) / "home"
-        (home / "proj" / ".git").mkdir(parents=True)
-        (home / "proj" / "sub").mkdir()
-        (home / "plain").mkdir()
-        (home / ".ssh").mkdir()
-        (home / "worktree").mkdir()
-        (home / "worktree" / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
-        (home / "odd:name").mkdir()
-        return home
-
-    def test_code_chat_folder_rules(self):
-        from guard import code_chat_folder
-        with tempfile.TemporaryDirectory() as folder:
-            home = self._home(folder)
-            data = home / "wallet" / "hog-browser"
-            data.mkdir(parents=True)
-            folder_path, error, git = code_chat_folder("~/proj", home=home, data=data)
-            self.assertEqual((folder_path, error, git), ((home / "proj").resolve(), "", "repo"))
-            folder_path, error, git = code_chat_folder(str(home / "plain"), home=home, data=data)
-            self.assertEqual(git, "none")
-            self.assertEqual(error, "")
-            for bad, words in (
-                ("", "Pick a project folder"),
-                ("~", "not the home folder itself"),
-                ("/etc", "inside your home folder"),
-                ("relative/path", "full folder path"),
-                ("~/missing", "does not exist"),
-                ("~/.ssh", "Hidden folders"),
-                ("~/proj/sub", "Pick the repo's top folder"),
-                ("~/worktree", "worktrees and submodules"),
-                ("~/odd:name", "cannot be mounted"),
-                ("~/wallet", "wallet files"),
-                ("~/wallet/hog-browser", "wallet files"),
-                ("~/proj\n", "not allowed"),
-            ):
-                folder_path, error, git = code_chat_folder(bad, home=home, data=data)
-                self.assertIsNone(folder_path, bad)
-                self.assertIn(words, error, bad)
-                self.assertEqual(git, "")
-            link = home / "escape"
-            link.symlink_to("/etc")
-            self.assertIsNone(code_chat_folder("~/escape", home=home, data=data)[0])
-
-    def test_code_chat_run_args_are_locked_down(self):
-        from guard import CODE_CHAT_IMAGE, CODE_CHAT_NAME, code_chat_model_name, code_chat_run_args
-        args = code_chat_run_args(
-            "/home/me/proj", "qwen2.5-coder:14b", 8502, 1000, 1001,
-            identity={"name": "Jax W", "email": "jax@example.com"},
-        )
-        self.assertEqual(args[:4], ["run", "-d", "--name", CODE_CHAT_NAME])
-        self.assertIn("--cap-drop=ALL", args)
-        self.assertFalse(any(item.startswith("--cap-add") for item in args))
-        self.assertNotIn("--privileged", args)
-        self.assertEqual(args[args.index("--user") + 1], "1000:1001")
-        self.assertEqual(args[args.index("--network") + 1], "hog-ai")
-        self.assertEqual(args[args.index("-p") + 1], "127.0.0.1:8502:8501")
-        self.assertEqual(args.count("-p"), 1)
-        self.assertEqual(args.count("-v"), 1)
-        self.assertEqual(args[args.index("-v") + 1], "/home/me/proj:/app")
-        self.assertNotIn("docker.sock", " ".join(args))
-        self.assertIn("OLLAMA_API_BASE=http://hog-ollama:11434", args)
-        self.assertIn("GIT_CONFIG_VALUE_0=Jax W", args)
-        self.assertIn("GIT_CONFIG_VALUE_1=jax@example.com", args)
-        image_at = args.index(CODE_CHAT_IMAGE)
-        tail = args[image_at + 1:]
-        self.assertIn("--browser", tail)
-        self.assertEqual(tail[tail.index("--model") + 1], "ollama_chat/qwen2.5-coder:14b")
-        self.assertIn("--analytics-disable", tail)
-        plain = code_chat_run_args("/home/me/proj", "qwen2.5-coder:14b", 8501, 1000, 1000, identity={"name": "bad\nname"})
-        self.assertFalse(any(item.startswith("GIT_CONFIG") for item in plain))
-        for model, port, folder in (
-            ("nomic-embed-text", 8501, "/home/me/proj"),
-            ("bad model", 8501, "/home/me/proj"),
-            ("qwen2.5-coder:14b", 3000, "/home/me/proj"),
-            ("qwen2.5-coder:14b", 8501, "relative"),
-            ("qwen2.5-coder:14b", 8501, "/home/me/a:b"),
-        ):
-            with self.assertRaises(ValueError):
-                code_chat_run_args(folder, model, port, 1000, 1000)
-        self.assertEqual(code_chat_model_name("Qwen2.5-Coder:14B"), "qwen2.5-coder:14b")
-        self.assertEqual(code_chat_model_name("nomic-embed-text"), "")
-
-    def test_pull_layer_progress(self):
-        from guard import pull_layer_progress
-        layers = {}
-        self.assertEqual(pull_layer_progress(layers, "latest: Pulling from paulgauthier/aider-full"), (None, ""))
-        pull_layer_progress(layers, "aaaaaaaaaaaa: Pulling fs layer")
-        pull_layer_progress(layers, "bbbbbbbbbbbb: Pulling fs layer")
-        percent, status = pull_layer_progress(layers, "aaaaaaaaaaaa: Download complete")
-        self.assertEqual(percent, 25)
-        percent, status = pull_layer_progress(layers, "aaaaaaaaaaaa: Pull complete")
-        self.assertEqual(percent, 50)
-        self.assertEqual(status, "Downloading layers (1/2)")
-        percent, _status = pull_layer_progress(layers, "bbbbbbbbbbbb: Already exists")
-        self.assertEqual(percent, 99)
-
-    def _guard(self, folder, home):
-        guard = Guard(str(Path(folder) / "data"), docker="docker")
-        guard._user_home = lambda: home
-        guard._which = lambda name: None
-        guard.docker_running = lambda: True
-        guard.items = lambda: [{"name": "hog-ollama", "state": "running", "runtime": "engine", "reason": "", "image": "ollama/ollama:latest"}]
-        guard.list_ai_models = lambda: ([{"name": "qwen2.5-coder:14b"}, {"name": "nomic-embed-text:latest"}], "")
-        guard.container_runtime = lambda name="": "engine"
-        guard.runtime_available = lambda side: True
-        guard.runtime_sock = lambda side: None
-        guard.ensure_ai_network = lambda sock=None: ""
-        guard.port_open = lambda port: False
-        guard._code_uid_gid = lambda: (1000, 1000)
-        guard.ai_status = lambda models=False: {"ok": True, "error": "", "items": []}
-        guard._mark_docker = lambda payload: payload
-        return guard
-
-    def test_start_and_stop_code_chat(self):
-        with tempfile.TemporaryDirectory() as folder:
-            home = self._home(folder)
-            guard = self._guard(folder, home)
-            seen = []
-            pulls = []
-            state = {"info": None}
-            made = {
-                "Name": "/hog-aider",
-                "HostConfig": {},
-                "Config": {"Image": "paulgauthier/aider-full:latest", "Labels": {"hog.role": "code-chat"}},
-                "Mounts": [{"Source": str((home / "proj").resolve()), "Destination": "/app"}],
-            }
-
-            def run(args, timeout=8):
-                seen.append(list(args))
-                if args[:1] == ["run"]:
-                    state["info"] = made
-                if args[:2] == ["rm", "-f"]:
-                    state["info"] = None
-                return subprocess.CompletedProcess(args, 0, "", "")
-
-            guard.run = run
-            guard.inspect_on = lambda name, sock=None: (state["info"], "" if state["info"] else "No such container")
-            guard.image_exists = lambda image, sock=None: bool(pulls)
-
-            def fake_pull(image, sock=None, progress=None, timeout=0):
-                pulls.append(image)
-                return ""
-
-            guard._stream_pull = fake_pull
-            request = json.dumps({"model": "qwen2.5-coder:14b", "folder": "~/proj"})
-            started = guard.handle("ai-code-start", request)
-            self.assertNotEqual(started.get("ok"), False, started.get("error"))
-            self.assertEqual(pulls, ["paulgauthier/aider-full:latest"])
-            runs = [item for item in seen if item[:1] == ["run"]]
-            self.assertEqual(len(runs), 1)
-            self.assertIn("127.0.0.1:8501:8501", runs[0])
-            self.assertIn("Code chat is starting", started.get("notice") or "")
-            saved = guard.read_code_state()
-            self.assertEqual(saved["folder"], str((home / "proj").resolve()))
-            self.assertEqual(saved["model"], "qwen2.5-coder:14b")
-            self.assertEqual(saved["runningModel"], "qwen2.5-coder:14b")
-            self.assertEqual(saved["port"], 8501)
-
-            # restart replaces the Hog-made container and does not pull again
-            seen.clear()
-            again = guard.handle("ai-code-start", request)
-            self.assertNotEqual(again.get("ok"), False, again.get("error"))
-            self.assertEqual(len(pulls), 1)
-            self.assertEqual(seen[0], ["rm", "-f", "hog-aider"])
-
-            stopped = guard.handle("ai-code-stop")
-            self.assertIn("Stopped Code chat", stopped.get("notice") or "")
-            self.assertEqual(guard.read_code_state()["runningModel"], "")
-
-            # a foreign container with the same name is left alone
-            state["info"] = {"Name": "/hog-aider", "HostConfig": {}, "Config": {"Image": "other", "Labels": {}}}
-            seen.clear()
-            refused = guard.handle("ai-code-start", request)
-            self.assertIs(refused.get("ok"), False)
-            self.assertIn("not made by Hog", refused["error"])
-            self.assertFalse(any(item[:1] in (["rm"], ["run"]) for item in seen))
-            refused = guard.handle("ai-code-stop")
-            self.assertIs(refused.get("ok"), False)
-
-    def test_start_code_chat_refusals(self):
-        with tempfile.TemporaryDirectory() as folder:
-            home = self._home(folder)
-            guard = self._guard(folder, home)
-            guard.run = lambda args, timeout=8: self.fail(f"docker should not run: {args}")
-            guard.image_exists = lambda image, sock=None: self.fail("no image check expected")
-            guard._stream_pull = lambda *a, **k: self.fail("no pull expected")
-            bad = guard.handle("ai-code-start", "not json")
-            self.assertIs(bad.get("ok"), False)
-            embed = guard.handle("ai-code-start", json.dumps({"model": "nomic-embed-text", "folder": "~/proj"}))
-            self.assertIn("chat model", embed["error"])
-            missing = guard.handle("ai-code-start", json.dumps({"model": "llama3.1:8b", "folder": "~/proj"}))
-            self.assertIn("not installed", missing["error"])
-            outside = guard.handle("ai-code-start", json.dumps({"model": "qwen2.5-coder:14b", "folder": "/etc"}))
-            self.assertIn("inside your home folder", outside["error"])
-            guard.items = lambda: []
-            off = guard.handle("ai-code-start", json.dumps({"model": "qwen2.5-coder:14b", "folder": "~/proj"}))
-            self.assertIn("Start Ollama first", off["error"])
-
-    def test_code_folder_and_status_fields(self):
-        with tempfile.TemporaryDirectory() as folder:
-            home = self._home(folder)
-            guard = self._guard(folder, home)
-            ok = guard.handle("ai-code-folder", "~/plain")
-            self.assertNotEqual(ok.get("ok"), False)
-            self.assertEqual(guard.read_code_state()["folder"], str((home / "plain").resolve()))
-            bad = guard.handle("ai-code-folder", "~/.ssh")
-            self.assertIs(bad.get("ok"), False)
-            self.assertEqual(guard.read_code_state()["folder"], str((home / "plain").resolve()))
-            guard.image_exists = lambda image, sock=None: False
-            fields = guard.code_chat_fields(
-                [{"name": "hog-aider", "state": "running", "reason": ""}],
-                "running",
-                [{"name": "qwen2.5-coder:14b"}, {"name": "nomic-embed-text:latest"}, {"name": "qwen2.5-coder:1.5b"}],
-                check_image=True,
+            guard.link_hosts = hosts
+            guard.jellyfin_gpu_fields = lambda: {}
+            guard.runtime_fields = lambda: {}
+            stopped = {"name": "old", "state": "exited", "ports": [{"bind": "127.0.0.1", "port": 9000, "containerPort": 80}]}
+            payload = guard._mark_docker({"ok": True, "docker": True, "items": [row, stopped]})
+            self.assertEqual(
+                [item["url"] for item in payload["items"][0]["links"]],
+                ["http://127.0.0.1:8096", "http://hog.tail314642.ts.net:8096", "http://100.119.132.89:8096"],
             )
-            self.assertEqual(fields["models"], ["qwen2.5-coder:14b", "qwen2.5-coder:1.5b"])
-            self.assertEqual(fields["model"], "qwen2.5-coder:14b")
-            self.assertEqual(fields["git"], "none")
-            self.assertIs(fields["imagePresent"], False)
-            self.assertTrue(fields["running"])
-            self.assertEqual(fields["localUrl"], "")
-            guard.write_code_state(port=8503)
-            fields = guard.code_chat_fields([{"name": "hog-aider", "state": "running"}], "running")
-            self.assertEqual(fields["localUrl"], "http://127.0.0.1:8503")
-            self.assertIsNone(fields["imagePresent"])
-            self.assertFalse(fields["modelsKnown"])
-            guard.write_code_state(port=9999)
-            self.assertEqual(guard.read_code_state()["port"], 0)
+            self.assertEqual(payload["items"][1]["links"], [])
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn("ai", payload)
 
-    def test_stream_pull_reports_layer_progress(self):
+    def test_link_hosts_skips_tailscale_when_not_running_and_caches(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = self._home(folder)
-            guard = self._guard(folder, home)
-            guard.ai_status_fields = lambda models=False, items=None: {"ai": {}}
-            script = Path(folder) / "fake-docker"
-            script.write_text(
-                "#!/bin/sh\n"
-                "[ \"$1\" = pull ] || exit 3\n"
-                "echo 'latest: Pulling from paulgauthier/aider-full'\n"
-                "echo 'aaaaaaaaaaaa: Pulling fs layer'\n"
-                "echo 'aaaaaaaaaaaa: Pull complete'\n"
-                "echo 'Status: Downloaded newer image'\n",
-                encoding="utf-8",
-            )
-            script.chmod(0o755)
-            guard.docker = str(script)
-            events = []
-            self.assertEqual(guard._stream_pull("paulgauthier/aider-full:latest", progress=events.append), "")
-            pulls = [item["codePull"] for item in events]
-            self.assertEqual(pulls[0]["status"], "Starting download…")
-            self.assertEqual(pulls[-1], {"name": "paulgauthier/aider-full:latest", "status": "Downloaded", "percent": 100})
-            script.write_text("#!/bin/sh\necho 'Error response from daemon: denied'\nexit 1\n", encoding="utf-8")
-            self.assertIn("denied", guard._stream_pull("paulgauthier/aider-full:latest"))
-            self.assertEqual(guard._stream_pull("bad image name"), "That image name is not allowed.")
+            guard = Guard(folder, docker="docker")
+            guard.lan_address = lambda: "192.168.1.5"
+            asked = []
+
+            def status():
+                asked.append("status")
+                return {"Self": {"DNSName": "hog.tail314642.ts.net.", "TailscaleIPs": ["100.119.132.89", "fd7a::1"]}}, ""
+
+            def container_run(name, args, timeout=8):
+                asked.append(args[-2])
+                return subprocess.CompletedProcess(args, 0, json.dumps(SERVE_STATUS), "")
+
+            guard.tailscale_status_payload = status
+            guard.container_run = container_run
+            guard.container_runtime = lambda name="": "engine"
+            off = guard.link_hosts([{"name": "jellyfin", "state": "running"}])
+            self.assertEqual(off["lan"], "192.168.1.5")
+            self.assertEqual(off["tailscaleIp"], "")
+            self.assertEqual(asked, [])
+            on = guard.link_hosts([{"name": "tailscale", "state": "running"}], force=True)
+            self.assertEqual(on["tailscaleIp"], "100.119.132.89")
+            self.assertEqual(on["tailscaleDns"], "hog.tail314642.ts.net")
+            self.assertEqual(on["serve"][8096], {"kind": "tcp", "port": 8096})
+            self.assertTrue(on["hostNetwork"])
+            count = len(asked)
+            again = guard.link_hosts([{"name": "tailscale", "state": "running"}])
+            self.assertEqual(again["tailscaleIp"], "100.119.132.89")
+            self.assertEqual(len(asked), count)
+
+
+class LegacyAiSettingsTest(unittest.TestCase):
+    def test_old_ai_state_files_and_actions_are_ignored(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "ai.json").write_text(json.dumps({"ollamaPort": 11434, "openWebuiPort": 3000}), encoding="utf-8")
+            Path(folder, "ai-code.json").write_text(json.dumps({"folder": "~/proj", "model": "qwen2.5-coder:14b"}), encoding="utf-8")
+            guard = Guard(folder, docker="docker")
+            guard.docker_running = lambda: True
+            guard.items = lambda: [{"name": "hog-ollama", "state": "running", "image": "ollama/ollama:latest", "reason": "", "runtime": "engine", "ports": []}]
+            guard._offline_items = lambda: []
+            guard.media_view = lambda: ("", [])
+            guard.wireguard_module_loaded = lambda: True
+            guard.jellyfin_gpu_fields = lambda: {}
+            guard.runtime_fields = lambda: {}
+            listed = guard.handle("list")
+            self.assertTrue(listed["ok"])
+            self.assertNotIn("ai", listed)
+            self.assertEqual(listed["items"][0]["links"], [])
+            for action in ("ai-models", "ai-pull", "ai-code-start", "ai-editor-connect"):
+                payload = guard.handle(action, "qwen2.5-coder:14b")
+                self.assertFalse(payload.get("ok"), action)
+                self.assertNotIn("ai", payload)
+            self.assertFalse(hasattr(guard, "start_code_chat"))
+            self.assertFalse(hasattr(guard_module, "OLLAMA_NAME"))
+
+
+if __name__ == "__main__":
+    unittest.main()

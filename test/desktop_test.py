@@ -7,9 +7,7 @@ from guard import (
     PRESETS,
     Guard,
     allowed_browser_open_url,
-    allowed_ollama_library_url,
     allowed_tailscale_open_url,
-    allowed_vscode_download_url,
     launch_args,
     valid_desktop_id,
 )
@@ -165,27 +163,6 @@ class BrowserOpenUrlTest(unittest.TestCase):
         self.assertEqual(allowed_browser_open_url("https://metadata.google.internal/"), "")
         self.assertEqual(allowed_browser_open_url("not a url"), "")
         self.assertEqual(allowed_browser_open_url(""), "")
-
-    def test_allowed_ollama_library_url_is_strict(self):
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library"), "https://ollama.com/library")
-        self.assertEqual(allowed_ollama_library_url("https://www.ollama.com/library/phi4"), "https://www.ollama.com/library/phi4")
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/library?x=1"), "")
-        self.assertEqual(allowed_ollama_library_url("https://ollama.com/"), "")
-        self.assertEqual(allowed_ollama_library_url("http://ollama.com/library"), "")
-        self.assertEqual(allowed_ollama_library_url("https://evil.example/library"), "")
-        hog = (Path(__file__).resolve().parents[1] / "hog").read_text(encoding="utf-8")
-        app = (Path(__file__).resolve().parents[1] / "public" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("allowed_ollama_library_url", hog)
-        self.assertIn("function openOllamaLibrary", app)
-
-    def test_allowed_vscode_download_url_is_strict(self):
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/"), "https://code.visualstudio.com/")
-        self.assertEqual(allowed_vscode_download_url("https://code.visualstudio.com/download"), "")
-        self.assertEqual(allowed_vscode_download_url("http://code.visualstudio.com/"), "")
-        hog = (Path(__file__).resolve().parents[1] / "hog").read_text(encoding="utf-8")
-        app = (Path(__file__).resolve().parents[1] / "public" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("allowed_vscode_download_url", hog)
-        self.assertIn("function openVscodeDownload", app)
 
     def test_desktop_file_registers_as_browser(self):
         script = (Path(__file__).resolve().parents[1] / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
@@ -573,104 +550,63 @@ class SelfUpdateUiTest(unittest.TestCase):
 
 
 
-class CodeChatUiTest(unittest.TestCase):
-    def test_code_chat_card_and_bridge(self):
+class SettingsUiTest(unittest.TestCase):
+    def test_settings_nav_has_no_ai_page(self):
         root = Path(__file__).resolve().parents[1]
         html = (root / "public" / "index.html").read_text(encoding="utf-8")
         app = (root / "public" / "app.js").read_text(encoding="utf-8")
-        hog = (root / "hog").read_text(encoding="utf-8")
-        readme = (root / "README.md").read_text(encoding="utf-8")
-        ai = html.split('id="settings-ai"', 1)[1]
-        card = ai.split('aria-label="Code chat"', 1)[1].split("</section>", 1)[0]
-        for element in (
-            'id="ai-code-pills"', 'id="ai-code-model"', 'id="ai-code-folder"', 'id="ai-code-browse"',
-            'id="ai-code-start"', 'id="ai-code-stop"', 'id="ai-code-open"', 'id="ai-code-git-note"',
-            'id="ai-code-bar"', 'id="ai-code-advanced"',
-        ):
-            self.assertIn(element, card)
-        self.assertIn("paulgauthier/aider-full", card)
-        self.assertIn("127.0.0.1 only", card)
-        self.assertLess(ai.find('aria-label="Code editor"'), ai.find('aria-label="Code chat"'))
-        self.assertLess(ai.find('aria-label="Code chat"'), ai.find('aria-label="Model library"'))
-        for name in ("function paintAiCode", "function codeChatUrl", "function codeChatStartCommand", "function codeChatModelOptions"):
-            self.assertIn(name, app)
-        for command in ("containers:ai-code-start", "containers:ai-code-stop", "containers:ai-code-pick", "containers:ai-code-folder"):
-            self.assertIn(command, app)
-        for action in ('"ai-code-pick"', '"ai-code-folder"', '"ai-code-start"', '"ai-code-stop"'):
-            self.assertIn(action, hog)
-        self.assertIn("def pick_code_folder", hog)
-        self.assertIn('if action in {"ai-pull", "ai-editor-pull", "ai-code-start"}:', hog)
-        picker = hog.split("def pick_code_folder", 1)[1].split("\n    def ", 1)[0]
-        self.assertIn("Gtk.FileChooserAction.SELECT_FOLDER", picker)
-        self.assertIn("containers:ai-code-folder:", picker)
-        self.assertIn("Code chat", readme)
-        self.assertIn("paulgauthier/aider-full", readme)
-
-
-class AiToolboxUiTest(unittest.TestCase):
-    def test_ui_exposes_ai_toolbox_and_settings_nav(self):
-        root = Path(__file__).resolve().parents[1]
-        html = (root / "public" / "index.html").read_text(encoding="utf-8")
-        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        css = (root / "public" / "app.css").read_text(encoding="utf-8")
         hog = (root / "hog").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
         self.assertIn('id="settings-nav"', html)
-        self.assertIn('data-settings="general"', html)
-        self.assertIn('data-settings="containers"', html)
-        self.assertIn('data-settings="networks"', html)
-        self.assertIn('data-settings="ai"', html)
-        self.assertIn('data-settings="tailscale"', html)
-        self.assertIn('id="settings-general"', html)
+        for page in ("general", "files", "containers", "networks", "tailscale"):
+            self.assertIn(f'data-settings="{page}"', html)
+            self.assertIn(f'id="settings-{page}"', html)
+        self.assertNotIn('data-settings="ai"', html)
+        self.assertNotIn('id="settings-ai"', html)
+        self.assertIn('const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale"];', app)
+        # Old links to the AI page land on Containers instead of a blank pane.
+        self.assertIn('return SETTINGS_SECTIONS.includes(page) ? page : "containers";', app)
         self.assertLess(html.find('id="hog-update-card"'), html.find('id="settings-files"'))
-        self.assertGreater(html.find('id="settings-files"'), html.find('id="hog-update-card"'))
         self.assertNotIn('id="hog-update-card"', html.split('id="settings-files"', 1)[1].split('id="settings-containers"', 1)[0])
-        ai = html.split('id="settings-ai"', 1)[1].split('id="settings-tailscale"', 1)[0]
-        self.assertIn('id="ai-run-ollama"', ai)
-        self.assertIn('id="ai-run-webui"', ai)
-        self.assertIn('id="ai-pull-form"', ai)
-        self.assertIn('id="ai-catalog"', ai)
-        self.assertIn('id="ai-library-link"', ai)
-        self.assertIn('href="https://ollama.com/library"', ai)
-        self.assertIn('id="ai-editor-install"', ai)
-        self.assertIn('id="ai-editor-connect"', ai)
-        self.assertIn('id="ai-editor-pull"', ai)
-        self.assertIn('id="ai-editor-pills"', ai)
-        self.assertIn('id="ai-editor-advanced"', ai)
-        self.assertIn('href="https://code.visualstudio.com/"', ai)
-        self.assertIn('id="ai-pull-bar"', ai)
-        self.assertIn("The first account you create becomes the admin", ai)
-        self.assertIn("downloadable models, not the Ollama app itself", ai)
-        self.assertIn("function paintAi", app)
-        self.assertIn("function paintAiCatalog", app)
-        self.assertIn("function mergeManagedContainers", app)
-        self.assertIn("function openOllamaLibrary", app)
-        self.assertIn("function openVscodeDownload", app)
-        self.assertIn("function paintAiEditor", app)
+        for text in (html, app, css, hog):
+            for word in ("ollama", "open-webui", "aider", "ai-code", "ai-editor", "ai-pull", "continue.continue", "visualstudio"):
+                self.assertNotIn(word, text.lower(), word)
+        self.assertNotIn("hog-ai", app)
+        self.assertNotIn("hog-ai", hog)
         self.assertIn("function showToast", app)
         self.assertIn("restoreAccordions", app)
-        self.assertIn("containers:ai-models", app)
-        self.assertIn("containers:ai-pull", app)
-        self.assertIn("containers:ai-delete", app)
-        self.assertIn("containers:ai-editor-install", app)
-        self.assertIn("containers:ai-editor-connect", app)
-        self.assertIn("containers:ai-editor-pull", app)
+        self.assertIn("function pruneAccordions", app)
+        self.assertIn('id.startsWith("ai-")', app)
         self.assertIn("kebab", app)
-        self.assertIn("ai-models", hog)
-        self.assertIn("ai-pull", hog)
-        self.assertIn("ai-editor-install", hog)
-        self.assertIn("allowed_vscode_download_url", hog)
         self.assertIn("progress=emit", hog)
-        self.assertIn("Local AI", readme)
-        self.assertIn("qwen2.5:14b", readme)
-        self.assertIn("Larger (partly CPU, slow)", readme)
-        self.assertIn("Continue", readme)
-        self.assertIn("qwen2.5-coder:14b", readme)
-        html_images = html.split('id="container-images"', 1)[1].split("id=\"container-runtime-card\"", 1)[0]
-        self.assertLess(html_images.find('data-launch="hog-ollama"'), html_images.find('data-launch="ubuntu"'))
-        self.assertLess(html_images.find('data-launch="hog-open-webui"'), html_images.find('data-launch="ubuntu"'))
         self.assertIn('id="container-images" open', html)
         self.assertIn('id="hog-toasts"', html)
         self.assertIn('id="image-pull-bar"', html)
+        images = html.split('id="container-images"', 1)[1].split('id="container-runtime-card"', 1)[0]
+        self.assertIn('data-launch="jellyfin"', images)
+        self.assertIn('data-launch="tailscale"', images)
+        toolbox = html.split('class="toolbox"', 1)[1].split("</div>", 2)[0]
+        self.assertNotIn("AI", toolbox)
+        self.assertIn("## Container links", readme)
+        self.assertNotIn("## Local AI box", readme)
+
+    def test_container_links_are_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        css = (root / "public" / "app.css").read_text(encoding="utf-8")
+        tailscale = html.split('id="settings-tailscale"', 1)[1]
+        self.assertIn('id="jellyfin-links" class="service-links" hidden', tailscale)
+        for name in ("function serviceLinkUrl", "function serviceLinksFor", "function renderServiceLinks", "function paintJellyfinLinks", "function openServiceLink", "function copyServiceLink"):
+            self.assertIn(name, app)
+        self.assertIn("paintJellyfinLinks(payload.items)", app)
+        self.assertIn("renderServiceLinks(links, item.name)", app)
+        opener = app.split("function openServiceLink", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("createTab()", opener)
+        self.assertIn("openUrl(url)", opener)
+        for selector in (".service-links", ".service-link-row", ".service-link ", ".service-link-copy", ".pill.is-lan"):
+            self.assertIn(selector, css)
 
 
 if __name__ == "__main__":
