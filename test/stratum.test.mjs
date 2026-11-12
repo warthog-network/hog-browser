@@ -4,6 +4,8 @@ import { connect } from "node:net";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
+  appendOutcome,
+  blockHash,
   createStratumBridge,
   isWarthogAddress,
   jobFromTemplate,
@@ -187,12 +189,13 @@ test("stratum rejects bad addresses, unauthorized submits, and node errors", asy
     c.send({ id: 3, method: "mining.submit", params: [notify.params[0], "0000000000ff", notify.params[5], "00000001"] });
     const res = await c.next((m) => m.id === 3);
     assert.deepEqual(res.error.slice(0, 2), [40, "Cannot parse hexadecimal input"]);
-    appendReply = { ok: false, code: "timeout" };
+    appendReply = { ok: false, code: "no-page" };
     c.send({ id: 4, method: "mining.submit", params: [notify.params[0], "0000000000fe", notify.params[5], "00000002"] });
-    assert.match((await c.next((m) => m.id === 4)).error[1], /timeout/);
+    assert.match((await c.next((m) => m.id === 4)).error[1], /no-page/);
     c.send({ id: 5, method: "mining.submit", params: [notify.params[0], "zz", notify.params[5], "00000002"] });
     assert.equal((await c.next((m) => m.id === 5)).error[0], 20);
     assert.equal(bridge.status().rejected, 2);
+    assert.equal(bridge.status().pending, 0);
     c.socket.destroy();
   } finally {
     await bridge.stop();
@@ -211,6 +214,122 @@ test("stratum waits for a synced node and listens on loopback only", async () =>
     await c.next((m) => m.id === 1);
     await assert.rejects(c.next((m) => m.method === "mining.notify", 300));
     assert.match(bridge.status().lastError, /syncing/);
+  } finally {
+    c.socket.destroy();
+    await bridge.stop();
+  }
+});
+
+test("append answers: accepted, stale, rejected, or unknown until the chain says", () => {
+  assert.equal(appendOutcome({ ok: true, result: { code: 0, error: "No error" } }).kind, "won");
+  assert.deepEqual(appendOutcome({ ok: true, result: { code: 76, error: "Submitted deprecated block" } }), { kind: "rejected", message: "Submitted deprecated block", stale: true });
+  assert.equal(appendOutcome({ ok: true, result: { code: 300, error: "bad" } }).stale, false);
+  for (const code of ["timeout", "page-closed", "node-error"]) assert.equal(appendOutcome({ ok: false, code }).kind, "unknown");
+  assert.equal(appendOutcome({ ok: false, code: "no-page" }).kind, "rejected");
+  // Some other request's answer (it carries data) proves nothing about the block.
+  assert.equal(appendOutcome({ ok: true, result: { code: 0, data: { chainHead: {} } } }).kind, "unknown");
+  // Block hash is sha256d of the header, as on the explorer.
+  const header = TEMPLATE.header;
+  assert.equal(blockHash(header), sha256(sha256(Buffer.from(header, "hex"))).toString("hex"));
+});
+
+/** A stratum session up to the first job; returns the client, job and a submit helper. */
+async function session(port) {
+  const c = client(port);
+  await c.ready;
+  c.send({ id: 1, method: "mining.subscribe", params: [] });
+  const sub = await c.next((m) => m.id === 1);
+  c.send({ id: 2, method: "mining.authorize", params: [`${ADDRESS}.rig1`, ""] });
+  const notify = await c.next((m) => m.method === "mining.notify");
+  const job = jobFromTemplate(TEMPLATE);
+  const prefix = Buffer.from(sub.result[1], "hex");
+  return {
+    c,
+    submit(id, en2, nonce) {
+      c.send({ id, method: "mining.submit", params: [notify.params[0], en2, notify.params[5], nonce] });
+      const block = solvedBlock(job, prefix, Buffer.from(en2, "hex"), Buffer.from(notify.params[5], "hex"), Buffer.from(nonce, "hex"));
+      return blockHash(block.header);
+    },
+  };
+}
+
+test("a block the node tab never answers for is pending, then counted from the chain", async () => {
+  const onChain = new Map(); // height -> hash the node's chain has there
+  const asked = [];
+  const call = async (method, path, _body, _net, options = {}) => {
+    if (method === "GET" && path.startsWith("/chain/mine/")) return { ok: true, result: { code: 0, data: TEMPLATE } };
+    if (method === "GET") {
+      asked.push({ path, timeoutMs: options.timeoutMs });
+      const height = Number(path.split("/")[3]);
+      return onChain.has(height) ? { ok: true, result: { code: 0, data: onChain.get(height) } } : { ok: true, result: { code: 56, error: "Not found" } };
+    }
+    // The append reaches the node but its answer never comes back.
+    asked.push({ path, timeoutMs: options.timeoutMs });
+    return { ok: false, code: "timeout" };
+  };
+  const bridge = createStratumBridge({ call, pollMs: 50, reconcileMs: 30, appendTimeoutMs: 1234 });
+  const port = await bridge.start(0);
+  const { c, submit } = await session(port);
+  try {
+    const ours = submit(3, "000000000001", "00000001");
+    const lost = submit(4, "000000000002", "00000002");
+    await new Promise((r) => setTimeout(r, 100));
+    let state = bridge.status();
+    assert.equal(state.pending, 2, "a silent node tab is not a rejection");
+    assert.equal(state.rejected, 0);
+    assert.equal(state.blocks, 0);
+    assert.equal(state.pendingBlocks[0].height, TEMPLATE.height);
+    assert.equal(asked.find((a) => a.path === "/chain/append").timeoutMs, 1234);
+    await assert.rejects(c.next((m) => m.id === 3, 100), "BzMiner hears nothing until the chain settles it");
+    // The chain now has our first block at that height, so the second one is stale.
+    onChain.set(TEMPLATE.height, ours);
+    assert.equal((await c.next((m) => m.id === 3)).result, true);
+    assert.match((await c.next((m) => m.id === 4)).error[1], /Another block took that height/);
+    assert.notEqual(ours, lost);
+    state = bridge.status();
+    assert.equal(state.blocks, 1);
+    assert.equal(state.rejected, 1);
+    assert.equal(state.stale, 1);
+    assert.equal(state.pending, 0);
+    assert.equal(state.workers[0].blocks, 1);
+    assert.equal(state.workers[0].pending, 0);
+    assert.match(state.lastResult, /stale|confirmed on chain/);
+    assert.ok(asked.some((a) => a.path === `/chain/block/${TEMPLATE.height}/hash`));
+  } finally {
+    c.socket.destroy();
+    await bridge.stop();
+  }
+});
+
+test("a late append answer settles a pending block; unsettled ones give up in time", async () => {
+  const lateCallbacks = [];
+  const call = async (method, path, _body, _net, options = {}) => {
+    if (method === "GET" && path.startsWith("/chain/mine/")) return { ok: true, result: { code: 0, data: TEMPLATE } };
+    if (method === "GET") return { ok: false, code: "timeout" };
+    lateCallbacks.push(options.onLate);
+    return { ok: false, code: "timeout" };
+  };
+  const bridge = createStratumBridge({ call, pollMs: 50, reconcileMs: 30, reconcileGiveUpMs: 400, minerReplyMs: 150 });
+  const port = await bridge.start(0);
+  const { c, submit } = await session(port);
+  try {
+    submit(3, "000000000001", "00000001");
+    submit(4, "000000000002", "00000002");
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(bridge.status().pending, 2);
+    lateCallbacks[0]({ type: "rpc-result", ok: true, result: { code: 0, error: "No error" } });
+    assert.equal((await c.next((m) => m.id === 3)).result, true);
+    assert.equal(bridge.status().blocks, 1);
+    // The other never gets an answer: BzMiner hears "still checking", then Hog gives up.
+    assert.match((await c.next((m) => m.id === 4, 1000)).error[1], /still checking/);
+    await new Promise((r) => setTimeout(r, 500));
+    const state = bridge.status();
+    assert.equal(state.pending, 0);
+    assert.equal(state.rejected, 1);
+    assert.equal(state.stale, 0);
+    // A late answer after it was settled changes nothing.
+    lateCallbacks[1]({ ok: true, result: { code: 0 } });
+    assert.equal(bridge.status().blocks, 1);
   } finally {
     c.socket.destroy();
     await bridge.stop();

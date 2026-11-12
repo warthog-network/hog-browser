@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
 import test from "node:test";
+import vm from "node:vm";
 import { WebSocket } from "ws";
 import {
   MINING_WS_PATH,
@@ -246,4 +247,106 @@ test("node page HTML carries the relay script, other sites do not", async () => 
   assert.match(nodeHtml, /__hogMiningRelay/);
   const other = rewriteHtml("<html><head></head><body></body></html>", "https://example.com/");
   assert.doesNotMatch(other, /__hogMiningRelay/);
+});
+
+test("a relay call that times out still hands a late answer to onLate", async () => {
+  const h = await harness();
+  let answer;
+  const page = await connectPage(h, {
+    handler() {
+      return new Promise((resolve) => { answer = resolve; });
+    },
+  });
+  try {
+    const late = [];
+    const reply = await h.relay.call("POST", "/chain/append", "{}", "", { timeoutMs: 50, onLate: (msg) => late.push(msg) });
+    assert.deepEqual(reply, { ok: false, code: "timeout" });
+    answer({ ok: true, result: { code: 0, error: "No error" } });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(late.length, 1);
+    assert.deepEqual(late[0].result, { code: 0, error: "No error" });
+  } finally {
+    page.close();
+    await h.close();
+  }
+});
+
+/**
+ * The Emscripten glue's request bookkeeping (wart-node.js VIRTUALSTATE) over a
+ * node whose async answers carry the id of whatever request was dispatched
+ * last, or a stale stack value once other calls reuse that stack slot, as the
+ * WASM router's stack-held Response does (router.hpp match_get / match_post).
+ */
+function brokenWasmNode() {
+  const VS = {
+    nextId: 1,
+    getId() { return VS.nextId++; },
+    getPromise(id) { return new Promise((resolve, reject) => { VS[id] = { resolve, reject }; }); },
+    resolvePromise(id, json) { if (VS[id]) { VS[id].resolve(json); delete VS[id]; } },
+  };
+  let stackSlot = 0;
+  const mod = { VIRTUALSTATE: VS, requests: 0 };
+  function dispatch(id, answer, clobber) {
+    stackSlot = id;
+    mod.requests += 1;
+    if (clobber) queueMicrotask(() => { stackSlot = 70075200; });
+    setTimeout(() => VS.resolvePromise(stackSlot, answer), 10);
+  }
+  mod.virtual_get = function (url) { const id = VS.getId(); dispatch(id, { code: 0, data: url }, url.startsWith("/market/")); return VS.getPromise(id); };
+  // Like the real glue, virtual_post calls VIRTUALSTATE.postId, which it never defines.
+  mod.virtual_post = function (url, body) { const id = VS.postId(); dispatch(id, { code: 0, data: `${url} ${body}` }); return VS.getPromise(id); };
+  return mod;
+}
+
+function runPageScript() {
+  const sockets = [];
+  class FakeSocket {
+    constructor() { sockets.push(this); this.sent = []; }
+    send(text) { this.sent.push(JSON.parse(text)); }
+    close() {}
+  }
+  const sandbox = {
+    WebSocket: FakeSocket,
+    location: { protocol: "http:", host: "localhost:43100" },
+    performance: { getEntriesByType: () => [{ name: "http://localhost:43100/node/defi/wart-node.js" }] },
+    setTimeout, clearTimeout, clearInterval,
+    // The page's status heartbeat must not keep the test process alive.
+    setInterval: (fn, ms) => setInterval(fn, ms).unref(),
+  };
+  sandbox.window = sandbox;
+  vm.runInNewContext(pageRelayScript(TOKEN), sandbox);
+  return { sandbox, sockets };
+}
+
+const settleAll = (promises, ms = 300) => Promise.all(promises.map((p) => Promise.race([p, new Promise((r) => setTimeout(() => r("never answered"), ms))])));
+
+test("node page queues node requests so answers reach the right caller", async () => {
+  // Without the queue the broken node loses all but the last of three answers.
+  const raw = brokenWasmNode();
+  raw.VIRTUALSTATE.postId = raw.VIRTUALSTATE.getId;
+  const unqueued = await settleAll([raw.virtual_get("/chain/head"), raw.virtual_get("/chain/mine/x"), raw.virtual_post("/chain/append", "b")]);
+  assert.deepEqual(unqueued.slice(0, 2), ["never answered", "never answered"]);
+
+  const { sandbox, sockets } = runPageScript();
+  const node = brokenWasmNode();
+  sandbox.wartNode = node; // the page publishes its node; Hog queues it right away
+  assert.equal(typeof node.__hogRpc, "function");
+  const answers = await settleAll([
+    node.virtual_get("/chain/head"),
+    node.virtual_get("/market/x"),
+    node.virtual_post("/chain/append", "block"),
+  ], 1000);
+  assert.deepEqual(answers.map((a) => a.data), ["/chain/head", "/market/x", "/chain/append block"]);
+  assert.equal(node.__hogRpcStats.rerouted, 1, "the answer that came back under a stack value still reached its caller");
+
+  // Relay requests from Hog go through the same queue and come back to Hog.
+  const ws = sockets[0];
+  ws.onopen();
+  const page = node.virtual_get("/chain/head");
+  ws.onmessage({ data: JSON.stringify({ type: "rpc", id: 7, method: "POST", path: "/chain/append", body: "blk", network: "defi" }) });
+  ws.onmessage({ data: JSON.stringify({ type: "rpc", id: 8, method: "GET", path: "/chain/mine/abc", network: "defi" }) });
+  assert.equal((await page).data, "/chain/head");
+  await new Promise((r) => setTimeout(r, 200));
+  const results = ws.sent.filter((m) => m.type === "rpc-result");
+  assert.deepEqual(results.map((m) => [m.id, m.ok, m.result.data]), [[7, true, "/chain/append blk"], [8, true, "/chain/mine/abc"]]);
 });

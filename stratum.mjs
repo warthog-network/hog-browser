@@ -22,6 +22,18 @@ const MAX_LINE = 16_384;
 const MAX_JOBS = 32;
 // The template's timestamp moves every second; only re-send the same work this often.
 const REFRESH_MS = 30_000;
+// /chain/mine answers in well under a second; a poll that hangs longer keeps
+// miners on stale work, so give up quickly and poll again.
+const TEMPLATE_TIMEOUT_MS = 5_000;
+// POST /chain/append normally answers in under half a second. If the node tab
+// has not answered by then, the block may still have landed: it is "pending"
+// and gets checked against the node's chain instead of being called rejected.
+const APPEND_TIMEOUT_MS = 20_000;
+const RECONCILE_MS = 3_000;
+// Stop checking a pending block after this long and count it as rejected.
+const RECONCILE_GIVE_UP_MS = 10 * 60_000;
+// Answer BzMiner by then even if the chain has not settled a pending block yet.
+const MINER_REPLY_MS = 60_000;
 
 /** @param {string|undefined} raw */
 export function stratumPort(raw = process.env.HOG_STRATUM_PORT) {
@@ -113,15 +125,55 @@ export function solvedBlock(job, extra2prefix, extranonce2, ntime, nonce) {
   return { height: job.height, header: header.toString("hex"), body: out.toString("hex") };
 }
 
+/** A Warthog block hash: SHA-256 twice over the 80-byte header (core HeaderView::hash). */
+export function blockHash(headerHex) {
+  return sha256(sha256(Buffer.from(String(headerHex || ""), "hex"))).toString("hex");
+}
+
+/**
+ * What a POST /chain/append reply says about the block.
+ * "unknown" means the node tab never answered (or lost the answer), so the
+ * block may or may not be on chain; it is settled against the chain later.
+ * @returns {{ kind: "won" | "rejected" | "unknown", message: string, stale?: boolean }}
+ */
+export function appendOutcome(reply) {
+  if (reply?.ok) {
+    const result = reply.result;
+    // POST /chain/append answers {"code":0,"error":"No error"}. A code-0 answer
+    // that carries data is some other request's answer: check the chain instead.
+    if (result && result.code === 0 && result.data != null) return { kind: "unknown", message: "Node tab: unexpected answer" };
+    if (result && result.code === 0) return { kind: "won", message: "" };
+    const message = String(result?.error || "Rejected");
+    return { kind: "rejected", message, stale: /deprecated/i.test(message) };
+  }
+  const code = reply?.code || "no answer";
+  // The block reached the node tab but its answer did not come back.
+  if (code === "timeout" || code === "page-closed" || code === "node-error") {
+    return { kind: "unknown", message: `Node tab: ${code}${reply?.error ? ` (${reply.error})` : ""}` };
+  }
+  return { kind: "rejected", message: `Node tab: ${code}` };
+}
+
 /**
  * @param {{
- *   call: (method: string, path: string, body?: string, network?: string) => Promise<any>,
+ *   call: (method: string, path: string, body?: string, network?: string, options?: { timeoutMs?: number, onLate?: (reply: any) => void }) => Promise<any>,
  *   getNetwork?: () => ({ key: string, page: string, label: string, lengthPrefixedBody: boolean } | null),
  *   host?: string,
  *   pollMs?: number,
  * }} options
  */
-export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.defi, host = "127.0.0.1", pollMs = POLL_MS, findTailnet = tailnetAddresses }) {
+export function createStratumBridge({
+  call,
+  getNetwork = () => MINING_NETWORKS.defi,
+  host = "127.0.0.1",
+  pollMs = POLL_MS,
+  findTailnet = tailnetAddresses,
+  templateTimeoutMs = TEMPLATE_TIMEOUT_MS,
+  appendTimeoutMs = APPEND_TIMEOUT_MS,
+  reconcileMs = RECONCILE_MS,
+  reconcileGiveUpMs = RECONCILE_GIVE_UP_MS,
+  minerReplyMs = MINER_REPLY_MS,
+}) {
   let server = null;
   let listenPort = 0;
   let allowTailnet = false;
@@ -135,14 +187,20 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
   /** @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, last: any, polling: boolean, timer: any }>} */
   const accounts = new Map();
   const sockets = new Set();
-  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "" };
+  // blocks: on chain (the node accepted it, or the chain shows it). rejected:
+  // not on chain, of which stale: that height was already taken. pending:
+  // the node tab has not answered yet; checked against the chain.
+  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, stale: 0, pending: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "" };
+  /** @type {Set<any>} submitted blocks whose fate is not known yet */
+  const pendingShares = new Set();
+  let reconcileTimer = null;
 
   function workerFor(socket) {
     const name = socket.account?.worker || "";
     const key = `${name}|${socket.peer}`;
     let w = workers.get(key);
     if (!w) {
-      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, lastShareAt: 0, lastResult: "" };
+      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, pending: 0, lastShareAt: 0, lastResult: "" };
       workers.set(key, w);
       // Keep the list bounded: drop the oldest disconnected entries.
       if (workers.size > 64) {
@@ -179,7 +237,7 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
         stats.height = 0;
         stats.synced = false;
       }
-      const reply = await call("GET", `/chain/mine/${address}`, undefined, net.page);
+      const reply = await call("GET", `/chain/mine/${address}`, undefined, net.page, { timeoutMs: templateTimeoutMs });
       const data = reply?.ok ? reply.result?.data : null;
       if (!reply?.ok) {
         stats.lastError = reply?.code === "no-page"
@@ -262,25 +320,106 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     rig.shares += 1;
     rig.lastShareAt = Date.now();
     const block = solvedBlock(job, socket.extra2prefix, en2, ntime, nonce);
-    const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: socket.account.worker }), job.page);
-    const result = reply?.ok ? reply.result : null;
-    if (result && result.code === 0) {
+    const share = {
+      socket, id, rig, job,
+      worker: socket.account.worker,
+      address: socket.account.address,
+      hash: blockHash(block.header),
+      at: Date.now(),
+      pending: false, done: false, replied: false, checking: false, replyTimer: null,
+    };
+    const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: share.worker }), job.page, {
+      timeoutMs: appendTimeoutMs,
+      // A late answer settles a pending block at once (if the chain has not already).
+      onLate: (late) => {
+        const outcome = appendOutcome(late);
+        if (outcome.kind !== "unknown") settle(share, outcome);
+      },
+    });
+    const outcome = appendOutcome(reply);
+    if (outcome.kind === "unknown") return hold(share, outcome.message);
+    settle(share, outcome);
+  }
+
+  function label(job) {
+    return MINING_NETWORKS[job.network]?.label || job.network;
+  }
+
+  function replyMiner(share, ok, message) {
+    if (share.replied) return;
+    share.replied = true;
+    clearTimeout(share.replyTimer);
+    send(share.socket, ok ? { id: share.id, result: true, error: null } : { id: share.id, result: null, error: [40, String(message), null] });
+  }
+
+  /** The node tab did not answer: keep the block pending and check the chain for it. */
+  function hold(share, message) {
+    share.pending = true;
+    stats.pending += 1;
+    share.rig.pending += 1;
+    pendingShares.add(share);
+    stats.lastResult = `Block ${share.job.height}: the node tab has not answered yet; checking the chain for it`;
+    share.rig.lastResult = stats.lastResult;
+    share.replyTimer = setTimeout(() => replyMiner(share, false, `${message}; still checking the chain`), minerReplyMs);
+    share.replyTimer.unref?.();
+    // A new tip may be waiting behind the slow answer.
+    if (accounts.has(share.address)) poll(share.address);
+  }
+
+  /** @param {{ kind: "won" | "rejected", message: string, stale?: boolean, confirmed?: boolean }} outcome */
+  function settle(share, outcome) {
+    if (share.done) return;
+    share.done = true;
+    if (share.pending) {
+      share.pending = false;
+      stats.pending -= 1;
+      share.rig.pending -= 1;
+      pendingShares.delete(share);
+    }
+    const { job, rig } = share;
+    const who = share.worker ? ` (${share.worker})` : "";
+    if (outcome.kind === "won") {
       stats.blocks += 1;
       rig.blocks += 1;
-      stats.lastResult = `${MINING_NETWORKS[job.network]?.label || job.network} block ${job.height} accepted${socket.account.worker ? ` (${socket.account.worker})` : ""}`;
+      stats.lastResult = `${label(job)} block ${job.height} accepted${who}${outcome.confirmed ? ", confirmed on chain" : ""}`;
       rig.lastResult = `block ${job.height} accepted`;
-      send(socket, { id, result: true, error: null });
-      poll(socket.account.address);
+      replyMiner(share, true);
+      if (accounts.has(share.address)) poll(share.address);
       return;
     }
     stats.rejected += 1;
     rig.rejected += 1;
-    const message = result?.error || (reply?.ok ? "Rejected" : `Node tab: ${reply?.code || "no answer"}`);
-    stats.lastResult = /deprecated/i.test(String(message))
+    if (outcome.stale) stats.stale += 1;
+    stats.lastResult = outcome.stale
       ? `Block ${job.height} was stale (that height was already taken)`
-      : `Block ${job.height} rejected: ${message}`;
+      : `Block ${job.height} rejected: ${outcome.message}`;
     rig.lastResult = stats.lastResult;
-    send(socket, { id, result: null, error: [40, String(message), null] });
+    replyMiner(share, false, outcome.message);
+  }
+
+  /** Settle pending blocks by the hash the node's chain has at their height. */
+  async function check(share) {
+    if (share.done || share.checking) return;
+    if (Date.now() - share.at > reconcileGiveUpMs) {
+      settle(share, { kind: "rejected", message: "The node tab never answered and the chain does not show the block" });
+      return;
+    }
+    share.checking = true;
+    try {
+      const reply = await call("GET", `/chain/block/${share.job.height}/hash`, undefined, share.job.page, { timeoutMs: templateTimeoutMs });
+      const result = reply?.ok ? reply.result : null;
+      const onChain = result && result.code === 0 && typeof result.data === "string" ? result.data.toLowerCase() : "";
+      // No block at that height yet (or no answer): ask again next round.
+      if (!onChain) return;
+      if (onChain === share.hash) settle(share, { kind: "won", message: "", confirmed: true });
+      else settle(share, { kind: "rejected", message: "Another block took that height", stale: true });
+    } finally {
+      share.checking = false;
+    }
+  }
+
+  function reconcile() {
+    for (const share of pendingShares) check(share).catch(() => {});
   }
 
   function onLine(socket, line) {
@@ -413,6 +552,7 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     }
     const next = await listenOn(port, host);
     server = next;
+    reconcileTimer = setInterval(reconcile, reconcileMs);
     const address = next.address();
     listenPort = typeof address === "object" && address ? address.port : port;
     await syncTailnet();
@@ -429,6 +569,9 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
   }
 
   function stop() {
+    clearInterval(reconcileTimer);
+    reconcileTimer = null;
+    for (const share of pendingShares) clearTimeout(share.replyTimer);
     for (const entry of accounts.values()) clearInterval(entry.timer);
     accounts.clear();
     for (const socket of sockets) socket.destroy();
@@ -457,8 +600,9 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
       accounts: [...accounts.keys()],
       workers: [...workers.values()].map((w) => ({ ...w, connected: Math.max(0, w.connected) })),
       ...stats,
+      pendingBlocks: [...pendingShares].map((s) => ({ height: s.job.height, worker: s.worker, since: s.at })),
     };
   }
 
-  return { start, stop, status, setTailnet };
+  return { start, stop, status, setTailnet, reconcile };
 }

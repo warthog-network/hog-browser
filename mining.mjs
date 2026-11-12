@@ -50,6 +50,8 @@ export function resolveMiningNetwork(setting, pageNetwork) {
 }
 const MAX_APPEND_BODY = 256_000;
 const HELLO_MS = 5000;
+// How long a timed-out call still accepts a late answer from the node page.
+const LATE_MS = 10 * 60_000;
 
 const ACCOUNT_RE = /^[0-9a-fA-F]{48}$/;
 
@@ -145,6 +147,90 @@ export function pageRelayScript(token) {
     } catch (e) {}
     return "";
   }
+  // One node request at a time. The WASM node (core router.hpp match_get /
+  // match_post) keeps each request's Response, which holds the request id, on
+  // the C++ stack, and async routes (/chain/mine, /chain/append and anything
+  // else answered by the chain server) read that id when they answer, after
+  // the frame is gone. With two requests in flight an answer can come back
+  // under the other request's id or a stale stack value; the glue then drops
+  // it (or settles the wrong promise) and the caller waits forever. Queue
+  // every virtual_get / virtual_post and give each answer to the one request
+  // in flight, whatever id it carries. Mining requests go ahead of page ones.
+  var RPC_MS = 30000;
+  function serialize(mod) {
+    if (!mod || mod.__hogRpc || typeof mod.virtual_get !== "function" || typeof mod.virtual_post !== "function") return;
+    var vs = mod.VIRTUALSTATE;
+    if (!vs || typeof vs.resolvePromise !== "function" || typeof vs.getId !== "function") return;
+    // The glue's virtual_post calls VIRTUALSTATE.postId, which it never defines
+    // (virtual_get uses getId). Alias it so POST /chain/append can run.
+    if (typeof vs.postId !== "function") vs.postId = vs.getId;
+    var get = mod.virtual_get, post = mod.virtual_post, resolveById = vs.resolvePromise;
+    var queue = [], current = null, draining = null;
+    var stats = { requests: 0, rerouted: 0, timeouts: 0 };
+    function next() { setTimeout(pump, 0); }
+    function giveUp(c) {
+      if (current !== c) return;
+      current = null;
+      stats.timeouts += 1;
+      c.job.reject(new Error("The node did not answer " + c.job.method + " " + c.job.path));
+      // Its answer may still come; do not hand it to the next request.
+      draining = setTimeout(function () { draining = null; next(); }, RPC_MS);
+    }
+    function pump() {
+      if (current || draining || !queue.length) return;
+      var job = queue.shift();
+      // getId() hands out nextId, so this is the id the glue gives the request.
+      var c = { id: vs.nextId, job: job };
+      current = c;
+      c.timer = setTimeout(function () { giveUp(c); }, RPC_MS);
+      stats.requests += 1;
+      var p;
+      try { p = job.method === "POST" ? post.call(mod, job.path, job.body) : get.call(mod, job.path); }
+      catch (e) { clearTimeout(c.timer); if (current === c) current = null; job.reject(e); next(); return; }
+      Promise.resolve(p).then(job.resolve, job.reject);
+    }
+    vs.resolvePromise = function (id, json) {
+      if (draining) {
+        clearTimeout(draining);
+        draining = null;
+        next();
+        return;
+      }
+      var c = current;
+      if (!c) return resolveById.call(vs, id, json);
+      clearTimeout(c.timer);
+      current = null;
+      if (id !== c.id) stats.rerouted += 1;
+      resolveById.call(vs, c.id, json);
+      next();
+    };
+    function enqueue(method, path, body, first) {
+      return new Promise(function (resolve, reject) {
+        var job = { method: method, path: String(path), body: body, first: !!first, resolve: resolve, reject: reject };
+        if (first) {
+          var i = 0;
+          while (i < queue.length && queue[i].first) i++;
+          queue.splice(i, 0, job);
+        } else queue.push(job);
+        pump();
+      });
+    }
+    mod.virtual_get = function (path) { return enqueue("GET", path); };
+    mod.virtual_post = function (path, body) { return enqueue("POST", path, body); };
+    mod.__hogRpc = enqueue;
+    mod.__hogRpcStats = stats;
+  }
+  // Queue the node as soon as the page publishes it, before its own requests start.
+  try {
+    var held = window.wartNode;
+    Object.defineProperty(window, "wartNode", {
+      configurable: true,
+      enumerable: true,
+      get: function () { return held; },
+      set: function (value) { held = value; try { serialize(value); } catch (e) {} },
+    });
+    serialize(held);
+  } catch (e) {}
   function connect() {
     var ws;
     try { ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + PATH); }
@@ -153,6 +239,7 @@ export function pageRelayScript(token) {
     function report() {
       var mod = window.wartNode || window.Module;
       var running = !!(mod && typeof mod.virtual_get === "function");
+      if (running) { try { serialize(mod); } catch (e) {} }
       try { ws.send(JSON.stringify({ type: "status", network: running ? network() : "" })); } catch (e) {}
     }
     ws.onopen = function () {
@@ -170,13 +257,13 @@ export function pageRelayScript(token) {
       if (msg.network && net && net !== msg.network) { reply({ ok: false, code: "wrong-network" }); return; }
       if (!mod || typeof mod.virtual_get !== "function" || typeof mod.virtual_post !== "function") { reply({ ok: false, code: "not-running" }); return; }
       if (msg.network && !net) { reply({ ok: false, code: "not-running" }); return; }
-      // The node glue's virtual_post calls VIRTUALSTATE.postId, which the glue never
-      // defines (virtual_get uses getId). Alias it so POST /chain/append can run.
-      var vs = mod.VIRTUALSTATE;
-      if (vs && typeof vs.postId !== "function" && typeof vs.getId === "function") vs.postId = vs.getId;
+      serialize(mod);
       var p;
       try {
-        p = msg.method === "POST" ? mod.virtual_post(msg.path, String(msg.body || "")) : mod.virtual_get(msg.path);
+        var method = msg.method === "POST" ? "POST" : "GET";
+        p = mod.__hogRpc
+          ? mod.__hogRpc(method, msg.path, String(msg.body || ""), true)
+          : (method === "POST" ? mod.virtual_post(msg.path, String(msg.body || "")) : mod.virtual_get(msg.path));
       } catch (e) { reply({ ok: false, code: "node-error", error: String(e && e.message || e) }); return; }
       Promise.resolve(p).then(function (result) {
         reply({ ok: true, result: result });
@@ -199,6 +286,8 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
   let pageNetwork = "";
   let seq = 0;
   const pending = new Map();
+  /** Calls that timed out but want the answer if it still comes: id -> { onLate, timer } */
+  const late = new Map();
   let listener = null;
   let listenPort = 0;
   let lastError = "";
@@ -212,6 +301,8 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
       entry.resolve({ ok: false, code: "page-closed" });
       pending.delete(id);
     }
+    for (const entry of late.values()) clearTimeout(entry.timer);
+    late.clear();
   }
 
   /**
@@ -261,7 +352,15 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
         if (msg?.type !== "rpc-result") return;
         if (typeof msg.network === "string") pageNetwork = msg.network;
         const entry = pending.get(msg.id);
-        if (!entry) return;
+        if (!entry) {
+          const slow = late.get(msg.id);
+          if (slow) {
+            late.delete(msg.id);
+            clearTimeout(slow.timer);
+            slow.onLate(msg);
+          }
+          return;
+        }
         pending.delete(msg.id);
         clearTimeout(entry.timer);
         entry.resolve(msg);
@@ -275,25 +374,33 @@ export function createMiningRelay({ token, pageOrigin, network = MINING_NETWORK,
     return true;
   }
 
-  /** @returns {Promise<any>} reply from the page (or a synthetic not-ready reply) */
   /**
+   * Ask the node page. Resolves with its reply, or a synthetic one (no-page, timeout).
    * @param {string} method
    * @param {string} path
    * @param {string} [body]
    * @param {string} [net] network the node tab must be running (page name); default is the relay's
+   * @param {{ timeoutMs?: number, onLate?: (reply: any) => void }} [options]
+   *   timeoutMs overrides the default wait; onLate gets the page's answer if it
+   *   arrives after the timeout (within LATE_MS), so a slow answer is not lost.
+   * @returns {Promise<any>}
    */
-  function call(method, path, body, net) {
+  function call(method, path, body, net, options = {}) {
     const want = net === undefined ? (typeof network === "function" ? network() : network) : net;
     if (!page || page.readyState !== WebSocket.OPEN) {
       return Promise.resolve({ ok: false, code: "no-page" });
     }
     const id = ++seq;
+    // Appending a block makes the in-tab node verify and store it; give it longer.
+    const wait = options.timeoutMs ?? (method === "POST" ? timeoutMs * 3 : timeoutMs);
     return new Promise((resolve) => {
-      // Appending a block makes the in-tab node verify and store it; give it longer.
       const timer = setTimeout(() => {
         pending.delete(id);
+        if (typeof options.onLate === "function") {
+          late.set(id, { onLate: options.onLate, timer: setTimeout(() => late.delete(id), LATE_MS) });
+        }
         resolve({ ok: false, code: "timeout" });
-      }, method === "POST" ? timeoutMs * 3 : timeoutMs);
+      }, wait);
       pending.set(id, { resolve, timer });
       page.send(JSON.stringify({ type: "rpc", id, method, path, body, network: want || "" }));
     });

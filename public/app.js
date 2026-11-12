@@ -6953,8 +6953,9 @@ function paintMining(state) {
   setText("mining-stat-node", tab);
   setText("mining-stat-height", state.height ? Number(state.height).toLocaleString() : "—");
   setText("mining-stat-miners", String(state.miners || 0));
-  setText("mining-stat-blocks", String(state.blocks || 0));
-  setText("mining-stat-rejected", String(state.rejected || 0));
+  // Blocks the node tab was slow to confirm are "checking" until the chain settles them.
+  setText("mining-stat-blocks", `${state.blocks || 0}${state.pending ? ` (+${state.pending} checking)` : ""}`);
+  setText("mining-stat-rejected", `${state.rejected || 0}${state.stale ? ` (${state.stale} stale)` : ""}`);
   setText("mining-last", state.lastResult || "");
   if (!on) {
     status.textContent = "Off. Turn this on to let BzMiner connect.";
@@ -6998,7 +6999,7 @@ function paintMiningTailnet(state) {
   const body = table.querySelector("tbody");
   body.replaceChildren(...rows.map((w) => {
     const tr = document.createElement("tr");
-    for (const value of [w.worker || "(no -r name)", w.remote ? w.source : "this computer", w.connected ? "yes" : "no", w.shares, w.blocks, w.rejected]) {
+    for (const value of [w.worker || "(no -r name)", w.remote ? w.source : "this computer", w.connected ? "yes" : "no", w.shares, `${w.blocks}${w.pending ? ` (+${w.pending})` : ""}`, w.rejected]) {
       const td = document.createElement("td");
       td.textContent = String(value);
       tr.append(td);
