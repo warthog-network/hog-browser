@@ -96,12 +96,15 @@ cp -a \
   "${HB}/stratum.mjs" \
   "${HB}/tailnet.mjs" \
   "${HB}/files.mjs" \
+  "${HB}/mobile.mjs" \
+  "${HB}/mobile_guard.py" \
   "${HB}/opfs-polyfill.js" \
   "${HB}/package.json" \
   "${HB}/package-lock.json" \
   "${APP}/"
 
 cp -a "${HB}/public" "${APP}/"
+cp -a "${HB}/vendor" "${APP}/"
 cp -a "${HB}/node-defi" "${APP}/"
 cp -a "${HB}/node-mainnet" "${APP}/"
 cp -a "${HB}/node_modules" "${APP}/"
