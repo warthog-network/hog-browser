@@ -13,6 +13,12 @@
 <body>
   <div id="boot-flash" class="boot-flash" role="button" tabindex="0" aria-label="Skip the intro">
     <video id="boot-video" src="wartlogorun.mp4" autoplay muted playsinline preload="auto" disablepictureinpicture disableremoteplayback></video>
+    <script>
+      // Chromium ignores the mp4's full-range tag and crushes the #0b0b0d
+      // background to black. The webm has a transparent background so the
+      // CSS color shows through. WebKit keeps the flattened mp4.
+      if (window.__hogChromium) document.getElementById("boot-video").src = "wartlogorun.webm";
+    </script>
     <p>Click to continue</p>
   </div>
   <div class="app">

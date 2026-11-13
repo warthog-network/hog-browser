@@ -7178,6 +7178,15 @@ function motionReduced() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+// Chromium: VP9/WebM with a transparent background so the CSS surface color
+// shows through (the mp4's full-range #0b0b0d / #0e0f11 is crushed to black).
+// WebKit keeps the flattened mp4. window.__hogChromium is set only by the
+// Electron chrome preload, so regular Hog is unchanged.
+function brandClip(stem, bust) {
+  const file = `${stem}.${window.__hogChromium ? "webm" : "mp4"}`;
+  return bust != null ? `${file}?play=${bust}` : file;
+}
+
 function stopCelebrate() {
   const el = $("wallet-run");
   if (!el) return;
@@ -7199,7 +7208,7 @@ function celebrateWallet() {
   el.removeAttribute("src");
   try { el.load(); } catch { /* element is already clear */ }
   // A seek back to 0 freezes this clip in WebKitGTK. A new URL starts a fresh play.
-  el.src = `wartlogorun-wallet.mp4?play=${play}`;
+  el.src = brandClip("wartlogorun-wallet", play);
   const pending = el.play();
   if (pending && pending.catch) pending.catch(() => stopCelebrate());
 }
@@ -7224,6 +7233,9 @@ function resumeAfterFlash() {
 function bootFlash() {
   const flash = $("boot-flash");
   const video = $("boot-video");
+  if (video && window.__hogChromium && !/\.webm(\?|$)/.test(video.getAttribute("src") || "")) {
+    video.src = brandClip("wartlogorun");
+  }
   const motion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   let done = false;
   const finish = () => {

@@ -157,11 +157,27 @@ test("the intro flash paints the page background, which the intro clip is encode
   assert.equal(bgOf(ruleBody(appCss, ".boot-flash")), rootVar("bg"));
   assert.equal(bgOf(ruleBody(appCss, ".boot-flash video")), rootVar("bg"));
   assert.match(html, /id="boot-video" src="wartlogorun\.mp4"/);
+  assert.match(html, /__hogChromium.*wartlogorun\.webm/);
 });
 
 test("the wallet clip paints the wallet panel color, which its own encode uses", () => {
   assert.equal(bgOf(ruleBody(appCss, ".brand-run")), rootVar("wallet"));
-  assert.match(appJs, /wartlogorun-wallet\.mp4/);
+  assert.match(appJs, /function brandClip/);
+  assert.match(appJs, /__hogChromium \? "webm" : "mp4"/);
+  assert.match(appJs, /brandClip\("wartlogorun-wallet"/);
+});
+
+test("Chromium gets alpha WebM clips; WebKit keeps the flattened mp4s", () => {
+  for (const stem of ["wartlogorun", "wartlogorun-wallet"]) {
+    const mp4 = new URL(`../public/${stem}.mp4`, import.meta.url);
+    const webm = new URL(`../public/${stem}.webm`, import.meta.url);
+    assert.ok(!lstatSync(mp4).isSymbolicLink(), `${stem}.mp4 is its own file`);
+    assert.ok(!lstatSync(webm).isSymbolicLink(), `${stem}.webm is its own file`);
+    const data = readFileSync(webm);
+    assert.deepEqual([...data.subarray(0, 4)], [0x1a, 0x45, 0xdf, 0xa3], `${stem}.webm is EBML`);
+    // VP9 alpha is stored as WebM BlockAdditions (EBML 0x75A1), not a second stream.
+    assert.ok(data.includes(Buffer.from([0x75, 0xa1])), `${stem}.webm has BlockAdditions (alpha)`);
+  }
 });
 
 test("the running-logo clips are separate full-range BT.709 files", () => {
