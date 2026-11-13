@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.39-preview.1",
+  "version": "0.1.40-preview.2",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",
@@ -35,6 +35,9 @@
       "lib/**",
       "chrome-preload.js",
       "page-preload.js",
+      "overlay-preload.js",
+      "overlay.js",
+      "overlay.html",
       "package.json",
       "node_modules/**"
     ],

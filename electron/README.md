@@ -49,13 +49,31 @@ npm run dist                     # dist/*.deb and dist/*.AppImage
 tracker blocking, `HOG_PREVIEW_DEBUG=1` logs popups and gestures, and F12
 (or Ctrl+Shift+I) opens DevTools for the focused page.
 
+## Hog UI above pages
+
+Sites cannot cover Hog's controls. The WebKit shell drew the edge grips and
+menus inside each page, which YouTube (Trusted Types, its own stacking) and
+fullscreen-style players could hide. Here they live in separate transparent
+views stacked above the page view:
+
+- grips: one small view per edge (16x36, 114 wide while hovered), click opens
+  Tabs / Wallet, drag moves it, same as before;
+- menus: `chrome-preload.js` sends a copy of the open suggestions, history or
+  settings menu; the overlay draws it with Hog's own CSS exactly where Hog's
+  UI has it, and clicks go back as the usual `menu:` commands. A click on the
+  page closes the menu;
+- any other Hog panel that overlaps the page (narrow-window wallet, dialogs)
+  shows over a still picture of the page until it closes;
+- HTML fullscreen hides all of it.
+
 ## What maps to what
 
 | WebKit Hog (`hog`)                     | Chromium preview (`main.js`)                       |
 |----------------------------------------|----------------------------------------------------|
 | chrome WebView + `hogwin` handler      | BrowserWindow + `chrome-preload.js` (same commands) |
 | `PageHost` WebKit views in a Gtk.Stack | `WebContentsView` per tab, laid out from `view:`    |
-| `EDGE_GRIP_SCRIPT`, `dapp-provider.js` | Same scripts, read from `hog` / `public/` at start, injected by `page-preload.js` |
+| `EDGE_GRIP_SCRIPT` (grips + menu copies drawn inside the page) | Transparent overlay `WebContentsView`s kept above every page (`overlay.html`): edge grips and the suggestions / history / settings menus. They only cover what they draw, so the page keeps its input. Other Hog panels over the page area get a still picture of the page underneath while open |
+| `dapp-provider.js`                     | Same script, read from `public/` at start, injected by `page-preload.js` |
 | shared / ephemeral WebsiteDataManager  | `persist:pages` / in-memory partition per Iso tab   |
 | Wallet UI data dir                     | `persist:hog` partition                             |
 | `PageDownloads` -> ~/Downloads         | `will-download` -> ~/Downloads, never overwrites    |

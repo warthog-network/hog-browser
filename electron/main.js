@@ -26,6 +26,7 @@ const path = require("node:path");
 const policy = require("./lib/policy");
 const { HogServer } = require("./lib/server");
 const { GuardBridge } = require("./lib/guard");
+const geometry = require("./lib/overlay-geometry");
 
 const APP_NAME = "Hog (Chromium preview)";
 const HOG_DATA = process.env.HOG_DATA || path.join(os.homedir(), ".local", "share", "hog-browser");
@@ -73,6 +74,7 @@ const server = new HogServer({ root: ROOT, log });
 let guard = null;
 let win = null;
 let pages = null;
+let overlays = null;
 let chromeReady = false;
 const pendingUrls = [];
 
@@ -318,14 +320,6 @@ function isOwnUrl(raw) {
 
 // ---------------------------------------------------------------- pages
 
-const HOG_SOURCE = (() => {
-  try {
-    return fs.readFileSync(path.join(ROOT, "hog"), "utf8");
-  } catch {
-    return "";
-  }
-})();
-const EDGE_GRIP_SCRIPT = policy.extractEdgeGripScript(HOG_SOURCE);
 const DAPP_PROVIDER_SCRIPT = (() => {
   try {
     return policy.rewriteMessageHandler(fs.readFileSync(path.join(ROOT, "public", "dapp-provider.js"), "utf8"));
@@ -354,7 +348,7 @@ class PageHost {
     this.shown = null;
     this.place = { left: 0, top: 0, right: 0, bottom: 0 };
     this.gripPaint = null;
-    this.menuPaint = null;
+    this.suspended = false;
     this.gestures = new Map();
     this.downloads = new PageDownloads();
   }
@@ -411,6 +405,7 @@ class PageHost {
     this.views.set(tabId, entry);
     this.byContents.set(wc.id, tabId);
     win.contentView.addChildView(view);
+    if (overlays) overlays.raise();
 
     wc.setWindowOpenHandler(({ url }) => {
       if (process.env.HOG_PREVIEW_DEBUG) log(`popup ${url} gesture=${this.recentGesture(wc.id)}`);
@@ -480,6 +475,7 @@ class PageHost {
     if (on) {
       const [width, height] = win.getContentSize();
       entry.view.setBounds({ x: 0, y: 0, width, height });
+      this.repaint();
     } else {
       this.layout();
     }
@@ -510,6 +506,7 @@ class PageHost {
         entry.view.setBounds(bounds);
       }
     }
+    this.repaint();
   }
 
   placeView(place) {
@@ -519,9 +516,10 @@ class PageHost {
     if (!place.show || !this.views.has(tabId)) {
       for (const entry of this.views.values()) entry.view.setVisible(false);
       this.shown = null;
+      this.repaint();
       return;
     }
-    for (const [id, entry] of this.views) entry.view.setVisible(id === tabId);
+    for (const [id, entry] of this.views) entry.view.setVisible(id === tabId && !this.suspended);
     if (this.shown !== tabId) {
       this.shown = tabId;
       const wc = this.views.get(tabId).view.webContents;
@@ -553,42 +551,35 @@ class PageHost {
     entry.view.webContents.executeJavaScript(script, false).catch(() => {});
   }
 
+  // Grips and menus are drawn by the overlay views above the page, not
+  // inside the page (YouTube's Trusted Types and stacking broke that).
   repaint() {
-    if (!this.shown) return;
-    if (this.gripPaint) this.run(this.shown, `window.__hogEdgeGrips && window.__hogEdgeGrips(${JSON.stringify(this.gripPaint)})`);
-    const arg = this.menuPaint == null ? "null" : JSON.stringify(this.menuPaint);
-    this.run(this.shown, `window.__hogMenu && window.__hogMenu(${arg})`);
+    if (overlays) overlays.sync();
   }
 
-  paintMenu(raw) {
-    if (raw == null) {
-      this.menuPaint = null;
-    } else {
-      try {
-        const data = JSON.parse(raw);
-        if (!data || typeof data !== "object" || Array.isArray(data)) return;
-        this.menuPaint = data;
-      } catch {
-        return;
-      }
-    }
-    this.repaint();
+  pageBounds() {
+    if (!win || win.isDestroyed()) return { x: 0, y: 0, width: 0, height: 0 };
+    const [width, height] = win.getContentSize();
+    return policy.viewBounds(this.place, width, height);
+  }
+
+  /** Show or hide the live page under a still picture while a Hog panel
+   *  (shields, network menu, narrow-window wallet) covers the page area. */
+  setSuspended(on) {
+    on = Boolean(on);
+    if (this.suspended === on) return;
+    this.suspended = on;
+    const entry = this.shown ? this.views.get(this.shown) : null;
+    if (entry) entry.view.setVisible(!on);
+    if (!on) entry?.view.webContents.focus();
   }
 
   onEdgeMessage(wc, command) {
     const tabId = this.tabFor(wc);
     if (!tabId || tabId !== this.shown || typeof command !== "string") return;
+    // Pages only speak the dapp provider. Grips and menus live in the
+    // overlay views now, so a site cannot click Hog's menus for the user.
     if (command.startsWith("dapp:")) return this.onDappRequest(wc, tabId, command.slice(5));
-    const parts = command.split(":");
-    if (parts.length >= 2 && parts[0] === "menu") return this.onMenuMessage(parts);
-    if (parts.length < 2 || !["tabs", "wallet"].includes(parts[1])) return;
-    const [kind, side] = parts;
-    if (kind === "click" && parts.length === 2) return tellChrome(`window.__hogEdgeClick && window.__hogEdgeClick('${side}')`);
-    if (kind === "end" && parts.length === 2) return tellChrome(`window.__hogEdgeEnd && window.__hogEdgeEnd('${side}')`);
-    if (kind !== "move" || parts.length !== 3) return;
-    const top = Number.parseInt(parts[2], 10);
-    if (!Number.isFinite(top) || top < -200 || top > 10000) return;
-    tellChrome(`window.__hogEdgeMove && window.__hogEdgeMove('${side}', ${top})`);
   }
 
   onMenuMessage(parts) {
@@ -950,7 +941,7 @@ function onWindowMessage(command) {
   if (command.startsWith("edges:")) {
     if (!pages) return;
     const paint = policy.parseEdges(command, pages.place.top);
-    if (paint) {
+    if (paint && !(overlays && overlays.dragging)) {
       pages.gripPaint = paint;
       pages.repaint();
     }
@@ -967,8 +958,8 @@ function onWindowMessage(command) {
   if (command === "files:pick-root") return void pickFilesRoot();
   if (command.startsWith("dapp-reply:")) return pages && pages.deliverDappReply(command.slice("dapp-reply:".length));
   if (command.startsWith("dapp-emit:")) return pages && pages.deliverDappEmit(command.slice("dapp-emit:".length));
-  if (command === "menu:hide") return pages && pages.paintMenu(null);
-  if (command.startsWith("menu:")) return pages && pages.paintMenu(command.slice(5));
+  // "menu:" copies are not needed: chrome-preload.js sends the real menus.
+  if (command.startsWith("menu:")) return;
   if (command === "close") return win && win.close();
   if (command === "min") return win && win.minimize();
   if (command === "max") {
@@ -1000,6 +991,231 @@ const CHROME_CSS = `
 .resize-frame { display: none !important; }
 `;
 
+// ---------------------------------------------------------------- overlays
+// Hog's menus and page-edge grips are drawn in transparent WebContentsViews
+// stacked above every page view, so no site (YouTube, video players,
+// Trusted Types pages, z-index games) can cover them. They have bounds only
+// where something is drawn, so the rest of the page keeps its own input.
+// Hog panels that cannot be copied (shields, network list, the narrow-window
+// wallet) get a still picture of the page under them while they are open.
+
+const OVERLAY_PARTITION = "hog-overlay"; // in memory
+const SNAPSHOT_CSS = `
+.view.hog-snap { isolation: isolate; }
+#hog-page-snapshot { position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: fill; z-index: 50; user-select: none; -webkit-user-drag: none; }
+`;
+
+function snapshotScript(url) {
+  return `(function (u) {
+    var v = document.getElementById("view");
+    if (!v) return;
+    var i = document.getElementById("hog-page-snapshot");
+    if (!u) { if (i) i.remove(); v.classList.remove("hog-snap"); return; }
+    if (!i) { i = document.createElement("img"); i.id = "hog-page-snapshot"; i.alt = ""; i.draggable = false; v.prepend(i); }
+    i.src = u;
+    v.classList.add("hog-snap");
+    var frame = function () { return new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r); }); }); };
+    return (i.decode ? i.decode() : Promise.resolve()).catch(function () {}).then(frame);
+  })(${JSON.stringify(url)})`;
+}
+
+function prepareOverlaySession(ses) {
+  const local = (url) => {
+    try {
+      return url.startsWith("file:") || url.startsWith("devtools:") || isOwnUrl(url);
+    } catch {
+      return false;
+    }
+  };
+  ses.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !local(details.url) }));
+  // Hog's fonts are cross-origin from file://; let the overlay use them.
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders };
+    for (const key of Object.keys(headers)) if (key.toLowerCase() === "access-control-allow-origin") delete headers[key];
+    headers["Access-Control-Allow-Origin"] = ["*"];
+    callback({ responseHeaders: headers });
+  });
+  ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+}
+
+class Overlays {
+  constructor() {
+    prepareOverlaySession(session.fromPartition(OVERLAY_PARTITION));
+    this.surface = { menus: [], cover: false, css: [] };
+    this.sent = new Map();
+    this.hot = { tabs: false, wallet: false };
+    this.dragging = null;
+    this.dragTop = 0;
+    this.snapWant = false;
+    this.snapTab = null;
+    this.snapToken = 0;
+    this.grips = { tabs: this.make("grip", "tabs"), wallet: this.make("grip", "wallet") };
+    this.menu = this.make("menu");
+  }
+
+  make(mode, side) {
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: OVERLAY_PARTITION,
+        preload: path.join(__dirname, "overlay-preload.js"),
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        spellcheck: false,
+        backgroundThrottling: false,
+      },
+    });
+    view.setBackgroundColor("#00000000");
+    view.setVisible(false);
+    view.ready = false;
+    const wc = view.webContents;
+    wc.setWindowOpenHandler(() => ({ action: "deny" }));
+    wc.on("will-navigate", (event) => event.preventDefault());
+    wc.on("before-input-event", (event, input) => onShortcutInput(event, input, wc));
+    wc.on("did-finish-load", () => {
+      view.ready = true;
+      this.sent.delete(view);
+      this.sync();
+    });
+    wc.on("render-process-gone", () => {
+      view.ready = false;
+      setTimeout(() => !wc.isDestroyed() && wc.reload(), 500);
+    });
+    wc.loadFile(path.join(__dirname, "overlay.html"), { query: side ? { mode, side } : { mode } }).catch(() => {});
+    win.contentView.addChildView(view);
+    return view;
+  }
+
+  /** Keep the overlays above every page view (addChildView re-orders). */
+  raise() {
+    for (const view of [this.grips.tabs, this.grips.wallet, this.menu]) win.contentView.addChildView(view);
+  }
+
+  setSurface(raw) {
+    this.surface = geometry.cleanSurface(raw);
+    this.sync();
+  }
+
+  send(view, state) {
+    const key = JSON.stringify(state);
+    if (this.sent.get(view) === key) return;
+    this.sent.set(view, key);
+    view.webContents.executeJavaScript(`window.__hogOverlay && window.__hogOverlay(${key})`, false).catch(() => {});
+  }
+
+  sync() {
+    if (!win || win.isDestroyed() || !pages) return;
+    const page = pages.pageBounds();
+    const live = Boolean(pages.shown) && !pages.fullTab && page.width > 0 && page.height > 0;
+    const cover = live && this.surface.cover;
+    this.snapshot(cover);
+    const active = live && !cover;
+    if (process.env.HOG_PREVIEW_DEBUG) {
+      const key = `${live}:${cover}:${this.surface.menus.length}:${JSON.stringify(pages.gripPaint)}`;
+      if (key !== this.debugKey) log(`overlays live=${live} cover=${cover} menus=${this.surface.menus.length} grips=${JSON.stringify(pages.gripPaint)}`);
+      this.debugKey = key;
+    }
+
+    const menus = active ? this.surface.menus : [];
+    if (menus.length && this.menu.ready) {
+      const [width, height] = win.getContentSize();
+      const bounds = geometry.menuBounds(menus.map((m) => m.rect), width, height);
+      this.menu.setBounds(bounds);
+      const { css, htmlClass, bodyClass, theme } = this.surface;
+      this.send(this.menu, { menus, css, htmlClass, bodyClass, theme, origin: { x: bounds.x, y: bounds.y } });
+      this.menu.setVisible(true);
+    } else if (this.menu.getVisible()) {
+      this.menu.setVisible(false);
+    }
+
+    const paint = pages.gripPaint;
+    for (const side of ["tabs", "wallet"]) {
+      const view = this.grips[side];
+      if (!(active && paint && paint[side] && view.ready)) {
+        if (view.getVisible()) view.setVisible(false);
+        if (this.dragging === side) this.dragging = null;
+        this.hot[side] = false;
+        continue;
+      }
+      const top = this.dragging === side ? this.dragTop : paint[`${side}Top`];
+      const bounds = geometry.gripBounds(side, page, top, this.hot[side] && this.dragging !== side);
+      view.setBounds(bounds);
+      this.send(view, { top: bounds.top });
+      if (!view.getVisible()) view.setVisible(true);
+    }
+  }
+
+  async snapshot(on) {
+    if (on && this.snapWant && this.snapTab !== pages.shown) this.snapWant = false; // tab changed under a panel
+    if (on === this.snapWant) return;
+    this.snapWant = on;
+    const token = ++this.snapToken;
+    if (!on) {
+      this.snapTab = null;
+      pages.setSuspended(false);
+      tellChrome(snapshotScript(null));
+      return;
+    }
+    const tabId = pages.shown;
+    this.snapTab = tabId;
+    const entry = pages.views.get(tabId);
+    let url = null;
+    if (entry && !pages.suspended) {
+      try {
+        const image = await entry.view.webContents.capturePage();
+        if (!image.isEmpty()) url = `data:image/jpeg;base64,${image.toJPEG(85).toString("base64")}`;
+      } catch {
+        /* blank under the panel */
+      }
+    }
+    if (token !== this.snapToken || !win || win.isDestroyed()) return;
+    if (url) {
+      await win.webContents.executeJavaScript(snapshotScript(url), false).catch(() => {});
+      if (token !== this.snapToken) return;
+    }
+    pages.setSuspended(true);
+  }
+
+  /** A click on the shown page closes Hog menus, like a click outside them. */
+  onPageGesture() {
+    if (this.surface.menus.length) tellChrome("window.__hogMenuDismiss && window.__hogMenuDismiss()");
+  }
+
+  onMessage(wc, message) {
+    if (typeof message !== "string") return;
+    const parts = message.split(":");
+    if (wc === this.menu.webContents) {
+      if (parts[0] === "menu" && this.menu.getVisible()) pages.onMenuMessage(parts);
+      return;
+    }
+    const side = wc === this.grips.tabs.webContents ? "tabs" : wc === this.grips.wallet.webContents ? "wallet" : null;
+    if (!side || parts[1] !== side || !this.grips[side].getVisible()) return;
+    const kind = parts[0];
+    if ((kind === "hot" || kind === "cold") && parts.length === 2) {
+      this.hot[side] = kind === "hot";
+      this.sync();
+    } else if (kind === "click" && parts.length === 2) {
+      this.hot[side] = false;
+      tellChrome(`window.__hogEdgeClick && window.__hogEdgeClick('${side}')`);
+    } else if (kind === "move" && parts.length === 3) {
+      const top = Number.parseInt(parts[2], 10);
+      if (!Number.isFinite(top) || top < -200 || top > 10000) return;
+      const page = pages.pageBounds();
+      this.dragging = side;
+      this.dragTop = geometry.gripBounds(side, page, top, false).top;
+      this.sync();
+      tellChrome(`window.__hogEdgeMove && window.__hogEdgeMove('${side}', ${this.dragTop})`);
+    } else if (kind === "end" && parts.length === 2) {
+      if (pages.gripPaint) pages.gripPaint[`${side}Top`] = this.dragTop;
+      this.dragging = null;
+      this.hot[side] = false;
+      tellChrome(`window.__hogEdgeEnd && window.__hogEdgeEnd('${side}')`);
+      this.sync();
+    }
+  }
+}
+
 function createWindow() {
   const chromeSession = session.fromPartition(CHROME_PARTITION);
   prepareChromeSession(chromeSession);
@@ -1025,6 +1241,7 @@ function createWindow() {
     },
   });
   pages = new PageHost();
+  overlays = new Overlays();
   const wc = win.webContents;
   wc.setWindowOpenHandler(({ url }) => {
     const target = policy.allowedBrowserOpenUrl(url);
@@ -1034,7 +1251,7 @@ function createWindow() {
   wc.on("will-navigate", (event) => {
     if (!isOwnUrl(event.url)) event.preventDefault();
   });
-  wc.on("dom-ready", () => wc.insertCSS(CHROME_CSS).catch(() => {}));
+  wc.on("dom-ready", () => wc.insertCSS(CHROME_CSS + SNAPSHOT_CSS).catch(() => {}));
   wc.on("did-finish-load", () => {
     log(`Hog preview is open at ${server.url}`);
     chromeReady = true;
@@ -1072,11 +1289,20 @@ ipcMain.on("hogedge", (event, command) => {
 });
 ipcMain.on("hog:gesture", (event) => {
   if (process.env.HOG_PREVIEW_DEBUG) log(`gesture from ${event.sender.id}`);
-  if (pages) pages.gestures.set(event.sender.id, Date.now());
+  if (!pages) return;
+  pages.gestures.set(event.sender.id, Date.now());
+  const shown = pages.shown && pages.views.get(pages.shown);
+  if (overlays && shown && shown.view.webContents === event.sender) overlays.onPageGesture();
+});
+ipcMain.on("hog:chrome-surface", (event, surface) => {
+  if (!overlays || !win || event.sender !== win.webContents || event.senderFrame !== event.sender.mainFrame) return;
+  overlays.setSurface(surface);
+});
+ipcMain.on("hog:overlay", (event, message) => {
+  if (overlays) overlays.onMessage(event.sender, message);
 });
 ipcMain.on("hog:page-scripts", (event, href) => {
   const scripts = [];
-  if (EDGE_GRIP_SCRIPT) scripts.push(EDGE_GRIP_SCRIPT);
   if (DAPP_PROVIDER_SCRIPT && policy.dappProviderAllowed(href)) scripts.push(DAPP_PROVIDER_SCRIPT);
   event.returnValue = scripts;
 });
