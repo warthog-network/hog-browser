@@ -15,7 +15,8 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@ghostery/adblocker-electron": "^2.20.3"
+    "@ghostery/adblocker-electron": "^2.20.3",
+    "tldts-experimental": "^7.5.2"
   },
   "devDependencies": {
     "electron": "45.3.2",
@@ -67,7 +68,12 @@
           "Comment": "Preview of Hog on Chromium, side by side with Hog Browser"
         }
       },
-      "syncDesktopName": true
+      "syncDesktopName": true,
+      "mimeTypes": [
+        "x-scheme-handler/http",
+        "x-scheme-handler/https",
+        "text/html"
+      ]
     },
     "deb": {
       "packageName": "hog-chromium-preview",
