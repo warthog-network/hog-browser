@@ -89,6 +89,7 @@ ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
     <div>Network <b id="s-net">-</b></div><div>Height <b id="s-height">-</b></div>
     <div>Miners <b id="s-miners">0</b></div><div>Jobs <b id="s-jobs">0</b></div>
     <div>Blocks found <b id="s-blocks">0</b></div><div>Rejected <b id="s-rejected">0</b></div>
+    <div>Stale (already found) <b id="s-stale">0</b></div><div>Early next jobs <b id="s-early">0</b></div>
   </div>
   <div class="msg" id="last"></div>
   <table id="workers" hidden style="width:100%;border-collapse:collapse;margin-top:8px;font-size:12px">
@@ -122,6 +123,9 @@ ol { margin: 6px 0 0 18px; padding: 0; color: #c8c3b8; font-size: 12.5px; }
     $("s-height").textContent = s.height || "-";
     $("s-miners").textContent = s.miners; $("s-jobs").textContent = s.jobs;
     $("s-blocks").textContent = s.blocks; $("s-rejected").textContent = s.rejected;
+    $("s-stale").textContent = s.stale || 0;
+    $("s-early").textContent = s.optimisticOff ? "off" : (s.optimisticJobs || 0);
+    $("s-early").title = s.optimisticOff ? "Early next jobs are off: " + s.optimisticOff : "Next jobs sent as soon as a block was submitted, before the node tab saved it";
     $("last").textContent = s.lastResult || "";
     $("tailnet").checked = !!s.allowTailnet;
     var tl = s.tailnetListening || [];

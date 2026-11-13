@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { MINING_NETWORKS, bzminerCommand, bzminerForOs, createMiningRelay, pageRelayScript, resolveMiningNetwork } from "../mining.mjs";
-import { createStratumBridge, isWarthogAddress } from "../stratum.mjs";
+import { createStratumBridge, headHeights, isWarthogAddress } from "../stratum.mjs";
 import { controlPage } from "./control-page.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "../tailnet.mjs";
 
@@ -229,8 +229,32 @@ export function openInBrowser(url) {
   } catch {}
 }
 
+/** Public nodes for the ready gate's network tip (the ones Hog's wallet uses). */
+export const PUBLIC_NODES = {
+  defi: "https://warthog-defitestnet.duckdns.org",
+  mainnet: "https://warthognode.duckdns.org",
+};
+
 /**
- * @param {{ pagePort?: number, controlPort?: number, stratumPort?: number, configDir?: string,
+ * The network tip from its public node, for the mining ready gate (as Hog).
+ * 0 if it cannot be read; the gate then falls back to the tab's own checkpoint.
+ * @param {string} key "defi" or "mainnet"
+ */
+export async function publicTipHeight(key, doFetch = fetch) {
+  const base = PUBLIC_NODES[key];
+  if (!base) return 0;
+  try {
+    const response = await doFetch(`${base}/chain/head`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return 0;
+    return headHeights(await response.json()).height;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * @param {{ pagePort?: number, controlPort?: number, stratumPort?: number, configDir?: string, optimisticWork?: boolean,
+ *   getPublicTip?: (key: string) => Promise<number>,
  *   nodeDirs?: { defi: string, mainnet: string }, origin?: string, fetchImpl?: typeof fetch, log?: (s: string) => void }} [opts]
  */
 export function createHelper(opts = {}) {
@@ -253,12 +277,17 @@ export function createHelper(opts = {}) {
     token: relayToken(cfgDir),
     pageOrigin,
     network: () => network()?.page || "",
+    // Same ready gate as Hog: no template until the node has caught up.
+    checkTemplate: (result) => stratum.templateBlocked(result, network()),
   });
   function network() {
     return resolveMiningNetwork(state.network, relay.getPageNetwork());
   }
   const findTailnet = opts.findTailnet ?? tailnetAddresses;
-  const stratum = createStratumBridge({ call: relay.call, getNetwork: network, findTailnet });
+  const getPublicTip = opts.getPublicTip ?? ((key) => publicTipHeight(key, doFetch));
+  // Optimistic work (next job sent as soon as a block is submitted, before the
+  // tab has saved it) is on, as in Hog 0.1.38; --no-optimistic-work turns it off.
+  const stratum = createStratumBridge({ call: relay.call, getNetwork: network, findTailnet, getPublicTip, optimisticWork: opts.optimisticWork ?? true });
   let dnsName = "";
   let dnsFor = "";
   function refreshDnsName() {
@@ -499,7 +528,7 @@ const isMain = (() => {
 
 if (isMain || process.env.WARTHOG_HELPER_MAIN === "1") {
   if (process.argv.includes("--help")) {
-    console.log("warthog-mining-helper [--page-port 43180] [--control-port 43181] [--stratum-port 3456] [--no-open]");
+    console.log("warthog-mining-helper [--page-port 43180] [--control-port 43181] [--stratum-port 3456] [--no-open] [--no-optimistic-work]");
     process.exit(0);
   }
   const controlPort = portArg("--control-port", "WARTHOG_HELPER_CONTROL_PORT", DEFAULT_CONTROL_PORT);
@@ -509,6 +538,7 @@ if (isMain || process.env.WARTHOG_HELPER_MAIN === "1") {
     pagePort: portArg("--page-port", "WARTHOG_HELPER_PAGE_PORT", DEFAULT_PAGE_PORT),
     controlPort,
     stratumPort: portArg("--stratum-port", "WARTHOG_HELPER_STRATUM_PORT", DEFAULT_STRATUM_PORT),
+    optimisticWork: !process.argv.includes("--no-optimistic-work") && process.env.WARTHOG_HELPER_OPTIMISTIC_WORK !== "0",
     onQuit: () => quit(),
   });
   helper.start().then(() => {

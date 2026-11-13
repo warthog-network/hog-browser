@@ -57,7 +57,20 @@ this computer's MagicDNS name (and the IP as a fallback), e.g.
 (`bzminer.exe ...` on Windows). Give each rig its own `-r` name; the control
 page lists every rig with its shares, blocks and rejects.
 
-Options: `--page-port`, `--control-port`, `--stratum-port`, `--no-open`.
+### Fewer stale blocks (early next job)
+
+A node in a browser tab takes about half a second to save each block it is
+given. Without help BzMiner would keep hashing the old height during that time
+and many of its next solutions would come back stale ("block already found").
+As in Hog 0.1.38, when BzMiner submits a block the helper sends the next-height
+job straight away, built from the solved header, before the tab has saved it.
+It only does this when the block holds just the reward and the next target and
+reward are certain (not across a retarget or halving). If the tab refuses the
+block, that job is taken back; if a block on such a job is refused for another
+reason, early jobs turn off until the helper restarts. The control page shows
+the count under **Early next jobs**. `--no-optimistic-work` turns it off.
+
+Options: `--page-port`, `--control-port`, `--stratum-port`, `--no-open`, `--no-optimistic-work`.
 If Hog's own solo mining is on, it already holds port 3456: turn one off or
 pass `--stratum-port`.
 
