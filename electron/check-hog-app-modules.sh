@@ -15,6 +15,25 @@ check_dir() {
   echo "ok ${dir}/node_modules/ws"
 }
 
+# Write the archive listing to a file, then grep it. `grep -q` in a pipeline
+# exits early, which SIGPIPEs dpkg-deb/unzip and looks like a miss under pipefail.
+check_listing() {
+  local desc="$1"
+  local file="$2"
+  local line=""
+  while IFS= read -r row; do
+    case "$row" in
+      *resources/hog-app/node_modules/ws/*) line="$row"; break ;;
+    esac
+  done < "$file"
+  if [ -z "$line" ]; then
+    echo "${desc} is missing resources/hog-app/node_modules/ws" >&2
+    exit 1
+  fi
+  echo "ok ${desc} contains resources/hog-app/node_modules/ws"
+  echo "$line"
+}
+
 case "${target}" in
   linux)
     check_dir "${DIST}/linux-unpacked/resources/hog-app"
@@ -24,22 +43,20 @@ case "${target}" in
       echo "no .deb in ${DIST}" >&2
       exit 1
     fi
-    if ! dpkg-deb -c "${debs[0]}" | grep -q 'resources/hog-app/node_modules/ws/'; then
-      echo "${debs[0]} is missing resources/hog-app/node_modules/ws" >&2
-      exit 1
-    fi
-    echo "ok $(basename "${debs[0]}") contains resources/hog-app/node_modules/ws"
+    listing="$(mktemp)"
+    dpkg-deb -c "${debs[0]}" > "$listing"
+    check_listing "$(basename "${debs[0]}")" "$listing"
+    rm -f "$listing"
     ;;
   win)
     check_dir "${DIST}/win-unpacked/resources/hog-app"
     shopt -s nullglob
     zips=("${DIST}"/*.zip)
     if [ ${#zips[@]} -gt 0 ]; then
-      if ! unzip -l "${zips[0]}" | grep -q 'resources/hog-app/node_modules/ws/'; then
-        echo "${zips[0]} is missing resources/hog-app/node_modules/ws" >&2
-        exit 1
-      fi
-      echo "ok $(basename "${zips[0]}") contains resources/hog-app/node_modules/ws"
+      listing="$(mktemp)"
+      unzip -l "${zips[0]}" > "$listing"
+      check_listing "$(basename "${zips[0]}")" "$listing"
+      rm -f "$listing"
     fi
     ;;
   *)
