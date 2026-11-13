@@ -9,8 +9,12 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
-import { createStratumBridge, isWarthogAddress, stratumPort } from "./stratum.mjs";
+import { createStratumBridge, headHeights, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
+import { createFilesService, handleFilesRequest } from "./files.mjs";
+import { execFile } from "node:child_process";
+import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
+import { canPrompt, changeFirewall, createLanForwarder, createLanState, lanAddresses, lanStatus, runUfw, ufwEnabled } from "./jellyfin-lan.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
 const PORT = Number(process.env.HOG_PORT || 4188);
@@ -39,8 +43,151 @@ const SITE_HEADERS = {
   "cross-origin-resource-policy": "cross-origin",
 };
 let siteCursor = SITE_PORT_MIN;
+// The hog window asks this on launch. A server left over from before an update
+// reports its old version, and the window replaces it instead of attaching.
+const SERVER_VERSION = (() => {
+  try {
+    return String(JSON.parse(readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf8")).version || "");
+  } catch {
+    return "";
+  }
+})();
+export function serverVersionInfo() {
+  return { app: "hog-browser", version: SERVER_VERSION, pid: process.pid };
+}
 
-// ---------- Solo mining (BzMiner -> 127.0.0.1:HOG_MINING_PORT -> node tab) ----------
+// ---------- hog://files (confined to ~/hog-shares and folders the user adds) ----------
+const FILES = createFilesService({
+  dataDir: process.env.HOG_DATA || join(homedir(), ".local/share/hog-browser"),
+  sharesDir: process.env.HOG_SHARES_DIR || join(homedir(), "hog-shares"),
+  configFile: process.env.HOG_FILES_CONFIG || join(homedir(), ".local/share/hog-browser/files.json"),
+});
+
+// ---------- Phone app (tailnet): opt-in API for the Android companion ----------
+const APP_ROOT = fileURLToPath(new URL("./", import.meta.url));
+const HOG_DATA_DIR = process.env.HOG_DATA || join(homedir(), ".local/share/hog-browser");
+const MOBILE_STATE = createMobileState({ file: process.env.HOG_MOBILE_CONFIG || join(HOG_DATA_DIR, "mobile.json") });
+let mobileError = "";
+
+/** Container list and start/stop/restart through mobile_guard.py (Guard rules). */
+export function mobileContainers(action, name = "", { python = process.env.HOG_PYTHON || "python3", timeoutMs = 90_000 } = {}) {
+  const args = [join(APP_ROOT, "mobile_guard.py"), action];
+  if (name) args.push(name);
+  return new Promise((resolve) => {
+    execFile(python, args, { cwd: APP_ROOT, timeout: timeoutMs, maxBuffer: 2_000_000, env: { ...process.env, HOG_DATA: HOG_DATA_DIR } }, (error, stdout) => {
+      try {
+        const payload = JSON.parse(String(stdout || "").trim().split("\n").pop() || "{}");
+        if (payload && typeof payload === "object" && Array.isArray(payload.items)) {
+          resolve(payload);
+          return;
+        }
+      } catch {
+        // fall through
+      }
+      resolve({ ok: false, error: error?.killed ? "Docker took too long." : "Containers are not available right now.", docker: false, items: [], jellyfinUrl: "" });
+    });
+  });
+}
+
+function mobileHogInfo() {
+  const ipv4 = tailnetAddresses().find((a) => a.family === 4)?.address || "";
+  if (ipv4) refreshTailnetName(ipv4);
+  return { name: "hog", version: SERVER_VERSION, dnsName: tailnetDnsName, ip: ipv4, port: MOBILE_LISTENER.status().port || mobilePort() };
+}
+
+const MOBILE_API = createMobileApi({
+  state: MOBILE_STATE,
+  files: FILES,
+  mining: () => miningStatus(miningEnabled),
+  containers: (action, name) => mobileContainers(action, name),
+  info: mobileHogInfo,
+});
+const MOBILE_LISTENER = createMobileListener({ handler: MOBILE_API, findTailnet: process.env.HOG_MOBILE_NO_TAILNET === "1" ? () => [] : tailnetAddresses });
+
+async function setMobile(enabled) {
+  mobileError = "";
+  if (!enabled) {
+    await MOBILE_LISTENER.stop();
+    return;
+  }
+  try {
+    await MOBILE_LISTENER.start(mobilePort());
+  } catch (error) {
+    mobileError = error?.code === "EADDRINUSE"
+      ? `Port ${mobilePort()} is already in use. Set HOG_MOBILE_PORT to another port.`
+      : (error instanceof Error ? error.message : String(error));
+  }
+}
+
+// ---------- Jellyfin on the home network (opt-in, LAN IPv4 only, never 0.0.0.0) ----------
+const JELLYFIN_LAN_STATE = createLanState({ file: process.env.HOG_JELLYFIN_LAN_CONFIG || join(HOG_DATA_DIR, "jellyfin-lan.json") });
+const JELLYFIN_LAN = createLanForwarder({
+  port: Number(process.env.HOG_JELLYFIN_LAN_PORT || 8096),
+  targetPort: Number(process.env.HOG_JELLYFIN_PORT || 8096),
+  ...(process.env.HOG_JELLYFIN_LAN_NO_LAN === "1" ? { findLan: () => [] } : {}),
+});
+
+async function setJellyfinLan(enabled) {
+  if (enabled) await JELLYFIN_LAN.start();
+  else await JELLYFIN_LAN.stop();
+}
+
+// Swappable in tests; the real one runs pkexec ufw with a fixed argv.
+const JELLYFIN_FIREWALL = {
+  run: runUfw,
+  enabled: () => ufwEnabled(process.env.HOG_UFW_CONF || "/etc/ufw/ufw.conf"),
+  prompt: () => canPrompt(),
+  findLan: process.env.HOG_JELLYFIN_LAN_NO_LAN === "1" ? () => [] : lanAddresses,
+};
+
+/** What Settings → Containers → Jellyfin → Home network access shows. */
+export function jellyfinLanStatus() {
+  return lanStatus(JELLYFIN_LAN_STATE, JELLYFIN_LAN, {
+    targetPort: Number(process.env.HOG_JELLYFIN_PORT || 8096),
+    findLan: () => JELLYFIN_FIREWALL.findLan(),
+    firewall: () => JELLYFIN_FIREWALL.enabled(),
+    prompt: () => JELLYFIN_FIREWALL.prompt(),
+  });
+}
+
+/** "Allow through firewall" / "Remove firewall rule": polkit asks for the password, never Hog. */
+async function jellyfinFirewall(remove) {
+  if (!JELLYFIN_FIREWALL.enabled()) return { ok: false, error: "The ufw firewall is off, so there is nothing to change." };
+  if (!JELLYFIN_FIREWALL.prompt()) return { ok: false, error: "This computer cannot show a password prompt (pkexec is missing). Run the command shown in a terminal." };
+  return changeFirewall(JELLYFIN_LAN_STATE, {
+    remove,
+    addresses: JELLYFIN_FIREWALL.findLan(),
+    port: JELLYFIN_LAN.status().port || Number(process.env.HOG_JELLYFIN_LAN_PORT || 8096),
+    run: (rule, opts) => JELLYFIN_FIREWALL.run(rule, opts),
+  });
+}
+
+/** What Settings → Tailscale → Phone app shows. Never includes tokens or hashes. */
+export function mobileStatus() {
+  const listener = MOBILE_LISTENER.status();
+  const hog = mobileHogInfo();
+  const pairing = MOBILE_STATE.pairingInfo();
+  const port = listener.port || mobilePort();
+  let pair = null;
+  if (pairing) {
+    const uri = pairUri({ host: hog.dnsName, ip: hog.ip, port, code: pairing.plain });
+    pair = { code: pairing.code, expiresAt: pairing.expiresAt, triesLeft: pairing.tries, uri, qr: qrSvg(uri) };
+  }
+  return {
+    ok: true,
+    enabled: MOBILE_STATE.enabled,
+    listening: listener.listening,
+    tailnetListening: listener.tailnetHosts,
+    port,
+    dnsName: hog.dnsName,
+    ip: hog.ip,
+    address: hog.dnsName || hog.ip,
+    error: mobileError || listener.error,
+    devices: MOBILE_STATE.devices(),
+    pairing: pair,
+  };
+}
+
 const MINING_STATE_FILE = join(homedir(), ".local/share/hog-browser/mining.json");
 // "auto" follows the network the node tab is running; "defi" / "mainnet" pin it.
 let miningNetworkSetting = "auto";
@@ -49,11 +196,29 @@ const MINING = createMiningRelay({
   token: randomBytes(24).toString("hex"),
   pageOrigin: `http://${PAGE_HOST}:${NODE_PORT}`,
   network: () => currentMiningNetwork()?.page || "",
+  // Same ready gate as stratum: no template until the node has caught up.
+  checkTemplate: (result) => STRATUM.templateBlocked(result, currentMiningNetwork()),
 });
 function currentMiningNetwork() {
   return resolveMiningNetwork(miningNetworkSetting, MINING.getPageNetwork());
 }
-const STRATUM = createStratumBridge({ call: MINING.call, getNetwork: currentMiningNetwork });
+const STRATUM = createStratumBridge({ call: MINING.call, getNetwork: currentMiningNetwork, getPublicTip: publicTipHeight });
+/**
+ * The network tip from its public node (the same node Hog's wallet uses), for
+ * the mining ready gate. 0 if it cannot be read.
+ * @param {string} key "defi" or "mainnet"
+ */
+async function publicTipHeight(key) {
+  const base = NETWORKS[key];
+  if (!base) return 0;
+  try {
+    const response = await fetch(`${base}/chain/head`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return 0;
+    return headHeights(await response.json()).height;
+  } catch {
+    return 0;
+  }
+}
 let miningError = "";
 // WASM node files Hog serves itself instead of the live site's. The bundled builds
 // (node-defi/ and node-mainnet/, see their READMEs) add only POST /chain/append so
@@ -689,6 +854,55 @@ async function publish(runtime, finalUrl, html, title, contentType) {
   };
 }
 
+const DOWNLOAD_TYPES = new Set([
+  "application/octet-stream",
+  "application/vnd.android.package-archive",
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/gzip",
+  "application/x-gzip",
+  "application/x-tar",
+  "application/x-gtar",
+  "application/x-xz",
+  "application/x-bzip2",
+  "application/zstd",
+  "application/x-7z-compressed",
+  "application/x-rar-compressed",
+  "application/vnd.rar",
+  "application/x-debian-package",
+  "application/vnd.debian.binary-package",
+  "application/x-rpm",
+  "application/x-msdownload",
+  "application/x-msi",
+  "application/x-ms-installer",
+  "application/x-apple-diskimage",
+  "application/x-iso9660-image",
+  "application/java-archive",
+  "application/x-executable",
+  "application/x-elf",
+  "application/x-sharedlib",
+  "application/x-appimage",
+  "application/pdf",
+]);
+
+export function isDownloadResponse(contentType, disposition) {
+  if (String(disposition || "").split(";")[0].trim().toLowerCase() === "attachment") return true;
+  const type = String(contentType || "").split(";")[0].trim().toLowerCase();
+  return DOWNLOAD_TYPES.has(type);
+}
+
+export function downloadPageHtml(linkUrl, finalUrl) {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(linkUrl).pathname.split("/").pop() || "");
+  } catch {}
+  if (!name) {
+    try { name = decodeURIComponent(new URL(finalUrl).pathname.split("/").pop() || ""); } catch {}
+  }
+  name = name || "this file";
+  return `<!doctype html><title>File download</title><body style="margin:0;padding:32px;background:#0b0b0d;color:#f4f4f5;font:15px/1.5 system-ui,sans-serif"><p>${escapeText(name)} is a file, not a page.</p><p><a style="color:#fdb913" href="${escapeAttr(linkUrl)}" target="_blank" rel="noopener noreferrer" download>Download it in a new window</a></p></body>`;
+}
+
 async function fetchPage(start, options = {}, runtime) {
   let current = start;
   let verb = String(options.method || "GET").toUpperCase() === "POST" ? "POST" : "GET";
@@ -722,6 +936,13 @@ async function fetchPage(start, options = {}, runtime) {
     }
     const type = (response.headers.get("content-type") || "").toLowerCase();
     const finalUrl = response.url || current.href;
+    if (isDownloadResponse(type, response.headers.get("content-disposition"))) {
+      // A file (APK, archive, attachment). Never read it as text; that drew
+      // its raw bytes in the tab. Offer the original link instead.
+      try { await response.body?.cancel(); } catch {}
+      const html = downloadPageHtml(start.href, finalUrl);
+      return publish(runtime, current.href, html, "File download", "text/html");
+    }
     if (type.startsWith("image/")) {
       const shown = new URL(finalUrl);
       const html = `<!doctype html><title>${escapeAttr(finalUrl)}</title><body style="margin:0;background:#111"><img alt="" src="${escapeAttr(shown.pathname + shown.search)}" style="max-width:100%"></body>`;
@@ -1455,9 +1676,82 @@ async function handle(req, res, runtime) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/__hog/version" && hostName(req) === WALLET_HOST) {
+      send(res, 200, serverVersionInfo());
+      return;
+    }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
-    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining") && !walletRequest) {
+    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile" || url.pathname === "/api/jellyfin-lan") && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
+      return;
+    }
+
+    if (url.pathname === "/api/files" || url.pathname.startsWith("/api/files/")) {
+      if (!walletRequest) {
+        send(res, 403, { ok: false, error: "Open Hog to use Files" });
+        return;
+      }
+      const address = req.socket.localPort || PORT;
+      await handleFilesRequest(FILES, req, res, url, { origin: `http://${WALLET_HOST}:${address}` });
+      return;
+    }
+
+    if (url.pathname === "/api/mobile" && req.method === "GET") {
+      send(res, 200, mobileStatus());
+      return;
+    }
+    if (url.pathname === "/api/mobile" && req.method === "POST") {
+      if (req.headers["x-hog-mobile"] !== "1") {
+        send(res, 403, { ok: false, error: "Open Hog to change this" });
+        return;
+      }
+      const payload = await readJson(req);
+      try {
+        if (payload.enabled !== undefined) {
+          if (typeof payload.enabled !== "boolean") throw new Error("enabled must be true or false");
+          if (payload.enabled !== MOBILE_STATE.enabled) {
+            MOBILE_STATE.setEnabled(payload.enabled);
+            await setMobile(payload.enabled);
+          }
+        }
+        if (payload.action === "pair") MOBILE_STATE.startPairing();
+        else if (payload.action === "cancel-pair") MOBILE_STATE.cancelPairing();
+        else if (payload.action === "revoke") MOBILE_STATE.revoke(payload.id);
+        else if (payload.action !== undefined) throw new Error("action must be pair, cancel-pair or revoke");
+      } catch (error) {
+        send(res, 400, { ...mobileStatus(), ok: false, error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      send(res, 200, mobileStatus());
+      return;
+    }
+
+    if (url.pathname === "/api/jellyfin-lan" && req.method === "GET") {
+      send(res, 200, await jellyfinLanStatus());
+      return;
+    }
+    if (url.pathname === "/api/jellyfin-lan" && req.method === "POST") {
+      if (req.headers["x-hog-lan"] !== "1") {
+        send(res, 403, { ok: false, error: "Open Hog to change this" });
+        return;
+      }
+      const payload = await readJson(req);
+      if (payload.action === "firewall-allow" || payload.action === "firewall-remove") {
+        const result = await jellyfinFirewall(payload.action === "firewall-remove");
+        send(res, 200, { ...(await jellyfinLanStatus()), ok: result.ok, error: result.error || "", notice: result.notice || "", cancelled: Boolean(result.cancelled) });
+        return;
+      }
+      if (payload.action !== undefined) {
+        send(res, 400, { ...(await jellyfinLanStatus()), ok: false, error: "action must be firewall-allow or firewall-remove" });
+        return;
+      }
+      if (typeof payload.enabled !== "boolean") {
+        send(res, 400, { ...(await jellyfinLanStatus()), ok: false, error: "enabled must be true or false" });
+        return;
+      }
+      JELLYFIN_LAN_STATE.setEnabled(payload.enabled);
+      await setJellyfinLan(payload.enabled);
+      send(res, 200, await jellyfinLanStatus());
       return;
     }
 
@@ -1600,6 +1894,8 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
     for (const child of runtime.siteServers) child.close();
     STRATUM.stop();
     MINING.stop();
+    MOBILE_LISTENER.stop();
+    JELLYFIN_LAN.stop();
     return closeMain(callback);
   };
   return new Promise((resolve) => {
@@ -1607,11 +1903,26 @@ export function startServer(port = PORT, { persistSites = false } = {}) {
   });
 }
 
+/** Test hooks for the phone app API. */
+export const mobileInternals = { state: MOBILE_STATE, listener: MOBILE_LISTENER, api: MOBILE_API, setMobile };
+/** Test hooks for Jellyfin home network access. */
+export const jellyfinLanInternals = { state: JELLYFIN_LAN_STATE, forwarder: JELLYFIN_LAN, setJellyfinLan, firewall: JELLYFIN_FIREWALL };
+
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const server = await startServer(PORT, { persistSites: true });
   ({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting, tailnet: miningTailnet } = readMiningState());
   if (miningEnabled) await setMining(true);
+  if (MOBILE_STATE.enabled) {
+    await setMobile(true);
+    const phone = MOBILE_LISTENER.status();
+    console.log(phone.listening ? `Hog phone app API on ${phone.hosts.join(", ")} port ${phone.port}` : `Hog phone app API is off: ${mobileError}`);
+  }
+  if (JELLYFIN_LAN_STATE.enabled) {
+    await setJellyfinLan(true);
+    const lan = JELLYFIN_LAN.status();
+    console.log(lan.hosts.length ? `Jellyfin on the home network at ${lan.hosts.map((h) => `http://${h}:${lan.port}`).join(", ")}` : `Jellyfin home network access is waiting: ${lan.error}`);
+  }
   if (process.env.HOG_MINING === "1" && !miningEnabled) {
     miningEnabled = true;
     await setMining(true);

@@ -102,7 +102,7 @@ test("stratum follows a network switch with a clean job and submits to the job's
     if (method === "GET") return { ok: true, result: { code: 0, data: page === "official1" ? MAINNET : DEFI } };
     return { ok: true, result: { code: 0 } };
   };
-  const bridge = createStratumBridge({ call, getNetwork: () => net, pollMs: 40 });
+  const bridge = createStratumBridge({ call, getNetwork: () => net, pollMs: 40, getPublicTip: async (key) => (key === "mainnet" ? MAINNET.height : DEFI.height) - 1 });
   const port = await bridge.start(0);
   const c = client(port);
   try {

@@ -16,6 +16,17 @@ class ChromeBackgroundTest(unittest.TestCase):
         # Web pages keep the white default that sites expect.
         self.assertIn("#ffffff", parsed)
 
+    def test_intro_flash_matches_chrome_view_background(self):
+        """Before the page paints, the GTK view shows the same black as the intro flash."""
+        retro = (ROOT / "public" / "retro.css").read_text()
+        theme_bg = re.search(r"--bg:\s*(#[0-9a-fA-F]{6});", retro).group(1).lower()
+        app_css = (ROOT / "public" / "app.css").read_text()
+        flash = re.search(r"\.boot-flash \{[^}]*background:\s*(#[0-9a-fA-F]{6})", app_css).group(1).lower()
+        self.assertEqual(flash, theme_bg)
+        hog = (ROOT / "hog").read_text()
+        parsed = [value.lower() for value in re.findall(r'background\.parse\("(#[0-9a-fA-F]{6})"\)', hog)]
+        self.assertIn(flash, parsed)
+
     def test_in_page_menu_uses_theme_palette(self):
         hog = (ROOT / "hog").read_text()
         self.assertNotIn("255,79,216", hog)

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from guard import Guard, allowed_browser_open_url, allowed_tailscale_open_url
 from bookmark_files import bookmark_backup_path, read_bookmark_file, write_bookmark_backup, write_bookmark_file
+from server_guard import replace_stale_server
 
 import gi
 
@@ -43,6 +44,111 @@ URL = f"http://127.0.0.1:{PORT}/"
 DATA = Path(os.environ.get("HOG_DATA", Path.home() / ".local" / "share" / "hog-browser"))
 NODE_PORT = 43100
 APP_ID = os.environ.get("HOG_APP_ID", "org.hog.Browser")
+
+
+def files_download_uri(uri, port=None):
+    """Whether a chrome download is a hog://files download from Hog's own server."""
+    port = PORT if port is None else port
+    try:
+        parts = urllib.parse.urlsplit(str(uri or ""))
+    except ValueError:
+        return False
+    if parts.scheme != "http" or parts.hostname != "127.0.0.1" or parts.port != int(port):
+        return False
+    if parts.path != "/api/files/raw" or parts.username or parts.password:
+        return False
+    query = urllib.parse.parse_qs(parts.query)
+    return query.get("download") == ["1"] and bool(query.get("root"))
+
+
+def download_name(suggested):
+    name = os.path.basename(str(suggested or "").replace("\\", "/")).strip()
+    name = "".join(ch for ch in name if ch not in "\x00\r\n")
+    if name in {"", ".", ".."}:
+        return "download"
+    return name[:255]
+
+
+# Page responses with these types are files to save, never pages to draw.
+# GitHub release assets (APK, .deb, zip) come back as one of these after the
+# redirect to objects.githubusercontent.com / release-assets.githubusercontent.com.
+DOWNLOAD_MIME_TYPES = frozenset({
+    "application/octet-stream",
+    "application/vnd.android.package-archive",
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/gzip",
+    "application/x-gzip",
+    "application/x-tar",
+    "application/x-gtar",
+    "application/x-xz",
+    "application/x-bzip2",
+    "application/zstd",
+    "application/x-7z-compressed",
+    "application/x-rar-compressed",
+    "application/vnd.rar",
+    "application/x-debian-package",
+    "application/vnd.debian.binary-package",
+    "application/x-rpm",
+    "application/x-msdownload",
+    "application/x-msi",
+    "application/x-ms-installer",
+    "application/x-apple-diskimage",
+    "application/x-iso9660-image",
+    "application/java-archive",
+    "application/x-executable",
+    "application/x-elf",
+    "application/x-sharedlib",
+    "application/x-appimage",
+})
+
+
+def disposition_is_attachment(value):
+    """Content-Disposition: attachment (any case, any parameters)."""
+    head = str(value or "").split(";", 1)[0].strip().lower()
+    return head == "attachment"
+
+
+def response_wants_download(mime, disposition="", can_show=True):
+    """Whether a main-frame page response should be saved instead of shown."""
+    if disposition_is_attachment(disposition):
+        return True
+    kind = str(mime or "").split(";", 1)[0].strip().lower()
+    if not kind:
+        return False
+    if kind in DOWNLOAD_MIME_TYPES:
+        return True
+    return not can_show
+
+
+def page_download_name(suggested, uri=""):
+    """A safe file name for a page download: no folders, not hidden."""
+    raw = str(suggested or "").strip()
+    if not raw:
+        try:
+            raw = urllib.parse.unquote(urllib.parse.urlsplit(str(uri or "")).path.rsplit("/", 1)[-1])
+        except ValueError:
+            raw = ""
+    name = download_name(raw).lstrip(". ").strip()
+    return name or "download"
+
+
+def unique_download_path(folder, name, taken=()):
+    """folder/name, or folder/name (1).ext and so on. Never an existing file."""
+    folder = str(folder)
+    base, ext = os.path.splitext(name)
+    # Keep .tar.gz style double extensions together.
+    if base.lower().endswith(".tar"):
+        base, ext = base[:-4], base[-4:] + ext
+    if not base:
+        base, ext = name, ""
+    taken = set(taken)
+    for index in range(0, 10000):
+        candidate = name if index == 0 else f"{base} ({index}){ext}"
+        path = os.path.join(folder, candidate)
+        if path not in taken and not os.path.lexists(path):
+            return path
+    raise FileExistsError("No free download name")
 
 
 def sandbox_available():
@@ -70,6 +176,42 @@ def harden_page_context(context, manager=None):
         manager.set_itp_enabled(True)
     except Exception:
         pass
+
+
+# Ubuntu's WebKitGTK 2.52 has no accelerated backing store on NVIDIA, and a page
+# that starts a view transition (a YouTube watch page does) then makes the web
+# process enter compositing mode anyway. The UI process dereferences the missing
+# store and the whole Hog window segfaults (bugs.webkit.org 321683 / 323949,
+# Launchpad 2167164). With view transitions off, document.startViewTransition is
+# undefined and sites fall back to a plain update.
+CRASHY_FEATURES = ("ViewTransitions", "CrossDocumentViewTransitions")
+
+
+def disable_crashy_features(settings):
+    turned_off = []
+    try:
+        features = settings.get_all_features()
+    except Exception:
+        return turned_off
+    for index in range(features.get_length()):
+        feature = features.get(index)
+        if feature.get_identifier() in CRASHY_FEATURES:
+            try:
+                settings.set_feature_enabled(feature, False)
+                turned_off.append(feature.get_identifier())
+            except Exception:
+                pass
+    return turned_off
+
+
+def crash_message(reason):
+    """Text for a tab whose page process died. The rest of Hog keeps running."""
+    try:
+        if reason == WebKit2.WebProcessTerminationReason.EXCEEDED_MEMORY_LIMIT:
+            return "This page used too much memory and was stopped. Reload to try again."
+    except Exception:
+        pass
+    return "This page stopped working. Reload to try again."
 
 
 def port_open(port):
@@ -524,6 +666,176 @@ EDGE_GRIP_SCRIPT = r"""
 """
 
 
+def downloads_folder():
+    override = os.environ.get("HOG_DOWNLOADS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    folder = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+    return Path(folder) if folder else Path.home() / "Downloads"
+
+
+class PageDownloads:
+    """Files from page tabs go straight to ~/Downloads under a name that never
+    replaces an existing file. The chrome shows progress, then Show in folder."""
+
+    def __init__(self, tell_chrome):
+        self.tell_chrome = tell_chrome
+        self.items = {}
+        self.paths = {}
+        self.next_id = 1
+
+    def emit(self, item_id, state, **extra):
+        item = self.items.get(item_id)
+        if item is None:
+            return
+        payload = {"id": item_id, "state": state, "name": item.get("name") or "download"}
+        payload.update(extra)
+        self.tell_chrome(f"window.__hogDownload && window.__hogDownload({json.dumps(payload)})")
+
+    def on_started(self, _context, download):
+        item_id = str(self.next_id)
+        self.next_id += 1
+        try:
+            request = download.get_request()
+            uri = request.get_uri() if request is not None else ""
+        except Exception:
+            uri = ""
+        self.items[item_id] = {"download": download, "name": "", "path": "", "uri": uri, "shown": -1.0, "done": False}
+        download.connect("decide-destination", self.on_destination, item_id)
+        download.connect("notify::estimated-progress", self.on_progress, item_id)
+        download.connect("failed", self.on_failed, item_id)
+        download.connect("finished", self.on_finished, item_id)
+
+    def on_destination(self, download, suggested, item_id):
+        item = self.items.get(item_id)
+        if item is None:
+            download.cancel()
+            return True
+        name = page_download_name(suggested, item.get("uri"))
+        folder = downloads_folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path = unique_download_path(folder, name, self.paths.values())
+        except Exception:
+            item["name"] = name
+            self.emit(item_id, "failed", error="Hog could not use your Downloads folder.")
+            item["done"] = True
+            download.cancel()
+            return True
+        item["name"] = os.path.basename(path)
+        item["path"] = path
+        self.paths[item_id] = path
+        download.set_allow_overwrite(False)
+        download.set_destination(GLib.filename_to_uri(path, None))
+        self.emit(item_id, "started", progress=0)
+        return True
+
+    def on_progress(self, download, _pspec, item_id):
+        item = self.items.get(item_id)
+        if item is None or item["done"] or not item["path"]:
+            return
+        try:
+            progress = float(download.get_estimated_progress())
+        except Exception:
+            return
+        if progress < 1.0 and progress - item["shown"] < 0.02:
+            return
+        item["shown"] = progress
+        try:
+            received = int(download.get_received_data_length())
+        except Exception:
+            received = 0
+        self.emit(item_id, "progress", progress=round(progress, 3), received=received)
+
+    def on_failed(self, _download, error, item_id):
+        item = self.items.get(item_id)
+        if item is None or item["done"]:
+            return
+        item["done"] = True
+        self.paths.pop(item_id, None)
+        cancelled = False
+        try:
+            cancelled = error.matches(WebKit2.download_error_quark(), WebKit2.DownloadError.CANCELLED_BY_USER)
+        except Exception:
+            cancelled = False
+        if cancelled:
+            self.emit(item_id, "cancelled")
+        else:
+            message = getattr(error, "message", "") or "The download failed."
+            self.emit(item_id, "failed", error=message[:200])
+
+    def on_finished(self, download, item_id):
+        item = self.items.get(item_id)
+        if item is None or item["done"]:
+            return
+        item["done"] = True
+        self.paths.pop(item_id, None)
+        try:
+            dest = download.get_destination() or ""
+            path = GLib.filename_from_uri(dest)[0] if dest else item["path"]
+        except Exception:
+            path = item["path"]
+        item["path"] = path
+        item["name"] = os.path.basename(path) or item["name"]
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        self.emit(item_id, "done", progress=1, received=size)
+
+    def command(self, command):
+        parts = command.split(":")
+        if len(parts) != 3 or not parts[2].isdigit():
+            return
+        item = self.items.get(parts[2])
+        if item is None:
+            return
+        if parts[1] == "cancel" and not item["done"]:
+            try:
+                item["download"].cancel()
+            except Exception:
+                pass
+        elif parts[1] == "show" and item["done"] and item["path"]:
+            show_in_folder(item["path"])
+
+
+def show_in_folder(path):
+    """Open the file manager on the saved file. The file itself never runs."""
+    if not os.path.exists(path):
+        return
+    uri = GLib.filename_to_uri(path, None)
+    folder_uri = GLib.filename_to_uri(os.path.dirname(path), None)
+
+    def fallback():
+        try:
+            Gio.AppInfo.launch_default_for_uri(folder_uri, None)
+        except Exception:
+            pass
+
+    def done(connection, result):
+        try:
+            connection.call_finish(result)
+        except Exception:
+            fallback()
+
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call(
+            "org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+            "ShowItems",
+            GLib.Variant("(ass)", ([uri], "")),
+            None,
+            Gio.DBusCallFlags.NONE,
+            5000,
+            None,
+            done,
+        )
+    except Exception:
+        fallback()
+
+
 class PageHost:
     """Real WebKit pages over the content area. The wallet stays on the chrome view."""
 
@@ -542,6 +854,7 @@ class PageHost:
         self.grip_paint = None
         self.menu_paint = None
         self.on_grip_move = None
+        self.downloads = PageDownloads(self.tell_chrome)
 
     def widget(self):
         return self.box
@@ -773,6 +1086,7 @@ class PageHost:
         )
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
         harden_page_context(context, manager)
+        self.watch_downloads(context)
         self.shared_context = context
         return context
 
@@ -783,6 +1097,7 @@ class PageHost:
         settings.set_enable_webgl(True)
         settings.set_enable_media(True)
         settings.set_javascript_can_access_clipboard(False)
+        disable_crashy_features(settings)
         try:
             settings.set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.ALWAYS)
         except Exception:
@@ -854,6 +1169,7 @@ class PageHost:
             manager = WebKit2.WebsiteDataManager.new_ephemeral()
             context = WebKit2.WebContext.new_with_website_data_manager(manager)
             harden_page_context(context, manager)
+            self.watch_downloads(context)
         else:
             context = self.shared()
         view = WebKit2.WebView.new_with_context(context)
@@ -866,6 +1182,7 @@ class PageHost:
         except Exception:
             pass
         view.connect("notify::title", self.on_title, tab_id)
+        view.connect("web-process-terminated", self.on_crash, tab_id)
         self.box.add_named(view, tab_id)
         view.show()
         if self.on_view is not None:
@@ -876,7 +1193,10 @@ class PageHost:
 
     def on_decide(self, view, decision, decision_type, tab_id):
         if decision_type == WebKit2.PolicyDecisionType.RESPONSE:
-            decision.use()
+            if self.response_is_download(view, decision):
+                decision.download()
+            else:
+                decision.use()
             return True
         try:
             action = decision.get_navigation_action()
@@ -901,6 +1221,46 @@ class PageHost:
         # Drop those quietly. A page-sized error hides the site the person is reading.
         decision.ignore()
         return True
+
+    def response_is_download(self, view, decision):
+        """Files (APKs, archives, attachments) save to Downloads instead of
+        drawing their bytes in the tab. Only the tab's own page, not frames."""
+        try:
+            if not decision.is_main_frame_main_resource():
+                return False
+        except Exception:
+            pass
+        try:
+            response = decision.get_response()
+        except Exception:
+            return False
+        if response is None:
+            return False
+        try:
+            mime = response.get_mime_type() or ""
+        except Exception:
+            mime = ""
+        disposition = ""
+        try:
+            headers = response.get_http_headers()
+            if headers is not None:
+                disposition = headers.get_one("Content-Disposition") or ""
+        except Exception:
+            disposition = ""
+        kind = mime.split(";", 1)[0].strip().lower()
+        try:
+            can_show = bool(view.can_show_mime_type(kind)) if kind else True
+        except Exception:
+            can_show = True
+        return response_wants_download(kind, disposition, can_show)
+
+    def watch_downloads(self, context):
+        if self.downloads is None:
+            return
+        try:
+            context.connect("download-started", self.downloads.on_started)
+        except Exception:
+            pass
 
     def on_load(self, view, event, tab_id):
         if event == WebKit2.LoadEvent.STARTED:
@@ -933,6 +1293,19 @@ class PageHost:
             loading=False,
         )
         return False
+
+    def on_crash(self, view, reason, tab_id):
+        # Only this tab's page process died. Tell the tab; never close Hog.
+        try:
+            uri = view.get_uri() or ""
+        except Exception:
+            uri = ""
+        print(f"Hog: the page process for tab {tab_id} stopped ({reason}).", file=sys.stderr, flush=True)
+        try:
+            self.emit_state(tab_id, "fail", url=uri, error=crash_message(reason), loading=False)
+        except Exception:
+            pass
+        return True
 
     def on_title(self, view, _pspec, tab_id):
         if view.get_title():
@@ -990,6 +1363,10 @@ class PageHost:
         view.destroy()
 
     def command(self, command):
+        if command.startswith("download:"):
+            if self.downloads is not None:
+                self.downloads.command(command)
+            return True
         if command.startswith("view:"):
             parts = command.split(":")
             if len(parts) < 6:
@@ -1592,6 +1969,9 @@ class Hog(Gtk.Application):
         if command.startswith("bookmarks:"):
             self.on_bookmarks(command)
             return
+        if command == "files:pick-root":
+            self.pick_files_root()
+            return
         if command.startswith("dapp-reply:"):
             if self.pages is not None:
                 self.pages.deliver_dapp_reply(command[len("dapp-reply:"):])
@@ -1828,6 +2208,94 @@ class Hog(Gtk.Application):
             return False
         return True
 
+    def pick_files_root(self):
+        if self.window is None or getattr(self, "_share_dialog", None) is not None:
+            return
+        dialog = Gtk.FileChooserDialog(
+            title="Add a folder to Files",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Add", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        try:
+            dialog.set_current_folder(str(Path.home()))
+        except Exception:
+            pass
+        self._share_dialog = dialog
+
+        def on_response(_dialog, response):
+            path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+            dialog.destroy()
+            self._share_dialog = None
+            if not path or any(ch in path for ch in ("\n", "\r", "\x00")):
+                return
+            try:
+                self.chrome.run_javascript(
+                    f"window.__hogFilesRoot && window.__hogFilesRoot({json.dumps(path)})",
+                    None, None, None,
+                )
+            except Exception:
+                pass
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def on_chrome_download(self, _context, download):
+        try:
+            request = download.get_request()
+            uri = request.get_uri() if request is not None else ""
+        except Exception:
+            uri = ""
+        if not files_download_uri(uri):
+            return
+        download.connect("decide-destination", self.on_files_destination)
+        download.connect("finished", self.on_files_download_done)
+
+    def on_files_destination(self, download, suggested):
+        name = download_name(suggested)
+        dialog = Gtk.FileChooserDialog(
+            title="Save file",
+            parent=self.window,
+            action=Gtk.FileChooserAction.SAVE,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+        dialog.set_local_only(True)
+        dialog.set_do_overwrite_confirmation(True)
+        folder = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) or str(Path.home())
+        try:
+            dialog.set_current_folder(folder)
+        except Exception:
+            pass
+        dialog.set_current_name(name)
+        response = dialog.run()
+        path = dialog.get_filename() if response == Gtk.ResponseType.OK else ""
+        dialog.destroy()
+        if not path or any(ch in path for ch in ("\n", "\r", "\x00")):
+            download.cancel()
+            return True
+        download.set_allow_overwrite(True)
+        download.set_destination(GLib.filename_to_uri(path, None))
+        return True
+
+    def on_files_download_done(self, download):
+        try:
+            dest = download.get_destination() or ""
+            path = GLib.filename_from_uri(dest)[0] if dest else ""
+        except Exception:
+            path = ""
+        if not path:
+            return
+        try:
+            self.chrome.run_javascript(
+                f"window.__hogFilesSaved && window.__hogFilesSaved({json.dumps(os.path.basename(path))})",
+                None, None, None,
+            )
+        except Exception:
+            pass
+
     def pick_share_folder(self):
         if self.window is None or getattr(self, "_share_dialog", None) is not None:
             return
@@ -1952,7 +2420,7 @@ class Hog(Gtk.Application):
         parts = command.split(":", 2)
         action = parts[1] if len(parts) > 1 else ""
         rest = parts[2] if len(parts) > 2 else ""
-        if action not in {"list", "add", "remove", "start", "stop", "restart", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder", "browser-default", "browser-default-set", "browser-default-clear", "jellyfin-gpu", "jellyfin-gpu-set", "jellyfin-gpu-clear", "jellyfin-gpu-install", "runtime-set", "network-list", "network-create", "network-remove", "network-connect", "network-disconnect", "update-status", "update-check", "update-check-now", "update-install", "update-restart"}:
+        if action not in {"list", "add", "remove", "start", "stop", "restart", "logs", "launch", "create", "run", "recreate", "engine", "engine-start", "shell", "shell-close", "commit", "modprobe", "endpoint", "tailscale-up", "share-list", "share-status", "share-computer", "share-network", "share-remove", "share-publish", "share-pick", "share-drop", "media-open", "media-mkdir", "media-remove", "media-pick", "media-pick-folder", "browser-default", "browser-default-set", "browser-default-clear", "jellyfin-gpu", "jellyfin-gpu-set", "jellyfin-gpu-clear", "jellyfin-gpu-install", "runtime-set", "network-list", "network-create", "network-remove", "network-connect", "network-disconnect", "update-status", "update-check", "update-check-now", "update-install", "update-restart", "samba-status", "samba-save", "samba-on", "samba-off"}:
             return
         if action == "share-pick":
             self.pick_share_folder()
@@ -1991,6 +2459,8 @@ class Hog(Gtk.Application):
                 hook = (
                     "window.__hogUpdate && window.__hogUpdate"
                     if action.startswith("update-")
+                    else "window.__hogSamba && window.__hogSamba"
+                    if action.startswith("samba-")
                     else "window.__hogContainers && window.__hogContainers"
                 )
                 try:
@@ -2006,7 +2476,7 @@ class Hog(Gtk.Application):
 
         def work():
             try:
-                if action in {"run", "recreate"}:
+                if action in {"run", "recreate", "samba-on"}:
                     payload = guard.handle(action, name, image, progress=emit)
                 else:
                     payload = guard.handle(action, name, image)
@@ -2229,7 +2699,13 @@ class Hog(Gtk.Application):
         return True
 
     def ensure_server(self):
-        if port_open(PORT):
+        state = replace_stale_server(
+            PORT,
+            ROOT,
+            port_open=port_open,
+            log=lambda text: print(text, file=sys.stderr, flush=True),
+        )
+        if state in ("current", "foreign") and port_open(PORT):
             return
         bundle = ROOT / "public" / "wallet-bundle.js"
         if not bundle.is_file():
@@ -2295,6 +2771,8 @@ class Hog(Gtk.Application):
             base_cache_directory=str(DATA / "cache"),
         )
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
+        # hog://files downloads ask where to save. Other chrome downloads keep WebKit's default.
+        context.connect("download-started", self.on_chrome_download)
         view = WebKit2.WebView.new_with_context(context)
         background = Gdk.RGBA()
         background.parse("#0b0b0d")
@@ -2305,6 +2783,7 @@ class Hog(Gtk.Application):
         settings.set_enable_media(True)
         settings.set_media_playback_requires_user_gesture(False)
         settings.set_media_playback_allows_inline(True)
+        disable_crashy_features(settings)
         # The node page refuses to start until the file system API exists.
         # This GTK build still has no working sync file handle; the page stores
         # the chain through Hog's disk endpoint instead.
@@ -2364,6 +2843,15 @@ class Hog(Gtk.Application):
                 self.start_update_check()
 
         view.connect("load-changed", on_load)
+
+        def on_chrome_crash(web_view, reason):
+            # Hog's own UI page died: load it again instead of leaving a blank window.
+            print(f"Hog: the Hog UI page process stopped ({reason}); reloading it.", file=sys.stderr, flush=True)
+            self.chrome_ready = False
+            GLib.timeout_add(500, lambda: (web_view.load_uri(URL), False)[1])
+            return True
+
+        view.connect("web-process-terminated", on_chrome_crash)
         window.add(overlay)
         self.tabs_spot.prepare()
         self.wallet_spot.prepare()

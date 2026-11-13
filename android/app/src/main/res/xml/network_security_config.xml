@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app talks plain HTTP to hog only over Tailscale, which encrypts the
+     traffic (WireGuard). A network security config cannot name an IP range,
+     so cleartext is allowed here and the app enforces the tailnet itself:
+     every connection goes through Tailnet.problem(), which accepts only
+     *.ts.net names, 100.64.0.0/10 and fd7a:115c:a1e0::/48. The WebView only
+     loads the app's own https://appassets.androidplatform.net pages; every
+     other request from it is blocked in MainActivity. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">ts.net</domain>
+    </domain-config>
+</network-security-config>

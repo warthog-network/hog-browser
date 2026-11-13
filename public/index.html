@@ -39,7 +39,8 @@
           <ul>
             <li><button type="button" role="menuitem" data-settings="bookmarks"><span>Bookmarks</span><small>Folders, favorites, import and export · Ctrl+Shift+O</small></button></li>
             <li><button type="button" role="menuitem" data-settings="general"><span>General</span><small>Updates and default browser</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
-            <li><button type="button" role="menuitem" data-settings="files"><span>Files</span><small>Library in ~/hog-shares</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="explorer"><span>Files</span><small>Browse, upload and share ~/hog-shares · hog://files</small></button></li>
+            <li><button type="button" role="menuitem" data-settings="files"><span>Library</span><small>Jellyfin library and Files folders</small></button></li>
             <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
             <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
             <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
@@ -113,7 +114,8 @@
             <p class="eyebrow">Toolbox</p>
             <div class="shortcuts toolbox-shortcuts">
               <button type="button" data-settings="containers">Containers</button>
-              <button type="button" data-settings="files">Files</button>
+              <button type="button" data-settings="explorer">Files</button>
+              <button type="button" data-settings="files">Library</button>
               <button type="button" data-settings="tailscale">Tailscale</button>
             </div>
           </div>
@@ -193,6 +195,136 @@
             </div>
           </div>
         </section>
+        <section class="home fx-page" id="files-view" aria-label="Files" hidden>
+          <div class="fx-shell">
+            <aside class="fx-side" aria-label="Places">
+              <p class="eyebrow">Places</p>
+              <div id="fx-roots" class="bm-folder-list fx-roots"></div>
+              <div class="bm-folder-list">
+                <button type="button" id="fx-trash-btn" data-fx-trash="1"><span class="bm-glyph fx-glyph" id="fx-trash-glyph"></span><span class="bm-name">Trash</span><small id="fx-trash-count"></small></button>
+              </div>
+              <button type="button" id="fx-add-root" class="tiny fx-add-root">+ Add a folder…</button>
+              <div class="fx-space" id="fx-space" hidden>
+                <p class="eyebrow">Disk</p>
+                <div class="fx-meter"><span id="fx-space-fill"></span></div>
+                <p id="fx-space-text" class="note"></p>
+              </div>
+              <div class="fx-smb" id="fx-smb">
+                <p class="eyebrow">Network share</p>
+                <p id="fx-smb-state" class="note">Samba is off. Turn it on to open these files from your phone or another computer on your tailnet.</p>
+                <ul id="fx-smb-links" class="fx-links"></ul>
+                <button type="button" id="fx-smb-setup" class="tiny fx-add-root">Set up Samba…</button>
+              </div>
+            </aside>
+            <div class="fx-main">
+              <div class="bm-head fx-head">
+                <div class="bm-heading">
+                  <p class="eyebrow">hog://files</p>
+                  <h1 id="fx-title">hog-shares</h1>
+                  <p id="fx-subtitle" class="note"></p>
+                </div>
+                <div class="bm-head-actions fx-head-actions">
+                  <button type="button" id="fx-upload" class="primary" title="Upload files (Ctrl+U)">↑ Upload</button>
+                  <button type="button" id="fx-upload-dir" title="Upload a whole folder">Folder…</button>
+                  <button type="button" id="fx-new-folder" title="New folder (Ctrl+Shift+N)">+ New folder</button>
+                </div>
+              </div>
+              <div class="fx-bar">
+                <div class="fx-nav" role="group" aria-label="Navigate">
+                  <button type="button" id="fx-back" class="icon" aria-label="Back (Alt+Left)" title="Back (Alt+Left)">←</button>
+                  <button type="button" id="fx-forward" class="icon" aria-label="Forward (Alt+Right)" title="Forward (Alt+Right)">→</button>
+                  <button type="button" id="fx-up" class="icon" aria-label="Up one folder (Backspace)" title="Up one folder (Backspace)">↑</button>
+                  <button type="button" id="fx-refresh" class="icon" aria-label="Refresh" title="Refresh">↻</button>
+                </div>
+                <nav id="fx-crumbs" class="fx-crumbs" aria-label="Folder path"></nav>
+              </div>
+              <div class="bm-toolbar fx-toolbar">
+                <input id="fx-search" type="search" autocomplete="off" spellcheck="false" placeholder="Filter this folder (Ctrl+F)" aria-label="Filter files">
+                <label class="bm-sort fx-deep" title="Search every folder below this one"><input id="fx-deep" type="checkbox"> Subfolders</label>
+                <label class="bm-sort">Sort
+                  <select id="fx-sort">
+                    <option value="name">Name</option>
+                    <option value="mtime">Modified</option>
+                    <option value="size">Size</option>
+                    <option value="kind">Type</option>
+                  </select>
+                </label>
+                <button type="button" id="fx-dir" class="tiny fx-tool" aria-label="Reverse order" title="Reverse order">↓</button>
+                <div class="segment-control fx-views" role="group" aria-label="View">
+                  <button type="button" data-fx-view="list" aria-pressed="true" title="List (Ctrl+1)">☰ List</button>
+                  <button type="button" data-fx-view="grid" aria-pressed="false" title="Grid (Ctrl+2)">▦ Grid</button>
+                </div>
+                <button type="button" id="fx-info-toggle" class="tiny fx-tool" aria-pressed="false" title="Details panel (Ctrl+I)">ⓘ</button>
+              </div>
+              <div id="fx-selbar" class="fx-selbar is-empty" aria-hidden="true">
+                <strong id="fx-sel-count"></strong>
+                <button type="button" data-fx-act="open">Open</button>
+                <button type="button" data-fx-act="download">Download</button>
+                <button type="button" data-fx-act="cut">Cut</button>
+                <button type="button" data-fx-act="copy">Copy</button>
+                <button type="button" data-fx-act="rename">Rename</button>
+                <button type="button" data-fx-act="trash" class="danger-text">Delete</button>
+                <button type="button" data-fx-act="restore" hidden>Restore</button>
+                <button type="button" data-fx-act="purge" class="danger-text" hidden>Delete forever</button>
+                <button type="button" data-fx-act="clear" class="fx-sel-clear">✕ Clear</button>
+              </div>
+              <div id="fx-clip" class="fx-clip" hidden>
+                <span id="fx-clip-text"></span>
+                <button type="button" id="fx-paste" class="primary">Paste here</button>
+                <button type="button" id="fx-clip-clear">Cancel</button>
+              </div>
+              <p id="fx-status" class="note bm-status" role="status"></p>
+              <div id="fx-uploads" class="fx-uploads" hidden>
+                <div class="fx-uploads-head"><strong id="fx-uploads-title">Uploads</strong><button type="button" id="fx-uploads-clear" class="tiny">Clear finished</button></div>
+                <ul id="fx-upload-list"></ul>
+              </div>
+              <div class="fx-body">
+                <div id="fx-pane" class="fx-pane is-list" tabindex="0" role="listbox" aria-multiselectable="true" aria-label="Files">
+                  <div class="fx-list-head" id="fx-list-head" aria-hidden="true">
+                    <span></span><span data-fx-sort="name">Name</span><span data-fx-sort="kind">Type</span><span data-fx-sort="size">Size</span><span data-fx-sort="mtime">Modified</span>
+                  </div>
+                  <div id="fx-items" class="fx-items"></div>
+                  <p id="fx-empty" class="note bm-empty" hidden></p>
+                  <div id="fx-drop" class="fx-drop" hidden><span id="fx-drop-text">Drop to upload here</span></div>
+                </div>
+                <aside id="fx-info" class="fx-info" aria-label="Details" hidden>
+                  <div id="fx-info-preview" class="fx-info-preview"></div>
+                  <h2 id="fx-info-name"></h2>
+                  <dl id="fx-info-list"></dl>
+                  <div class="row fx-info-actions">
+                    <button type="button" data-fx-act="open">Open</button>
+                    <button type="button" data-fx-act="download">Download</button>
+                    <button type="button" id="fx-copy-path">Copy path</button>
+                  </div>
+                </aside>
+              </div>
+              <input id="fx-file" type="file" multiple hidden>
+              <input id="fx-dir-input" type="file" webkitdirectory multiple hidden>
+            </div>
+          </div>
+          <div id="fx-menu" class="popover fx-menu" role="menu" hidden></div>
+          <form id="fx-dialog" class="connect-card fx-dialog" role="dialog" aria-modal="true" aria-labelledby="fx-dialog-title" hidden>
+            <p class="eyebrow" id="fx-dialog-title">New folder</p>
+            <p id="fx-dialog-text" class="note"></p>
+            <input id="fx-dialog-input" autocomplete="off" spellcheck="false" maxlength="255" aria-label="Name">
+            <p id="fx-dialog-error" class="error" role="status"></p>
+            <div class="row">
+              <button type="submit" class="primary" id="fx-dialog-ok">Create</button>
+              <button type="button" id="fx-dialog-cancel">Cancel</button>
+            </div>
+          </form>
+          <div id="fx-viewer" class="fx-viewer" role="dialog" aria-modal="true" aria-label="Preview" hidden>
+            <div class="fx-viewer-bar">
+              <strong id="fx-viewer-name"></strong>
+              <span id="fx-viewer-meta" class="note"></span>
+              <button type="button" id="fx-viewer-download" class="tiny">Download</button>
+              <button type="button" id="fx-viewer-close" class="tiny" aria-label="Close preview (Esc)">✕</button>
+            </div>
+            <button type="button" id="fx-viewer-prev" class="fx-viewer-step" aria-label="Previous">‹</button>
+            <div id="fx-viewer-stage" class="fx-viewer-stage"></div>
+            <button type="button" id="fx-viewer-next" class="fx-viewer-step is-next" aria-label="Next">›</button>
+          </div>
+        </section>
         <section class="home" id="browser-settings" hidden>
           <div class="settings-shell">
             <nav id="settings-nav" class="settings-nav" aria-label="Settings">
@@ -244,6 +376,18 @@
             <p class="eyebrow">Files</p>
             <h1>Library</h1>
             <p class="lede">Films and photos in ~/hog-shares show up in Jellyfin at /media.</p>
+            <section id="files-roots-card" class="endpoint-row files-roots-card" aria-label="Files folders">
+              <p class="eyebrow">Files folders</p>
+              <p class="note">hog://files always shows ~/hog-shares. Add other folders here, such as ~/Videos or a disk under /media. Hog refuses your whole home folder, hidden folders and its own wallet data.</p>
+              <ul id="files-roots-list" class="files-roots-list"></ul>
+              <form id="files-root-form" class="files-root-form">
+                <input id="files-root-path" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="~/Videos or /media/disk" aria-label="Folder path">
+                <button type="button" id="files-root-browse">Browse…</button>
+                <button type="submit" class="primary">Add</button>
+              </form>
+              <p id="files-root-status" class="note" role="status"></p>
+              <button type="button" id="files-open" class="tiny">Open hog://files →</button>
+            </section>
             <div id="media-library" class="endpoint-row">
               <p class="eyebrow">Files</p>
               <p class="note">In Jellyfin, add a library at /media. Drop films onto the dashed box, or use Add files, Add folder, or New folder. Those land in ~/hog-shares, which Jellyfin already reads.</p>
@@ -333,6 +477,31 @@
               </div>
               <pre id="jellyfin-gpu-install-log" class="mono gpu-install-log" hidden></pre>
             </details>
+          </section>
+          <section id="jellyfin-lan-card" class="connect-card" aria-label="Home network access">
+            <p class="eyebrow">Jellyfin</p>
+            <div class="engine-row default-browser-row">
+              <div class="default-browser-copy">
+                <strong>Home network access</strong>
+                <p id="jellyfin-lan-state" class="note" role="status">Off. Turn it on so a TV app on your Wi-Fi, such as Roku, can reach Jellyfin without Tailscale.</p>
+              </div>
+              <button type="button" id="jellyfin-lan-toggle" aria-pressed="false">Turn on</button>
+            </div>
+            <div id="jellyfin-lan-urls" class="connect-addr" hidden></div>
+            <p id="jellyfin-lan-error" class="error" role="status"></p>
+            <div id="jellyfin-lan-firewall" class="jellyfin-lan-firewall" hidden>
+              <p id="jellyfin-lan-fw-text" class="note"></p>
+              <div class="row">
+                <button type="button" id="jellyfin-lan-fw-allow" hidden>Allow through firewall</button>
+                <button type="button" id="jellyfin-lan-fw-remove" hidden>Remove firewall rule</button>
+              </div>
+              <p id="jellyfin-lan-fw-msg" class="note" role="status"></p>
+              <details id="jellyfin-lan-fw-manual" class="settings-sub">
+                <summary>Or run this in a terminal</summary>
+                <pre id="jellyfin-lan-firewall-cmd" class="mono"></pre>
+              </details>
+            </div>
+            <p class="note">Reachable by devices on your home Wi-Fi, not the internet. In the TV's Jellyfin app, add the server by hand with the address above. Reserve this computer's IP in your router so the address stays the same.</p>
           </section>
           <details class="settings-block" id="container-advanced">
             <summary>Advanced</summary>
@@ -521,6 +690,48 @@
               <p class="note">With both containers running, this card shows the 100…:8096 address. Use that as the hostname in the Jellyfin app.</p>
               <div id="jellyfin-links" class="service-links" hidden></div>
               <p id="jellyfin-gpu-hint" class="note" hidden>Jellyfin is using the NVIDIA GPU on Docker Engine. In Dashboard → Playback → Transcoding, pick NVIDIA NVENC.</p>
+            </section>
+            <section id="samba-card" class="connect-card samba-card" aria-label="Network drive">
+              <p class="eyebrow">Network drive (Samba)</p>
+              <p id="samba-state" class="note" role="status">Off. Turn it on to open ~/hog-shares as a drive on your phone or another computer in your tailnet.</p>
+              <form id="samba-form" class="samba-form">
+                <label>User
+                  <input id="samba-user" autocomplete="off" spellcheck="false" maxlength="32" placeholder="hog">
+                </label>
+                <label>Password
+                  <input id="samba-pass" type="password" autocomplete="new-password" maxlength="128" placeholder="8 characters or more">
+                </label>
+                <button type="submit">Save sign-in</button>
+              </form>
+              <div class="row">
+                <button type="button" id="samba-toggle" class="primary">Turn on</button>
+              </div>
+              <p id="samba-error" class="error" role="status"></p>
+              <ul id="samba-links" class="fx-smb-links samba-links" hidden></ul>
+              <p class="note">Samba listens only on hog's Tailscale address and on this computer (127.0.0.1), never on your home network. It needs the tailscale container running on Docker Engine. The first Turn on downloads the dockurr/samba image.</p>
+            </section>
+            <section id="phone-card" class="connect-card phone-card" aria-label="Phone app">
+              <p class="eyebrow">Phone app (tailnet)</p>
+              <p id="phone-state" class="note" role="status">Off. Turn it on to use the Hog phone app over your tailnet.</p>
+              <div class="row">
+                <button type="button" id="phone-toggle" class="primary">Turn on</button>
+                <button type="button" id="phone-pair" disabled>Pair a phone</button>
+              </div>
+              <div id="phone-pairing" class="phone-pairing" hidden>
+                <div id="phone-qr" class="phone-qr" aria-label="Pairing QR code"></div>
+                <div class="phone-pair-text">
+                  <p class="note">In the Hog app, tap <strong>Scan QR</strong>, or type the address and code:</p>
+                  <p class="phone-host"><span id="phone-host"></span></p>
+                  <p class="phone-code" id="phone-code"></p>
+                  <p class="note" id="phone-expiry"></p>
+                  <button type="button" id="phone-pair-cancel">Cancel</button>
+                </div>
+              </div>
+              <p id="phone-error" class="error" role="status"></p>
+              <p class="eyebrow">Paired phones</p>
+              <p id="phone-devices-empty" class="note">No phones yet.</p>
+              <ul id="phone-devices" class="phone-devices"></ul>
+              <p class="note">The phone app can see container status and start, stop or restart hog's containers, open Jellyfin, read mining stats, and use Files (~/hog-shares and folders you added). It cannot reach the wallet, keys or anything else in hog. It answers only on hog's Tailscale address and this computer, never your home network. Remove a phone to cut it off at once.</p>
             </section>
             <details id="exit-node-guide" class="connect-card exit-node-guide">
               <summary>Setting up your exit node</summary>

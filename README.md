@@ -73,6 +73,19 @@ Upgrading from 0.1.20 or older turns the old toolbar list into Favorites,
 drops only exact duplicates, and keeps a copy of the old list in
 `~/.local/share/hog-browser/bookmarks-v1-backup.json`.
 
+## Files (hog://files) and the tailnet network drive
+
+Type `hog://files` in the address bar, or pick Settings → Files. It is a file explorer for `~/hog-shares` (and any extra folders you add in Settings → Files → Files folders): list and grid views with thumbnails, sort, filter and subfolder search, multi-select, drag and drop (drop files from your desktop to upload them, drag items onto folders to move them, hold Ctrl to copy), cut/copy/paste, rename (F2), new folder (Ctrl+Shift+N), a details panel (Ctrl+I), previews for images, video, audio and text, and Delete sends things to a Trash with Restore. Big uploads go up in 8 MB chunks and resume after a dropped connection.
+
+The file API only answers Hog's own page on 127.0.0.1, every path is checked against the folder's real path (no `..`, no absolute paths, no symlinks that lead outside), and files are served with a sandbox CSP so a shared HTML file cannot run in Hog.
+
+**Network drive (Samba), off by default.** Settings → Tailscale → Network drive. Pick a user name and password, press Save sign-in, then Download and turn on. Hog runs `dockurr/samba` on Docker Engine and publishes port 445 only on hog's Tailscale address and 127.0.0.1, never on your LAN. It needs the tailscale container running on Docker Engine (Docker Desktop runs containers in a VM, so its ports cannot reach the tailnet address). Then connect with:
+
+- Phone (iOS Files → Connect to Server, or an Android SMB file manager) or macOS/Linux: `smb://hog.<your-tailnet>.ts.net/hog-shares`
+- Windows: `\\hog\hog-shares` (or `\\100.x.y.z\hog-shares`)
+
+The password is kept in `~/.local/share/hog-samba/pass` (mode 600) and mounted into the container as a secret; it is never put in the command line or the container environment.
+
 ## Docker Engine or Docker Desktop
 
 Each container in Hog can run on **Docker Engine** (native docker-ce, `/var/run/docker.sock`) or **Docker Desktop** (the LinuxKit VM). **Settings → Containers** has a compact Engine/Desktop control, and each container in the list shows which runtime it is on. Open the ⋯ menu on a container to start, stop, restart, move, or remove it. Moving a container stops and removes it on the old runtime, then starts it on the new one. Login, libraries, and other files kept in that runtime's Docker volumes do not carry over. Hog does not move an existing container until you click.
@@ -95,6 +108,12 @@ Every running container with a published TCP port shows its addresses under its 
 Click an address to open it in a new Hog tab, or press **Copy**. Ports that are not web pages (SSH, databases, WireGuard) get no link.
 
 Earlier versions had an AI page (Ollama, Open WebUI, Continue, and an Aider Code chat). It was removed in 0.1.20. Hog leaves any `hog-ollama`, `hog-open-webui`, or `hog-aider` containers, their images and volumes, and `~/.continue` alone; remove them from the container ⋯ menu or with `docker rm` and `docker volume rm` if you no longer want them.
+
+## Jellyfin on your home network (TVs without Tailscale)
+
+Roku and some other TVs cannot run Tailscale. **Settings → Containers → Jellyfin → Home network access** (off by default) makes Hog forward this computer's private home-network IPv4 addresses (10/8, 172.16/12 or 192.168/16 on Wi-Fi or Ethernet) on port 8096 to Jellyfin at `127.0.0.1:8096`. The container is not recreated. Hog never listens on `0.0.0.0`, a Docker bridge, a VPN or Tailscale address, and it drops connections from non-private addresses, so a router port forward cannot put Jellyfin on the internet through it. The card shows the address to type into the TV's Jellyfin app, for example `http://192.168.1.50:8096`. Reserve that IP in your router so it stays the same. Hog re-checks the addresses every 15 seconds and remembers the setting across restarts.
+
+If Ubuntu's ufw firewall is on, the card offers **Allow through firewall**. It runs `pkexec /usr/sbin/ufw allow in on <interface> from <home subnet> to any port 8096 proto tcp comment 'Jellyfin on home network (Hog)'`, with the interface and subnet taken from the detected home network. Ubuntu's own polkit dialog asks for your password, and Hog never sees it. Cancelling changes nothing. Hog remembers the rules it added. When home network access is off, the card offers **Remove firewall rule** (`ufw delete allow …`), and it removes nothing unless you click. The same commands are always shown for a terminal, and only those are shown if pkexec is missing. Hog never changes the firewall on its own.
 
 ## Jellyfin GPU acceleration (NVIDIA)
 

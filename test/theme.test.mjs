@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../public/${path}`, import.meta.url), "utf8");
@@ -28,7 +28,7 @@ function rootVar(name) {
   return found ? found[1].trim().toLowerCase() : "";
 }
 
-const SURFACES = ["home", "bookmarks-view", "browser-settings", "status", "shell-view"];
+const SURFACES = ["home", "bookmarks-view", "files-view", "browser-settings", "status", "shell-view"];
 
 test("every Hog page section exists in index.html", () => {
   for (const id of SURFACES) assert.match(html, new RegExp(`id="${id}"`), `#${id} is in index.html`);
@@ -146,4 +146,33 @@ test("index.html declares a dark color scheme and loads the theme after app.css"
   const theme = html.indexOf('href="retro.css"');
   assert.ok(app > 0 && theme > app, "retro.css loads after app.css");
   assert.match(retro, /prefers-reduced-motion:\s*reduce/);
+});
+
+// The running-logo clips have their background flattened to one surface color.
+// The CSS around each clip must paint that same color, or the clip shows as a square.
+const ruleBody = (text, selector) => (rules(text).find((rule) => rule.selector === selector) || {}).body || "";
+const bgOf = (body) => ((body.match(/background(?:-color)?:\s*(#[0-9a-f]{6})\b/i) || [])[1] || "").toLowerCase();
+
+test("the intro flash paints the page background, which the intro clip is encoded on", () => {
+  assert.equal(bgOf(ruleBody(appCss, ".boot-flash")), rootVar("bg"));
+  assert.equal(bgOf(ruleBody(appCss, ".boot-flash video")), rootVar("bg"));
+  assert.match(html, /id="boot-video" src="wartlogorun\.mp4"/);
+});
+
+test("the wallet clip paints the wallet panel color, which its own encode uses", () => {
+  assert.equal(bgOf(ruleBody(appCss, ".brand-run")), rootVar("wallet"));
+  assert.match(appJs, /wartlogorun-wallet\.mp4/);
+});
+
+test("the running-logo clips are separate full-range BT.709 files", () => {
+  for (const name of ["wartlogorun.mp4", "wartlogorun-wallet.mp4"]) {
+    const url = new URL(`../public/${name}`, import.meta.url);
+    assert.ok(!lstatSync(url).isSymbolicLink(), `${name} is its own encode, not a link`);
+    const data = readFileSync(url);
+    const at = data.indexOf("colrnclx");
+    assert.ok(at > 0, `${name} carries an nclx color box`);
+    // primaries 1, transfer 1, matrix 1 (BT.709), then the full-range bit.
+    assert.deepEqual([...data.subarray(at + 8, at + 14)], [0, 1, 0, 1, 0, 1], `${name} is BT.709`);
+    assert.equal(data[at + 14] & 0x80, 0x80, `${name} is tagged full range`);
+  }
 });

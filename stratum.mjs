@@ -17,11 +17,106 @@ import { createHash, randomBytes } from "node:crypto";
 import { MINING_NETWORKS } from "./mining.mjs";
 
 export const DEFAULT_STRATUM_PORT = 3456;
-const POLL_MS = 1000;
+// A new tip (someone else's block) reaches miners within one poll. On a fast
+// chain (DeFi testnet: a solo rig can find a block every few seconds) every
+// half second spent on old work is a solution that comes back "deprecated".
+const POLL_MS = 500;
+// After our own block at height H the node's next template is H+1. A template
+// still at H or below within this long is the node not having caught up with
+// its own append yet: skip it rather than hand miners dead work again.
+const WON_HOLD_MS = 5_000;
+// Remember this many retired job ids, so a late solution for one is answered
+// "stale" at once instead of being sent to the node to be called deprecated.
+const MAX_SPENT = 128;
 const MAX_LINE = 16_384;
 const MAX_JOBS = 32;
 // The template's timestamp moves every second; only re-send the same work this often.
 const REFRESH_MS = 30_000;
+// /chain/mine answers in well under a second; a poll that hangs longer keeps
+// miners on stale work, so give up quickly and poll again.
+const TEMPLATE_TIMEOUT_MS = 5_000;
+// POST /chain/append normally answers in under half a second. If the node tab
+// has not answered by then, the block may still have landed: it is "pending"
+// and gets checked against the node's chain instead of being called rejected.
+const APPEND_TIMEOUT_MS = 20_000;
+const RECONCILE_MS = 3_000;
+// Stop checking a pending block after this long and count it as rejected.
+const RECONCILE_GIVE_UP_MS = 10 * 60_000;
+// Answer BzMiner by then even if the chain has not settled a pending block yet.
+const MINER_REPLY_MS = 60_000;
+
+// ---------- Ready gate: no work until the node has really caught up ----------
+// A node's own "synced" flag is not enough: a fresh node can say synced:true
+// at height 1 before it has heard of any peer. Work starts only when the node
+// says synced AND its height is close to the network tip seen elsewhere.
+//
+// READY_SLACK: how many blocks behind the best known tip still counts as caught
+// up. Both networks average ~20 s blocks (last 500 blocks, Nov 2026: mainnet
+// 21.4 s, DeFi testnet 20.0 s), with bursts of a few seconds. The public tip is
+// re-read every TIP_REFRESH_MS (15 s) and can be a block or two ahead of what
+// has reached the node tab over its one WebSocket peer, and short reorgs move
+// the tip by a block or two. 5 blocks (~100 s) absorbs that, while a fresh or
+// fallen-back node (thousands of blocks behind) stays gated. The node's own
+// synced flag is still required, so a node inside the slack is following the
+// tip, not syncing toward it.
+export const READY_SLACK = 5;
+// Hard floors: mainnet is past 5,285,000 (Nov 2026), so a mainnet node below
+// 5,000,000 is not synced whatever it says. The DeFi testnet can be reset, so
+// it gets no floor beyond "never at height 1".
+export const HEIGHT_FLOORS = { mainnet: 5_000_000, defi: 0 };
+const TIP_REFRESH_MS = 15_000;
+// A public tip older than this (its node unreachable since) no longer counts.
+const TIP_MAX_AGE_MS = 120_000;
+// A caught-up node's own synced flag can flip to false for a poll or two as a
+// new block arrives (seen in DeFi smoke). Within this grace Hog sends no new
+// work but keeps miners on their current job; a fall-back (far behind the tip,
+// or height 1) stops work at once.
+const GATE_GRACE_MS = 10_000;
+
+/**
+ * Decide whether to hand out work for a /chain/mine template.
+ * Tip sources, best first:
+ *  - publicTip: the network's public node (Hog's own wallet backend for that
+ *    network), read over HTTPS by Hog;
+ *  - pinHeight: the signed checkpoint the in-tab node got from its peers (lags
+ *    the tip by a few blocks, never ahead of it; 0 on a fresh node);
+ *  - highWater: the highest height this node reached while mining here, so a
+ *    fall-back or a reorg to a tiny height closes the gate even if every other
+ *    source is unavailable;
+ *  - floor: HEIGHT_FLOORS for the network.
+ * With neither a public tip nor a peer checkpoint there is nothing to compare
+ * against, so the gate stays closed rather than trust the node's own flag.
+ * @param {{ synced: boolean, templateHeight: number, publicTip?: number, pinHeight?: number, highWater?: number, floor?: number, slack?: number }} input
+ * @returns {{ open: boolean, nodeHeight: number, tipHeight: number, reason: string }}
+ */
+export function readyGate({ synced, templateHeight, publicTip = 0, pinHeight = 0, highWater = 0, floor = 0, slack = READY_SLACK }) {
+  const nodeHeight = Number.isInteger(templateHeight) ? Math.max(0, templateHeight - 1) : 0;
+  const tipHeight = Math.max(publicTip || 0, pinHeight || 0, highWater || 0, floor || 0);
+  const closed = (reason) => ({ open: false, nodeHeight, tipHeight, reason });
+  if (!Number.isInteger(templateHeight) || templateHeight <= 1) return closed("fresh");
+  if (synced !== true) return closed("syncing");
+  if (!(publicTip > 0) && !(pinHeight > 0)) return closed("no-tip");
+  if (floor > 0 && nodeHeight < floor) return closed("behind");
+  if (pinHeight > 0 && nodeHeight < pinHeight) return closed("behind");
+  if (nodeHeight < tipHeight - slack) return closed("behind");
+  return { open: true, nodeHeight, tipHeight, reason: "" };
+}
+
+/** Height from a /chain/head answer (0.10.x nests it under chainHead, 0.9.x does not). */
+export function headHeights(result) {
+  const data = result && typeof result === "object" && result.data && typeof result.data === "object" ? result.data : null;
+  if (!data) return { height: 0, pinHeight: 0 };
+  const head = data.chainHead && typeof data.chainHead === "object" ? data.chainHead : data;
+  const num = (v) => (Number.isInteger(v) && v > 0 ? v : 0);
+  return { height: num(head.height), pinHeight: num(head.pinHeight) };
+}
+
+/** What Settings and the miner-facing error say while the gate is closed. */
+export function gateMessage(gate, label) {
+  const of = gate.tipHeight ? ` (height ${gate.nodeHeight.toLocaleString("en-US")} of ~${gate.tipHeight.toLocaleString("en-US")})` : gate.nodeHeight ? ` (height ${gate.nodeHeight.toLocaleString("en-US")})` : "";
+  if (gate.reason === "no-tip") return `The ${label} node says it is synced${of}, but Hog cannot see the network tip yet to check; work starts once it can.`;
+  return `The ${label} node is still syncing${of}; work starts when it has caught up.`;
+}
 
 /** @param {string|undefined} raw */
 export function stratumPort(raw = process.env.HOG_STRATUM_PORT) {
@@ -113,16 +208,108 @@ export function solvedBlock(job, extra2prefix, extranonce2, ntime, nonce) {
   return { height: job.height, header: header.toString("hex"), body: out.toString("hex") };
 }
 
+// Next work before the node has saved our block ("optimistic work"). Measured
+// on the DeFi testnet: the in-tab node takes a median ~440 ms to append a mined
+// block (SQLite on OPFS) and Hog another ~250 ms to get its next template, so
+// miners spent ~0.75 s on dead work after every block (a native node with
+// --stratum: ~0.07 s). At one block every ~4 s that was ~1 in 4 solutions
+// coming back stale. The next job is built from the solved header instead.
+// Difficulty changes at a retarget (heights k*720+1 below ten months of
+// blocks, k*8640+1 after; 8640 is a multiple of 720) and the reward at a
+// halving: no optimistic work for those heights.
+const RETARGET_STEP = 720;
+const HALVING_INTERVAL = (2 * 365 * 24 * 60 * 60) / 20;
+
+/**
+ * The job for height + 1 on top of a solved block, when it is certain to match
+ * the node's own next template apart from the timestamp: the template holds
+ * only the block reward (merklePrefix is the one reward leaf, sha256 of body
+ * bytes 12..28: account id + amount), so the next block's body is the same.
+ * A template with transactions in it gets null (they are spent by this block).
+ * @param {ReturnType<typeof jobFromTemplate>} job the job the block was solved on
+ * @param {string} solvedHeaderHex the solved block's 80-byte header
+ * @param {number} [nowSec]
+ */
+export function optimisticNextJob(job, solvedHeaderHex, nowSec = Math.floor(Date.now() / 1000)) {
+  if (!job || job.merklePrefix.length !== 32 || job.body.length < 28) return null;
+  if (!sha256(job.body.subarray(12, 28)).equals(job.merklePrefix)) return null;
+  const height = job.height + 1;
+  for (const step of [RETARGET_STEP, HALVING_INTERVAL]) {
+    if (height % step === 0 || height % step === 1) return null;
+  }
+  const solved = Buffer.from(String(solvedHeaderHex || ""), "hex");
+  if (solved.length !== 80) return null;
+  const header = Buffer.from(job.header);
+  Buffer.from(blockHash(solvedHeaderHex), "hex").copy(header, 0);
+  header.fill(0, 36, 68);
+  header.writeUInt32BE(Math.max(nowSec >>> 0, solved.readUInt32BE(72)), 72);
+  header.fill(0, 76, 80);
+  const next = jobFromTemplate(
+    { header: header.toString("hex"), body: job.body.toString("hex"), merklePrefix: job.merklePrefix.toString("hex"), height, difficulty: job.difficulty },
+    { key: job.network, page: job.page, lengthPrefixedBody: job.lengthPrefixedBody },
+  );
+  return { ...next, optimistic: true, parentHeight: job.height };
+}
+
+/** A Warthog block hash: SHA-256 twice over the 80-byte header (core HeaderView::hash). */
+export function blockHash(headerHex) {
+  return sha256(sha256(Buffer.from(String(headerHex || ""), "hex"))).toString("hex");
+}
+
+/**
+ * What a POST /chain/append reply says about the block.
+ * "unknown" means the node tab never answered (or lost the answer), so the
+ * block may or may not be on chain; it is settled against the chain later.
+ * @returns {{ kind: "won" | "rejected" | "unknown", message: string, stale?: boolean }}
+ */
+export function appendOutcome(reply) {
+  if (reply?.ok) {
+    const result = reply.result;
+    // POST /chain/append answers {"code":0,"error":"No error"}. A code-0 answer
+    // that carries data is some other request's answer: check the chain instead.
+    if (result && result.code === 0 && result.data != null) return { kind: "unknown", message: "Node tab: unexpected answer" };
+    if (result && result.code === 0) return { kind: "won", message: "" };
+    const message = String(result?.error || "Rejected");
+    return { kind: "rejected", message, stale: /deprecated/i.test(message) };
+  }
+  const code = reply?.code || "no answer";
+  // The block reached the node tab but its answer did not come back.
+  if (code === "timeout" || code === "page-closed" || code === "node-error") {
+    return { kind: "unknown", message: `Node tab: ${code}${reply?.error ? ` (${reply.error})` : ""}` };
+  }
+  return { kind: "rejected", message: `Node tab: ${code}` };
+}
+
 /**
  * @param {{
- *   call: (method: string, path: string, body?: string, network?: string) => Promise<any>,
+ *   call: (method: string, path: string, body?: string, network?: string, options?: { timeoutMs?: number, onLate?: (reply: any) => void }) => Promise<any>,
  *   getNetwork?: () => ({ key: string, page: string, label: string, lengthPrefixedBody: boolean } | null),
  *   host?: string,
  *   pollMs?: number,
  * }} options
  */
-export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.defi, host = "127.0.0.1", pollMs = POLL_MS, findTailnet = tailnetAddresses }) {
+export function createStratumBridge({
+  call,
+  getNetwork = () => MINING_NETWORKS.defi,
+  host = "127.0.0.1",
+  pollMs = POLL_MS,
+  findTailnet = tailnetAddresses,
+  templateTimeoutMs = TEMPLATE_TIMEOUT_MS,
+  appendTimeoutMs = APPEND_TIMEOUT_MS,
+  reconcileMs = RECONCILE_MS,
+  reconcileGiveUpMs = RECONCILE_GIVE_UP_MS,
+  minerReplyMs = MINER_REPLY_MS,
+  getPublicTip = async () => 0,
+  tipRefreshMs = TIP_REFRESH_MS,
+  slack = READY_SLACK,
+  gateGraceMs = GATE_GRACE_MS,
+  optimisticWork = true,
+}) {
   let server = null;
+  /** network key -> { publicTip, publicAt, pinHeight, pinAt, highWater, refreshing, refreshedAt } */
+  const tips = new Map();
+  let gateOpen = false;
+  let closedSince = 0;
   let listenPort = 0;
   let allowTailnet = false;
   /** @type {Map<string, any>} tailnet address -> net.Server */
@@ -132,17 +319,34 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
   /** @type {Map<string, any>} per-rig stats, keyed by worker name and source address */
   const workers = new Map();
   let prefixCounter = randomBytes(4).readUInt32LE(0);
-  /** @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, last: any, polling: boolean, timer: any }>} */
+  /**
+   * spent: retired job id -> height (a block at that height is already found).
+   * appending: height -> promise of the in-flight append's outcome kind.
+   * wonHeight / wonAt: our latest accepted block. again: poll once more when
+   * the current poll ends (a win or a new tip arrived while it was running).
+   * @type {Map<string, { sockets: Set<any>, jobs: Map<string, any>, spent: Map<string, number>, appending: Map<number, Promise<string>>, last: any, sentAt: number, polling: boolean, again: boolean, wonHeight: number, wonAt: number, timer: any }>}
+   */
   const accounts = new Map();
   const sockets = new Set();
-  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "" };
+  // blocks: on chain (the node accepted it, or the chain shows it). rejected:
+  // not on chain, of which stale: that height was already taken. pending:
+  // the node tab has not answered yet; checked against the chain.
+  // synced: the ready gate is open (node synced and caught up with the tip).
+  // nodeHeight / tipHeight: what the gate last compared ("height X of ~Y").
+  const stats = { jobs: 0, shares: 0, blocks: 0, rejected: 0, stale: 0, pending: 0, height: 0, lastResult: "", lastError: "", synced: false, miningNetwork: "", nodeHeight: 0, tipHeight: 0, gate: "" };
+  // optimisticJobs: next jobs sent before the node saved our block.
+  // optimisticOff: why optimistic work was turned off for this run ("" = on).
+  const optimistic = { jobs: 0, off: optimisticWork ? "" : "disabled" };
+  /** @type {Set<any>} submitted blocks whose fate is not known yet */
+  const pendingShares = new Set();
+  let reconcileTimer = null;
 
   function workerFor(socket) {
     const name = socket.account?.worker || "";
     const key = `${name}|${socket.peer}`;
     let w = workers.get(key);
     if (!w) {
-      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, lastShareAt: 0, lastResult: "" };
+      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, pending: 0, lastShareAt: 0, lastResult: "" };
       workers.set(key, w);
       // Keep the list bounded: drop the oldest disconnected entries.
       if (workers.size > 64) {
@@ -162,10 +366,89 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     send(socket, { id: null, method: "mining.notify", params: [job.id, job.prevHash, job.merklePrefix.toString("hex"), job.version, job.nbits, job.ntime, clean] });
   }
 
-  async function poll(address) {
+  function tipState(key) {
+    let t = tips.get(key);
+    if (!t) {
+      t = { publicTip: 0, publicAt: 0, pinHeight: 0, highWater: 0, refreshing: false, refreshedAt: 0 };
+      tips.set(key, t);
+    }
+    return t;
+  }
+
+  /** Re-read the public tip and the node's signed checkpoint (rate limited). */
+  async function refreshTips(net) {
+    const t = tipState(net.key);
+    if (t.refreshing || Date.now() - t.refreshedAt < tipRefreshMs) return;
+    t.refreshing = true;
+    try {
+      const [pub, head] = await Promise.all([
+        Promise.resolve().then(() => getPublicTip(net.key)).catch(() => 0),
+        call("GET", "/chain/head", undefined, net.page, { timeoutMs: templateTimeoutMs }).catch(() => null),
+      ]);
+      if (Number.isInteger(pub) && pub > 0) {
+        t.publicTip = pub;
+        t.publicAt = Date.now();
+      }
+      if (head?.ok) t.pinHeight = headHeights(head.result).pinHeight;
+      t.refreshedAt = Date.now();
+    } finally {
+      t.refreshing = false;
+    }
+  }
+
+  /** Gate a template for a network, from what Hog knows about the tip. */
+  function gateFor(data, net) {
+    const t = tipState(net.key);
+    const fresh = t.publicAt && Date.now() - t.publicAt < TIP_MAX_AGE_MS;
+    return readyGate({
+      synced: data?.synced === true,
+      templateHeight: data?.height,
+      publicTip: fresh ? t.publicTip : 0,
+      pinHeight: t.pinHeight,
+      highWater: t.highWater,
+      floor: HEIGHT_FLOORS[net.key] || 0,
+      slack,
+    });
+  }
+
+  /**
+   * The node is not (or no longer) caught up: drop every job and, if miners
+   * had work, disconnect them so they stop hashing it. They reconnect at once
+   * and get no job until the gate opens again.
+   */
+  function closeGate(entry, gate, net) {
+    const hadWork = Boolean(entry.last || entry.jobs.size);
+    entry.jobs.clear();
+    entry.last = null;
+    entry.sentAt = 0;
+    if (gateOpen || hadWork) {
+      stats.lastResult = `Stopped work: the ${net.label} node fell behind${gate.tipHeight ? ` (height ${gate.nodeHeight} of ~${gate.tipHeight})` : ""}. Miners wait until it catches up.`;
+    }
+    gateOpen = false;
+    if (hadWork) for (const socket of entry.sockets) socket.end();
+  }
+
+  /** A job's height is taken: answer later solutions for it locally as stale. */
+  function retire(entry, job) {
+    entry.jobs.delete(job.id);
+    entry.spent.set(job.id, job.height);
+    while (entry.spent.size > MAX_SPENT) entry.spent.delete(entry.spent.keys().next().value);
+  }
+
+  /**
+   * @param {string} address
+   * @param {boolean} [urgent] a block just landed: if a poll is already running
+   *   (it may be fetching the old template), run another right after it.
+   */
+  async function poll(address, urgent = false) {
     const entry = accounts.get(address);
-    if (!entry || entry.polling) return;
+    if (!entry) return;
+    if (entry.polling) {
+      if (urgent) entry.again = true;
+      return;
+    }
     entry.polling = true;
+    entry.again = false;
     try {
       const net = getNetwork();
       if (!net) {
@@ -176,10 +459,16 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
       }
       if (stats.miningNetwork !== net.key) {
         stats.miningNetwork = net.key;
+        entry.wonHeight = 0;
         stats.height = 0;
         stats.synced = false;
+        gateOpen = false;
       }
-      const reply = await call("GET", `/chain/mine/${address}`, undefined, net.page);
+      const t = tipState(net.key);
+      // The first check waits for the tip; later ones refresh in the background.
+      if (!t.refreshedAt) await refreshTips(net);
+      else refreshTips(net).catch(() => {});
+      const reply = await call("GET", `/chain/mine/${address}`, undefined, net.page, { timeoutMs: templateTimeoutMs });
       const data = reply?.ok ? reply.result?.data : null;
       if (!reply?.ok) {
         stats.lastError = reply?.code === "no-page"
@@ -195,18 +484,53 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
         stats.synced = false;
         return;
       }
-      stats.synced = data.synced === true;
-      if (!stats.synced) {
-        stats.lastError = `The ${net.label} node is still syncing; work starts when it is synced.`;
+      const gate = gateFor(data, net);
+      stats.nodeHeight = gate.nodeHeight;
+      stats.tipHeight = gate.tipHeight;
+      stats.gate = gate.open ? "open" : gate.reason;
+      if (!gate.open) {
+        if (!closedSince) closedSince = Date.now();
+        const fellBack = gate.reason === "behind" || gate.reason === "fresh";
+        if (gateOpen && !fellBack && Date.now() - closedSince < gateGraceMs) {
+          // A blip at the tip: no new work this poll, miners keep their job.
+          return;
+        }
+        stats.synced = false;
+        stats.lastError = gateMessage(gate, net.label);
+        closeGate(entry, gate, net);
         return;
       }
+      closedSince = 0;
+      stats.synced = true;
+      gateOpen = true;
+      if (gate.nodeHeight > t.highWater) t.highWater = gate.nodeHeight;
       stats.lastError = "";
       const job = jobFromTemplate(data, net);
       stats.height = job.height;
-      if (entry.jobs.has(job.id)) return;
+      if (job.height <= entry.wonHeight && Date.now() - entry.wonAt < WON_HOLD_MS) {
+        // The node has not moved past our own block yet; ask again shortly.
+        entry.again = true;
+        return;
+      }
+      // Our block for that height is still with the node and miners already
+      // have the next job: an older template is not news.
+      if (entry.parent && job.network === entry.parent.network && job.height <= entry.parent.height) return;
+      if (entry.jobs.has(job.id) || entry.spent.has(job.id)) return;
       if (entry.last && entry.last.workKey === job.workKey && Date.now() - entry.sentAt < REFRESH_MS) return;
-      const clean = !entry.last || entry.last.prevHash !== job.prevHash || entry.last.network !== job.network;
-      if (clean) entry.jobs.clear();
+      let clean = !entry.last || entry.last.prevHash !== job.prevHash || entry.last.network !== job.network;
+      if (!clean && entry.last.optimistic && (entry.last.nbits !== job.nbits || entry.last.version !== job.version)) {
+        // The node's next block differs from what Hog predicted: stop predicting.
+        optimistic.off = `the node's block ${job.height} has a different target or version`;
+        clean = true;
+      }
+      if (clean) {
+        // Same network, new tip: old jobs are stale. Another network: just gone.
+        for (const old of [...entry.jobs.values()]) {
+          if (old.network === job.network) retire(entry, old);
+          else entry.jobs.delete(old.id);
+        }
+        if (entry.last && entry.last.network !== job.network) entry.spent.clear();
+      }
       entry.jobs.set(job.id, job);
       while (entry.jobs.size > MAX_JOBS) entry.jobs.delete(entry.jobs.keys().next().value);
       entry.last = job;
@@ -218,13 +542,31 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
       stats.lastError = error instanceof Error ? error.message : String(error);
     } finally {
       entry.polling = false;
+      if (entry.again && accounts.get(address) === entry) {
+        entry.again = false;
+        setTimeout(() => poll(address), 0).unref?.();
+      }
     }
+  }
+
+  /**
+   * For the HTTP relay (GET /chain/mine passthrough): null if the template may
+   * go to a miner, else the reason it may not.
+   * @param {any} result /chain/mine answer
+   * @param {{ key: string, label: string, page: string } | null} net
+   */
+  function templateBlocked(result, net) {
+    if (!net || !result?.data) return null;
+    const gate = gateFor(result.data, net);
+    if (gate.open) return null;
+    refreshTips(net).catch(() => {});
+    return gateMessage(gate, net.label);
   }
 
   function link(socket, address) {
     let entry = accounts.get(address);
     if (!entry) {
-      entry = { sockets: new Set(), jobs: new Map(), last: null, sentAt: 0, polling: false, timer: null };
+      entry = { sockets: new Set(), jobs: new Map(), spent: new Map(), appending: new Map(), last: null, sentAt: 0, polling: false, again: false, wonHeight: 0, wonAt: 0, parent: null, timer: null };
       entry.timer = setInterval(() => poll(address), pollMs);
       accounts.set(address, entry);
     }
@@ -251,36 +593,206 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     const args = params.length >= 5 ? params.slice(1) : params;
     const [jobId, en2Hex, ntimeHex, nonceHex] = args.map((v) => String(v ?? ""));
     const entry = accounts.get(socket.account.address);
-    const job = entry?.jobs.get(jobId);
-    if (!job) return send(socket, { id, result: null, error: [21, "Job not found", null] });
+    let job = entry?.jobs.get(jobId);
+    if (!job) {
+      const height = entry?.spent.get(jobId);
+      if (height !== undefined) return staleLocally(socket, id, height);
+      return send(socket, { id, result: null, error: [21, "Job not found", null] });
+    }
     const en2 = hexBytes(en2Hex, 6);
     const ntime = hexBytes(ntimeHex, 4);
     const nonce = hexBytes(nonceHex, 4);
     if (!en2 || !ntime || !nonce) return send(socket, { id, result: null, error: [20, "Bad share format", null] });
+    // Another solution for this height is with the node right now. If it lands,
+    // this one is stale: wait for it rather than queue a second append in the
+    // node tab ahead of the next template.
+    const ahead = entry.appending.get(job.height);
+    if (ahead) {
+      await ahead.catch(() => "");
+      if (!entry.jobs.has(jobId) || job.height <= entry.wonHeight) return staleLocally(socket, id, job.height);
+    }
     stats.shares += 1;
     const rig = workerFor(socket);
     rig.shares += 1;
     rig.lastShareAt = Date.now();
     const block = solvedBlock(job, socket.extra2prefix, en2, ntime, nonce);
-    const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: socket.account.worker }), job.page);
-    const result = reply?.ok ? reply.result : null;
-    if (result && result.code === 0) {
+    const share = {
+      socket, id, rig, job,
+      worker: socket.account.worker,
+      address: socket.account.address,
+      hash: blockHash(block.header),
+      at: Date.now(),
+      pending: false, done: false, replied: false, checking: false, replyTimer: null,
+    };
+    let done = () => {};
+    const inFlight = new Promise((resolve) => { done = resolve; });
+    entry.appending.set(job.height, inFlight);
+    share.optimistic = startOptimistic(entry, job, block.header, share.hash);
+    let outcome = { kind: "unknown", message: "" };
+    try {
+      const reply = await call("POST", "/chain/append", JSON.stringify({ ...block, worker: share.worker }), job.page, {
+        timeoutMs: appendTimeoutMs,
+        // A late answer settles a pending block at once (if the chain has not already).
+        onLate: (late) => {
+          const outcome = appendOutcome(late);
+          if (outcome.kind !== "unknown") settle(share, outcome);
+        },
+      });
+      outcome = appendOutcome(reply);
+      if (outcome.kind === "unknown") hold(share, outcome.message);
+      else settle(share, outcome);
+    } finally {
+      // Whatever the answer, older templates are news again.
+      if (entry.parent && entry.parent.hash === share.hash) entry.parent = null;
+      if (entry.appending.get(job.height) === inFlight) entry.appending.delete(job.height);
+      done(outcome.kind);
+    }
+  }
+
+  /**
+   * Hand miners the next job on top of a block the node is still appending.
+   * @returns the optimistic job, or null when it cannot be predicted safely
+   */
+  function startOptimistic(entry, job, solvedHeader, hash) {
+    // Only on the current job; on an optimistic job too (blocks in a row while
+    // the node is still saving the first: the node tab appends them in order).
+    if (optimistic.off || entry.last !== job) return null;
+    const next = optimisticNextJob(job, solvedHeader);
+    if (!next) return null;
+    entry.parent = { height: job.height, network: job.network, hash };
+    for (const old of [...entry.jobs.values()]) if (old.network === job.network && old.height <= job.height) retire(entry, old);
+    entry.jobs.set(next.id, next);
+    entry.last = next;
+    entry.sentAt = Date.now();
+    stats.jobs += 1;
+    optimistic.jobs += 1;
+    for (const socket of entry.sockets) notify(socket, next, true);
+    for (const socket of entry.sockets) socket.fresh = false;
+    return next;
+  }
+
+  /** Our block did not land: drop the job built on it and go back to the node's work. */
+  function rollBackOptimistic(share, stale) {
+    const entry = accounts.get(share.address);
+    const next = share.optimistic;
+    if (!entry || !next) return;
+    if (entry.jobs.has(next.id)) retire(entry, next);
+    if (!stale) {
+      // The height is still open: its jobs are good work again.
+      for (const [id, height] of [...entry.spent]) if (height === share.job.height) entry.spent.delete(id);
+    }
+    if (entry.last === next) entry.last = null;
+    entry.parent = null;
+    poll(share.address, true);
+  }
+
+  /** A solution for a height that is already taken, answered without asking the node. */
+  function staleLocally(socket, id, height) {
+    const rig = workerFor(socket);
+    stats.shares += 1;
+    rig.shares += 1;
+    rig.lastShareAt = Date.now();
+    stats.rejected += 1;
+    stats.stale += 1;
+    rig.rejected += 1;
+    stats.lastResult = `Block ${height} was stale (that height was already taken)`;
+    rig.lastResult = stats.lastResult;
+    send(socket, { id, result: null, error: [21, `Stale job: block ${height} was already found`, null] });
+  }
+
+  function label(job) {
+    return MINING_NETWORKS[job.network]?.label || job.network;
+  }
+
+  // Stratum code 21 is "job not found": miners file it under stale, not invalid.
+  function replyMiner(share, ok, message, code = 40) {
+    if (share.replied) return;
+    share.replied = true;
+    clearTimeout(share.replyTimer);
+    send(share.socket, ok ? { id: share.id, result: true, error: null } : { id: share.id, result: null, error: [code, String(message), null] });
+  }
+
+  /** The node tab did not answer: keep the block pending and check the chain for it. */
+  function hold(share, message) {
+    share.pending = true;
+    stats.pending += 1;
+    share.rig.pending += 1;
+    pendingShares.add(share);
+    stats.lastResult = `Block ${share.job.height}: the node tab has not answered yet; checking the chain for it`;
+    share.rig.lastResult = stats.lastResult;
+    share.replyTimer = setTimeout(() => replyMiner(share, false, `${message}; still checking the chain`), minerReplyMs);
+    share.replyTimer.unref?.();
+    // A new tip may be waiting behind the slow answer.
+    if (accounts.has(share.address)) poll(share.address, true);
+  }
+
+  /** @param {{ kind: "won" | "rejected", message: string, stale?: boolean, confirmed?: boolean }} outcome */
+  function settle(share, outcome) {
+    if (share.done) return;
+    share.done = true;
+    if (share.pending) {
+      share.pending = false;
+      stats.pending -= 1;
+      share.rig.pending -= 1;
+      pendingShares.delete(share);
+    }
+    const { job, rig } = share;
+    const who = share.worker ? ` (${share.worker})` : "";
+    if (outcome.kind === "won") {
       stats.blocks += 1;
       rig.blocks += 1;
-      stats.lastResult = `${MINING_NETWORKS[job.network]?.label || job.network} block ${job.height} accepted${socket.account.worker ? ` (${socket.account.worker})` : ""}`;
+      stats.lastResult = `${label(job)} block ${job.height} accepted${who}${outcome.confirmed ? ", confirmed on chain" : ""}`;
       rig.lastResult = `block ${job.height} accepted`;
-      send(socket, { id, result: true, error: null });
-      poll(socket.account.address);
+      replyMiner(share, true);
+      const entry = accounts.get(share.address);
+      if (entry) {
+        // That height is ours now: drop its jobs so any later solution for it
+        // is answered stale here, and fetch the next template right away.
+        if (job.height > entry.wonHeight) entry.wonHeight = job.height;
+        entry.wonAt = Date.now();
+        for (const old of [...entry.jobs.values()]) if (old.height <= job.height) retire(entry, old);
+        poll(share.address, true);
+      }
       return;
     }
     stats.rejected += 1;
     rig.rejected += 1;
-    const message = result?.error || (reply?.ok ? "Rejected" : `Node tab: ${reply?.code || "no answer"}`);
-    stats.lastResult = /deprecated/i.test(String(message))
+    if (outcome.stale) stats.stale += 1;
+    rollBackOptimistic(share, outcome.stale);
+    if (job.optimistic && !outcome.stale && !optimistic.off) {
+      // A block on predicted work was refused for some other reason: predict no more.
+      optimistic.off = `block ${job.height} on optimistic work was rejected: ${outcome.message}`;
+    }
+    stats.lastResult = outcome.stale
       ? `Block ${job.height} was stale (that height was already taken)`
-      : `Block ${job.height} rejected: ${message}`;
+      : `Block ${job.height} rejected: ${outcome.message}`;
     rig.lastResult = stats.lastResult;
-    send(socket, { id, result: null, error: [40, String(message), null] });
+    replyMiner(share, false, outcome.message, outcome.stale ? 21 : 40);
+  }
+
+  /** Settle pending blocks by the hash the node's chain has at their height. */
+  async function check(share) {
+    if (share.done || share.checking) return;
+    if (Date.now() - share.at > reconcileGiveUpMs) {
+      settle(share, { kind: "rejected", message: "The node tab never answered and the chain does not show the block" });
+      return;
+    }
+    share.checking = true;
+    try {
+      const reply = await call("GET", `/chain/block/${share.job.height}/hash`, undefined, share.job.page, { timeoutMs: templateTimeoutMs });
+      const result = reply?.ok ? reply.result : null;
+      const onChain = result && result.code === 0 && typeof result.data === "string" ? result.data.toLowerCase() : "";
+      // No block at that height yet (or no answer): ask again next round.
+      if (!onChain) return;
+      if (onChain === share.hash) settle(share, { kind: "won", message: "", confirmed: true });
+      else settle(share, { kind: "rejected", message: "Another block took that height", stale: true });
+    } finally {
+      share.checking = false;
+    }
+  }
+
+  function reconcile() {
+    for (const share of pendingShares) check(share).catch(() => {});
   }
 
   function onLine(socket, line) {
@@ -413,6 +925,7 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
     }
     const next = await listenOn(port, host);
     server = next;
+    reconcileTimer = setInterval(reconcile, reconcileMs);
     const address = next.address();
     listenPort = typeof address === "object" && address ? address.port : port;
     await syncTailnet();
@@ -429,6 +942,9 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
   }
 
   function stop() {
+    clearInterval(reconcileTimer);
+    reconcileTimer = null;
+    for (const share of pendingShares) clearTimeout(share.replyTimer);
     for (const entry of accounts.values()) clearInterval(entry.timer);
     accounts.clear();
     for (const socket of sockets) socket.destroy();
@@ -457,8 +973,11 @@ export function createStratumBridge({ call, getNetwork = () => MINING_NETWORKS.d
       accounts: [...accounts.keys()],
       workers: [...workers.values()].map((w) => ({ ...w, connected: Math.max(0, w.connected) })),
       ...stats,
+      optimisticJobs: optimistic.jobs,
+      optimisticOff: optimistic.off,
+      pendingBlocks: [...pendingShares].map((s) => ({ height: s.job.height, worker: s.worker, since: s.at })),
     };
   }
 
-  return { start, stop, status, setTailnet };
+  return { start, stop, status, setTailnet, reconcile, templateBlocked };
 }

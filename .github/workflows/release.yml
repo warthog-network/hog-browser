@@ -23,6 +23,15 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
       - name: Install packaging tools
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev rsync
 
@@ -47,6 +56,16 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
+      - name: Build phone app APK
+        working-directory: android
+        env:
+          HOG_VERSION: ${{ env.VERSION }}
+        run: |
+          gradle --no-daemon --stacktrace assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "../dist/hog-mobile-${VERSION}.apk"
+          AAPT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)aapt
+          "$AAPT" dump badging "../dist/hog-mobile-${VERSION}.apk" | head -3
+
       - name: Check if release tag already exists
         id: tag
         run: |
@@ -60,7 +79,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum "hog-browser_${VERSION}_amd64.deb" > SHA256SUMS
+          sha256sum "hog-browser_${VERSION}_amd64.deb" "hog-mobile-${VERSION}.apk" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish GitHub release
@@ -71,5 +90,6 @@ jobs:
           name: hog-browser ${{ env.VERSION }}
           files: |
             dist/hog-browser_${{ env.VERSION }}_*.deb
+            dist/hog-mobile-${{ env.VERSION }}.apk
             dist/SHA256SUMS
           fail_on_unmatched_files: true

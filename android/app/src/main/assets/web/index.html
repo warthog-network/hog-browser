@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'">
+  <title>Hog</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="grid-bg" aria-hidden="true"></div>
+
+  <!-- Pairing -->
+  <main id="pair-view" class="pair" hidden>
+    <img class="pair-logo" src="hog-logo.svg" alt="">
+    <h1>HOG</h1>
+    <p class="sub">Your home server, from your phone. Works over Tailscale.</p>
+    <ol class="steps">
+      <li>On the computer: hog → Settings → Tailscale → <b>Phone app</b> → Turn on → <b>Pair a phone</b>.</li>
+      <li>Here: tap <b>Scan QR</b>, or type the address and code hog shows.</li>
+    </ol>
+    <button id="scan-btn" class="primary big" type="button">Scan QR</button>
+    <form id="pair-form" class="pair-form" autocomplete="off">
+      <label>Hog address
+        <input id="pair-host" inputmode="url" autocapitalize="none" spellcheck="false" placeholder="hog.tailxxxx.ts.net or 100.x.y.z">
+      </label>
+      <div class="row2">
+        <label>Port
+          <input id="pair-port" inputmode="numeric" value="4189" maxlength="5">
+        </label>
+        <label>Code
+          <input id="pair-code" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" maxlength="9">
+        </label>
+      </div>
+      <button class="primary" type="submit" id="pair-submit">Pair</button>
+    </form>
+    <p id="pair-error" class="error" role="status"></p>
+    <p id="app-version" class="note app-version"></p>
+  </main>
+
+  <!-- App -->
+  <div id="app-view" class="app" hidden>
+    <header class="top">
+      <img src="hog-logo.svg" alt="" class="top-logo">
+      <div class="top-title">
+        <span class="brand">HOG</span>
+        <span id="top-host" class="top-host"></span>
+      </div>
+      <span id="conn-dot" class="conn" title="Connection"></span>
+      <button id="menu-btn" class="icon-btn" type="button" aria-label="Settings">⋮</button>
+    </header>
+
+    <section id="tab-containers" class="tab" data-tab="containers">
+      <div class="tab-head"><h2>Containers</h2><button class="ghost" data-refresh="containers" type="button">Refresh</button></div>
+      <p id="containers-note" class="note"></p>
+      <div id="containers-list" class="cards"></div>
+    </section>
+
+    <section id="tab-jellyfin" class="tab" data-tab="jellyfin" hidden>
+      <div class="tab-head"><h2>Jellyfin</h2><button class="ghost" data-refresh="jellyfin" type="button">Refresh</button></div>
+      <div class="card jelly">
+        <div class="jelly-mark" aria-hidden="true"></div>
+        <p id="jelly-state" class="big-state">Checking…</p>
+        <p id="jelly-url" class="mono link-text"></p>
+        <button id="jelly-app" class="primary big" type="button">Open in Jellyfin app</button>
+        <button id="jelly-browser" class="ghost" type="button">Open in browser</button>
+        <p class="note">The Jellyfin app asks for the server address once: use the address above.</p>
+      </div>
+    </section>
+
+    <section id="tab-mining" class="tab" data-tab="mining" hidden>
+      <div class="tab-head"><h2>Mining</h2><button class="ghost" data-refresh="mining" type="button">Refresh</button></div>
+      <div id="mining-status" class="card status-card"></div>
+      <div id="mining-stats" class="stats"></div>
+      <h3>Rigs</h3>
+      <div id="mining-workers" class="cards"></div>
+      <p class="note">Read-only. Start and stop mining in hog on the computer.</p>
+    </section>
+
+    <section id="tab-files" class="tab" data-tab="files" hidden>
+      <div class="tab-head">
+        <h2>Files</h2>
+        <div class="head-actions">
+          <button id="files-mkdir" class="ghost" type="button">New folder</button>
+          <button id="files-upload" class="primary" type="button">Upload</button>
+        </div>
+      </div>
+      <div id="files-roots" class="chips"></div>
+      <form id="files-search-form" class="search"><input id="files-search" type="search" placeholder="Search this folder" autocomplete="off"></form>
+      <nav id="files-crumbs" class="crumbs"></nav>
+      <div id="files-uploads" class="uploads" hidden></div>
+      <ul id="files-list" class="files"></ul>
+      <p id="files-note" class="note"></p>
+    </section>
+
+    <nav class="tabs" role="tablist">
+      <button data-go="containers" class="is-on" type="button"><span class="ti ti-box"></span>Containers</button>
+      <button data-go="jellyfin" type="button"><span class="ti ti-play"></span>Jellyfin</button>
+      <button data-go="mining" type="button"><span class="ti ti-pick"></span>Mining</button>
+      <button data-go="files" type="button"><span class="ti ti-folder"></span>Files</button>
+    </nav>
+  </div>
+
+  <!-- Sheets -->
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-back" data-close></div>
+    <div class="sheet-body" role="dialog" aria-modal="true">
+      <div id="sheet-content"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
