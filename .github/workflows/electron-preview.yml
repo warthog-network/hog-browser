@@ -1,0 +1,65 @@
+name: Chromium preview (Electron)
+
+# Builds "Hog (Chromium preview)" from electron/ as a .deb and an AppImage and
+# uploads them as workflow artifacts. Does not publish a release and does not
+# run on main. The main Release workflow (release.yml) is separate and unchanged.
+on:
+  push:
+    branches: ["electron-shell", "electron-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hog-browser
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            electron/package-lock.json
+
+      - name: Hog dependencies and bundles
+        run: |
+          npm ci
+          npm run build
+
+      - name: Hog tests
+        run: |
+          npm test
+          python3 -m unittest discover -s test -p '*_test.py'
+
+      - name: Electron shell dependencies
+        working-directory: electron
+        run: npm ci
+
+      - name: Electron shell tests
+        working-directory: electron
+        run: npm test
+
+      - name: Build .deb and AppImage
+        working-directory: electron
+        run: |
+          npm run dist
+          cd dist
+          sha256sum *.deb *.AppImage > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+
+      - name: Upload preview packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: hog-chromium-preview-${{ github.sha }}
+          path: |
+            electron/dist/*.deb
+            electron/dist/*.AppImage
+            electron/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

@@ -4,6 +4,14 @@
 (() => {
   if (globalThis.__hogOpfs) return;
   globalThis.__hogOpfs = true;
+  // Chromium (Hog's Electron preview, Brave) has a working origin private
+  // file system with sync access handles. Keep it; only WebKitGTK needs this.
+  // navigator.userAgentData exists only in Chromium, in pages and workers.
+  try {
+    if (typeof navigator !== "undefined" && navigator.userAgentData
+      && typeof FileSystemFileHandle !== "undefined"
+      && typeof FileSystemFileHandle.prototype.createSyncAccessHandle === "function") return;
+  } catch (e) {}
 
   function fail(name, message) {
     if (name === "TypeError") return new TypeError(message);

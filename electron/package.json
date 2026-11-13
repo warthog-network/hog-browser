@@ -1,0 +1,83 @@
+{
+  "name": "hog-chromium-preview",
+  "productName": "Hog (Chromium preview)",
+  "private": true,
+  "version": "0.1.39-preview.1",
+  "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
+  "author": "jax <jaxwhitefang@proton.me>",
+  "homepage": "https://github.com/warthog-network/hog-browser",
+  "license": "UNLICENSED",
+  "main": "main.js",
+  "scripts": {
+    "stage": "bash ./stage.sh",
+    "start": "bash ./stage.sh && electron .",
+    "dist": "bash ./stage.sh && electron-builder --linux AppImage deb --publish never",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@ghostery/adblocker-electron": "^2.20.3"
+  },
+  "devDependencies": {
+    "electron": "45.3.2",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "org.hog.BrowserChromiumPreview",
+    "productName": "Hog (Chromium preview)",
+    "executableName": "hog-chromium-preview",
+    "artifactName": "hog-chromium-preview_${version}_${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "lib/**",
+      "chrome-preload.js",
+      "page-preload.js",
+      "package.json",
+      "node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "hog-app",
+        "to": "hog-app",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "icon": "build/icons",
+      "synopsis": "Hog with a Chromium engine (preview)",
+      "executableArgs": [],
+      "desktop": {
+        "entry": {
+          "Name": "Hog (Chromium preview)",
+          "StartupWMClass": "hog-chromium-preview",
+          "Comment": "Preview of Hog on Chromium, side by side with Hog Browser"
+        }
+      },
+      "syncDesktopName": true
+    },
+    "deb": {
+      "packageName": "hog-chromium-preview",
+      "depends": [
+        "python3",
+        "libnss3",
+        "libgtk-3-0",
+        "libxss1",
+        "libasound2t64 | libasound2",
+        "libgbm1"
+      ],
+      "maintainer": "jax <jaxwhitefang@proton.me>"
+    }
+  },
+  "desktopName": "hog-chromium-preview"
+}
