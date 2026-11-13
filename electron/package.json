@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.40-preview.4",
+  "version": "0.1.40-preview.5",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",
@@ -11,9 +11,9 @@
   "scripts": {
     "stage": "bash ./stage.sh",
     "start": "bash ./stage.sh && electron .",
-    "dist": "bash ./stage.sh && electron-builder --linux AppImage deb --publish never",
+    "dist": "bash ./stage.sh && electron-builder --linux AppImage deb --publish never && bash ./check-hog-app-modules.sh linux",
     "test": "node --test test/*.test.mjs",
-    "dist:win": "bash ./stage.sh && electron-builder --win nsis zip --x64 --publish never"
+    "dist:win": "bash ./stage.sh && electron-builder --win nsis zip --x64 --publish never && bash ./check-hog-app-modules.sh win"
   },
   "dependencies": {
     "@ghostery/adblocker-electron": "^2.20.3",
@@ -54,6 +54,7 @@
       }
     ],
     "asar": true,
+    "afterPack": "./after-pack.cjs",
     "linux": {
       "target": [
         "AppImage",

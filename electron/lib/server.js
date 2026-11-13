@@ -57,11 +57,12 @@ async function firstFree(from, to) {
 }
 
 class HogServer {
-  constructor({ root, log = console.log, execPath = process.execPath, env = process.env } = {}) {
+  constructor({ root, log = console.log, execPath = process.execPath, env = process.env, spawnImpl = spawn } = {}) {
     this.root = root;
     this.log = log;
     this.execPath = execPath;
     this.env = env;
+    this.spawnImpl = spawnImpl;
     this.child = null;
     this.port = 0;
     this.nodePort = DEFAULT_NODE_PORT;
@@ -102,24 +103,44 @@ class HogServer {
     const env = { ...this.env, ELECTRON_RUN_AS_NODE: "1", HOG_PORT: String(port) };
     if (nodePort !== DEFAULT_NODE_PORT) env.HOG_NODE_PORT = String(nodePort);
     this.log(`Hog preview: starting server.mjs on ${port} (node tab ${nodePort}).`);
-    const child = spawn(this.execPath, ["server.mjs"], {
+    // Electron's bundled Node via ELECTRON_RUN_AS_NODE (process.execPath),
+    // not a system `node`. Pipe stdio so a crash (missing ws, etc.) can
+    // be shown in the launch error dialog, and still echo it to the log.
+    const child = this.spawnImpl(this.execPath, ["server.mjs"], {
       cwd: this.root,
       env,
       detached: true,
-      stdio: ["ignore", "inherit", "inherit"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
     this.child = child;
+    let output = "";
+    const onChunk = (chunk) => {
+      const text = String(chunk);
+      output += text;
+      if (output.length > 8000) output = output.slice(-4000);
+      try {
+        process.stderr.write(text);
+      } catch {
+        /* ignore */
+      }
+    };
+    if (child.stdout) child.stdout.on("data", onChunk);
+    if (child.stderr) child.stderr.on("data", onChunk);
     child.on("exit", (code, signal) => {
       this.log(`Hog preview: server.mjs exited (${code ?? signal}).`);
       if (this.child === child) this.child = null;
     });
+    const withTail = (message) => {
+      const tail = output.trim().split("\n").slice(-12).join("\n");
+      return tail ? `${message}\n\n${tail}` : message;
+    };
     return new Promise((resolve, reject) => {
       let tries = 0;
       const tick = async () => {
         if (await portOpen(port)) return resolve();
-        if (!this.child) return reject(new Error("Hog's local server stopped before the window opened."));
+        if (!this.child) return reject(new Error(withTail("Hog's local server stopped before the window opened.")));
         tries += 1;
-        if (tries > 100) return reject(new Error("Hog's local server did not start."));
+        if (tries > 100) return reject(new Error(withTail("Hog's local server did not start.")));
         setTimeout(tick, 100);
       };
       tick();

@@ -11,7 +11,9 @@ It runs **next to** the installed Hog Browser and does not replace it.
 - `server.mjs` and `public/` are used unchanged. If the WebKit Hog is already
   running, the preview attaches to its server on `127.0.0.1:4188` (mining,
   Tailscale, Files, phone app keep working and nothing starts twice). If not, it
-  starts its own copy of `server.mjs` with Electron's built-in Node. If the
+  starts its own copy of `server.mjs` with Electron's built-in Node, and the
+  package ships hog-app's production `node_modules` (the same set the WebKit
+  .deb ships) so that works without the WebKit Hog installed. If the
   WebKit Hog quits and takes its server with it, the preview starts its own and
   reloads. If you quit the preview while the WebKit Hog is using the preview's
   server, the server stays up.

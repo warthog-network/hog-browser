@@ -54,6 +54,10 @@ jobs:
           cat SHA256SUMS
           ls -l
 
+      - name: hog-app must ship production node_modules
+        working-directory: electron
+        run: bash ./check-hog-app-modules.sh linux
+
       - name: Upload preview packages
         uses: actions/upload-artifact@v4
         with:
@@ -101,6 +105,10 @@ jobs:
           sha256sum *.exe *.zip > SHA256SUMS-windows
           cat SHA256SUMS-windows
           ls -l
+
+      - name: hog-app must ship production node_modules
+        working-directory: electron
+        run: bash ./check-hog-app-modules.sh win
 
       - name: Upload Windows preview packages
         uses: actions/upload-artifact@v4
