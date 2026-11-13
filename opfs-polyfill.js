@@ -52,47 +52,164 @@
     return new Uint8Array(buffer);
   }
 
+  // Every storage call is a synchronous HTTP round trip (~0.3-0.6 ms in
+  // WebKitGTK), while the chain database does thousands of small page reads
+  // and writes per block batch. The sync handle is exclusive (Hog's lock), so
+  // it can keep a read cache and hold writes until flush() without anyone else
+  // seeing stale data. Durability is unchanged: flush() still reaches the disk
+  // and fsyncs before it returns, which is what SQLite relies on.
+  const CHUNK = 64 * 1024;
+  const CACHE_CHUNKS = 1024; // 64 MiB of read cache per open file
+  const PENDING_LIMIT = 8 * 1024 * 1024;
+  const openHandles = new Map();
+
+  function encodeWrites(list) {
+    let total = 0;
+    for (const item of list) total += 12 + item.bytes.byteLength;
+    const out = new Uint8Array(total);
+    const view = new DataView(out.buffer);
+    let pos = 0;
+    for (const item of list) {
+      view.setFloat64(pos, item.at, true);
+      view.setUint32(pos + 8, item.bytes.byteLength, true);
+      out.set(item.bytes, pos + 12);
+      pos += 12 + item.bytes.byteLength;
+    }
+    return out;
+  }
+
   function makeAccess(path, token) {
     const timer = setInterval(() => {
       try { syncCall("touch", path, "&token=" + encodeURIComponent(token)); } catch (e) {}
     }, 10000);
     let closed = false;
-    return {
+    let size = Number(syncCall("size", path));
+    let diskSize = size; // bytes the server file holds; chunks past it need no read
+    const cache = new Map(); // chunk index -> Uint8Array(CHUNK), insertion order = LRU
+    let pending = []; // { at, bytes } in write order, not yet on disk
+    let pendingBytes = 0;
+
+    function overlay(index, chunk) {
+      const base = index * CHUNK;
+      for (const item of pending) {
+        const from = Math.max(base, item.at);
+        const to = Math.min(base + CHUNK, item.at + item.bytes.byteLength);
+        if (from < to) chunk.set(item.bytes.subarray(from - item.at, to - item.at), from - base);
+      }
+    }
+
+    function chunkAt(index) {
+      let chunk = cache.get(index);
+      if (chunk) {
+        cache.delete(index);
+        cache.set(index, chunk);
+        return chunk;
+      }
+      chunk = new Uint8Array(CHUNK);
+      const base = index * CHUNK;
+      if (base < diskSize) {
+        const bytes = fromB64(syncCall("read", path, "&at=" + base + "&len=" + CHUNK));
+        chunk.set(bytes.subarray(0, Math.min(bytes.byteLength, CHUNK)));
+      }
+      overlay(index, chunk);
+      cache.set(index, chunk);
+      while (cache.size > CACHE_CHUNKS) cache.delete(cache.keys().next().value);
+      return chunk;
+    }
+
+    function push(sync) {
+      if (pending.length) {
+        for (const item of pending) diskSize = Math.max(diskSize, item.at + item.bytes.byteLength);
+        const body = encodeWrites(pending);
+        pending = [];
+        pendingBytes = 0;
+        syncCall("writev", path, sync ? "&sync=1" : "", body);
+      } else if (sync) {
+        syncCall("flush", path);
+      }
+    }
+
+    const handle = {
       read(buffer, options) {
         const view = toU8(buffer);
         const at = options && options.at ? Number(options.at) : 0;
-        const bytes = fromB64(syncCall("read", path, "&at=" + at + "&len=" + view.byteLength));
-        const n = Math.min(view.byteLength, bytes.byteLength);
-        if (n) view.set(bytes.subarray(0, n));
+        const n = Math.max(0, Math.min(view.byteLength, size - at));
+        let done = 0;
+        while (done < n) {
+          const pos = at + done;
+          const index = Math.floor(pos / CHUNK);
+          const offset = pos - index * CHUNK;
+          const take = Math.min(n - done, CHUNK - offset);
+          view.set(chunkAt(index).subarray(offset, offset + take), done);
+          done += take;
+        }
         return n;
       },
       write(buffer, options) {
         const view = toU8(buffer);
-        const copy = new Uint8Array(view.byteLength);
-        copy.set(view);
         const at = options && options.at ? Number(options.at) : 0;
-        return Number(syncCall("write", path, "&at=" + at, copy));
+        const bytes = new Uint8Array(view.byteLength);
+        bytes.set(view);
+        if (!bytes.byteLength) return 0;
+        pending.push({ at, bytes });
+        pendingBytes += bytes.byteLength;
+        const first = Math.floor(at / CHUNK);
+        const last = Math.floor((at + bytes.byteLength - 1) / CHUNK);
+        for (let index = first; index <= last; index += 1) {
+          const chunk = cache.get(index);
+          if (!chunk) continue;
+          const base = index * CHUNK;
+          const from = Math.max(base, at);
+          const to = Math.min(base + CHUNK, at + bytes.byteLength);
+          chunk.set(bytes.subarray(from - at, to - at), from - base);
+        }
+        size = Math.max(size, at + bytes.byteLength);
+        if (pendingBytes >= PENDING_LIMIT) push(false);
+        return bytes.byteLength;
       },
       flush() {
-        syncCall("flush", path);
+        push(true);
         return Promise.resolve();
       },
       getSize() {
-        return Promise.resolve(Number(syncCall("size", path)));
+        return Promise.resolve(size);
       },
-      truncate(size) {
-        syncCall("truncate", path, "&size=" + Number(size));
+      truncate(next) {
+        push(false);
+        const target = Number(next);
+        syncCall("truncate", path, "&size=" + target);
+        size = target;
+        diskSize = target;
+        const keep = Math.floor(target / CHUNK);
+        for (const index of Array.from(cache.keys())) {
+          if (index > keep) cache.delete(index);
+        }
+        const edge = cache.get(keep);
+        if (edge) edge.fill(0, target - keep * CHUNK);
         return Promise.resolve();
       },
       close() {
         if (closed) return Promise.resolve();
         closed = true;
         clearInterval(timer);
-        try { syncCall("flush", path); } catch (e) {}
+        if (openHandles.get(path) === handle) openHandles.delete(path);
+        try { push(true); } catch (e) {}
+        cache.clear();
         syncCall("unlock", path, "&token=" + encodeURIComponent(token));
         return Promise.resolve();
       },
+      __hogPush() {
+        push(false);
+      },
     };
+    openHandles.set(path, handle);
+    return handle;
+  }
+
+  // Reads and renames that bypass the sync handle must see its held writes.
+  function settle(path) {
+    const open = openHandles.get(path);
+    if (open) open.__hogPush();
   }
 
   function makeFile(path) {
@@ -100,6 +217,7 @@
       kind: "file",
       path,
       getFile() {
+        settle(path);
         const size = Number(syncCall("size", path));
         return Promise.resolve({
           size,
@@ -135,6 +253,7 @@
       },
       move(dest, name) {
         const to = childPath(dest && dest.path, name);
+        settle(path);
         syncCall("move", path, "&to=" + encodeURIComponent(to));
         path = to;
         this.path = to;

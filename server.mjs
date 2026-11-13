@@ -32,6 +32,15 @@ const SITE_PORT_FILE = join(homedir(), ".local/share/hog-browser/site-ports.json
 const GLUE_PREFIX = readFileSync(fileURLToPath(new URL("./opfs-polyfill.js", import.meta.url)));
 const OPFS_LOCK_MS = 60_000;
 const opfsLocks = new Map();
+// HOG_OPFS_STATS=1 logs node-tab storage requests per second (sync profiling).
+const OPFS_STATS = process.env.HOG_OPFS_STATS === "1" ? { ops: {} } : null;
+if (OPFS_STATS) {
+  setInterval(() => {
+    if (!Object.keys(OPFS_STATS.ops).length) return;
+    console.log(`opfs ops/5s ${JSON.stringify(OPFS_STATS.ops)}`);
+    OPFS_STATS.ops = {};
+  }, 5000).unref();
+}
 const BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const GATE = randomBytes(24).toString("hex");
 const WALLET_ISOLATION = {
@@ -1520,6 +1529,37 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
       await handle.close();
     }
   }
+  if (op === "writev") {
+    // Batched writes from the node tab's sync handle: [f64 offset][u32 length][bytes]...
+    const writes = [];
+    let pos = 0;
+    while (pos < body.length) {
+      if (pos + 12 > body.length) throw opfsFail(400, "Bad write batch");
+      const offset = body.readDoubleLE(pos);
+      const length = body.readUInt32LE(pos + 8);
+      if (!Number.isInteger(offset) || offset < 0 || pos + 12 + length > body.length) throw opfsFail(400, "Bad write batch");
+      if (offset + length > 16 * 1024 * 1024 * 1024) throw opfsFail(413, "That file is too large");
+      writes.push({ offset, bytes: body.subarray(pos + 12, pos + 12 + length) });
+      pos += 12 + length;
+    }
+    const handle = await open(full, "r+");
+    let total = 0;
+    try {
+      for (const { offset, bytes } of writes) {
+        let done = 0;
+        while (done < bytes.length) {
+          const { bytesWritten } = await handle.write(bytes, done, bytes.length - done, offset + done);
+          if (!bytesWritten) throw opfsFail(500, "Storage failed");
+          done += bytesWritten;
+        }
+        total += done;
+      }
+      if (params.sync === "1") await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    return opfsResult(200, String(total));
+  }
   if (op === "truncate" || op === "flush") {
     const handle = await open(full, "r+");
     try {
@@ -1592,8 +1632,9 @@ async function handleOpfs(site, req, res, url) {
     return;
   }
   const op = url.searchParams.get("op") || "";
+  if (OPFS_STATS) OPFS_STATS.ops[op] = (OPFS_STATS.ops[op] || 0) + 1;
   try {
-    const raw = await readBody(req, op === "write" ? 32_000_000 : 1_000_000);
+    const raw = await readBody(req, op === "write" || op === "writev" ? 32_000_000 : 1_000_000);
     const params = Object.fromEntries(url.searchParams.entries());
     const result = await applyOpfs(opfsRootFor(site.origin), op, params.path || "", raw, params);
     send(res, result.status, result.body, result.type, SITE_HEADERS);
