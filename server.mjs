@@ -32,6 +32,50 @@ const SITE_PORT_FILE = join(homedir(), ".local/share/hog-browser/site-ports.json
 const GLUE_PREFIX = readFileSync(fileURLToPath(new URL("./opfs-polyfill.js", import.meta.url)));
 const OPFS_LOCK_MS = 60_000;
 const opfsLocks = new Map();
+const OPFS_TOKEN = /^[0-9a-f]{16,64}$/;
+// fs errors worth a retry from the node tab; others are reported as they are.
+const OPFS_TRANSIENT_CODES = new Set(["EMFILE", "ENFILE", "EAGAIN", "EBUSY", "EINTR", "ETIMEDOUT", "ENOMEM", "ECONNRESET"]);
+const OPFS_CLIENT_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR", "EEXIST", "EINVAL", "ENAMETOOLONG"]);
+// Only these node-tab storage calls may arrive as GET (they change nothing).
+const OPFS_READ_OPS = new Set(["stat", "list", "size", "read"]);
+const OPFS_SLOW_MS = 5_000;
+// The node tab makes thousands of these calls a second while syncing; keep
+// the queue per file so a retried call can never land before the call it
+// repeats, and keep the log readable when something keeps failing.
+const opfsQueues = new Map();
+const opfsLog = { windowStart: 0, lines: 0, suppressed: 0, limit: 20, windowMs: 60_000, write: (line) => console.log(line) };
+// Fault injection for resilience tests only; off unless these are set.
+// HOG_OPFS_FAULTS=0.02 fails ~2% of storage calls in one of four ways (refused,
+// connection dropped before or after the call ran, or 503 after it ran).
+// HOG_OPFS_OUTAGE=N:MS fails every call for MS milliseconds after call N.
+const opfsFaults = {
+  rate: Math.min(0.5, Math.max(0, Number(process.env.HOG_OPFS_FAULTS || 0) || 0)),
+  outageAfter: Number(String(process.env.HOG_OPFS_OUTAGE || "").split(":")[0]) || 0,
+  outageMs: Number(String(process.env.HOG_OPFS_OUTAGE || "").split(":")[1]) || 0,
+  outageUntil: 0,
+  calls: 0,
+  injected: 0,
+  random: Math.random,
+};
+export const opfsFaultInternals = opfsFaults;
+
+function pickOpfsFault() {
+  const f = opfsFaults;
+  if (!f.rate && !f.outageMs) return "";
+  f.calls += 1;
+  const now = Date.now();
+  if (f.outageMs && f.outageAfter && f.calls === f.outageAfter) {
+    f.outageUntil = now + f.outageMs;
+    console.log(`opfs: test outage for ${f.outageMs} ms starts now`);
+  }
+  if (now < f.outageUntil) {
+    f.injected += 1;
+    return f.calls % 2 ? "refuse" : "drop";
+  }
+  if (!f.rate || f.random() >= f.rate) return "";
+  f.injected += 1;
+  return ["refuse", "drop", "lose-reply", "fail-after"][Math.floor(f.random() * 4)];
+}
 // HOG_OPFS_STATS=1 logs node-tab storage requests per second (sync profiling).
 const OPFS_STATS = process.env.HOG_OPFS_STATS === "1" ? { ops: {} } : null;
 if (OPFS_STATS) {
@@ -474,6 +518,94 @@ export function nodeSyncScript() {
 })();`;
 }
 
+/**
+ * The browser-node page stops the node on any SQLite "disk I/O error" and
+ * tells the user to clear their chain. When Hog's own storage calls were what
+ * failed (the polyfill reports that on the "hog-opfs" channel), the chain on
+ * disk is intact, so Hog reloads the page and presses Start once by itself,
+ * after the old threads' storage lock has lapsed. A second failure within
+ * NODE_RESTART_QUIET_MS is left for the user.
+ */
+export const NODE_RESTART_WAIT_MS = 65_000;
+export const NODE_RESTART_QUIET_MS = 30 * 60_000;
+
+export function nodeRecoveryScript(options = {}) {
+  const waitMs = Number(options.waitMs ?? NODE_RESTART_WAIT_MS);
+  const quietMs = Number(options.quietMs ?? NODE_RESTART_QUIET_MS);
+  const tickMs = Number(options.tickMs ?? 2000);
+  return `(function () {
+  if (window.__hogNodeRecovery) return;
+  window.__hogNodeRecovery = true;
+  var KEY = "hogNodeAutoRestart";
+  var WAIT_MS = ${waitMs};
+  var QUIET_MS = ${quietMs};
+  var GIVE_UP_MS = 120000;
+  var lastFailure = 0;
+  var channel = null;
+  try {
+    channel = new BroadcastChannel("hog-opfs");
+    channel.onmessage = function (event) {
+      var data = event && event.data;
+      if (data && data.type === "storage-failure") lastFailure = Date.now();
+    };
+  } catch (e) { channel = null; }
+  function load() { try { return JSON.parse(sessionStorage.getItem(KEY) || "null") || {}; } catch (e) { return {}; } }
+  function save(state) { try { sessionStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  function tell(type) { try { parent.postMessage({ source: "hog", type: type }, "*"); } catch (e) {} }
+  var banner = null;
+  function note(text) {
+    if (!document.body) return;
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.setAttribute("data-hog-node-recovery", "");
+      banner.style.cssText = "position:fixed;left:12px;bottom:12px;z-index:2147483647;padding:8px 12px;border-radius:8px;background:#222;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)";
+      document.body.appendChild(banner);
+    }
+    banner.textContent = text;
+    banner.style.display = text ? "block" : "none";
+  }
+  function startButton() {
+    var list = document.querySelectorAll("button");
+    for (var i = 0; i < list.length; i += 1) {
+      var b = list[i];
+      if (String(b.textContent || "").trim() === "Start node" && !b.disabled) return b;
+    }
+    return null;
+  }
+  function tick() {
+    var state = load();
+    var now = Date.now();
+    if (state.startAt) {
+      var left = state.startAt - now;
+      if (left > 0) {
+        note("Hog: a storage request failed. Your chain data is fine; restarting the node in " + Math.ceil(left / 1000) + " s.");
+        return;
+      }
+      var button = startButton();
+      if (button) {
+        save({ last: state.last });
+        note("");
+        button.click();
+        tell("node-autorestart");
+      } else if (now - state.startAt > GIVE_UP_MS) {
+        save({ last: state.last });
+        note("");
+      }
+      return;
+    }
+    var text = document.body ? String(document.body.innerText || "") : "";
+    if (!/SQLite disk I\\/O error/i.test(text)) return;
+    if (/malformed|not a database|SQLITE_CORRUPT/i.test(text)) return;
+    if (channel && now - lastFailure > GIVE_UP_MS) return;
+    if (state.last && now - state.last < QUIET_MS) return;
+    save({ last: now, startAt: now + WAIT_MS });
+    tell("node-storage-restart");
+    location.reload();
+  }
+  setInterval(tick, ${tickMs});
+})();`;
+}
+
 function navScript(pageOrigin) {
   return `<script>
 (function () {
@@ -740,7 +872,7 @@ export function rewriteHtml(html, finalUrl) {
     origin = "";
   }
   const storage = origin === NODE_ORIGIN
-    ? `<script>${GLUE_PREFIX.toString("utf8").replace(/<\/script/gi, "<\\/script")}</script><script>${nodeSyncScript()}</script><script>${pageRelayScript(MINING.token)}</script>`
+    ? `<script>${GLUE_PREFIX.toString("utf8").replace(/<\/script/gi, "<\\/script")}</script><script>${nodeSyncScript()}</script><script>${nodeRecoveryScript()}</script><script>${pageRelayScript(MINING.token)}</script>`
     : "";
   const inject = storage + navScript(origin);
   if (/<head[^>]*>/i.test(body)) {
@@ -1235,7 +1367,7 @@ function takeSitePort() {
   return port;
 }
 
-function createRuntime({ persistSites = false } = {}) {
+export function createRuntime({ persistSites = false } = {}) {
   const sites = new Map();
   const siteServers = [];
   const saved = persistSites ? loadSavedPorts() : {};
@@ -1262,33 +1394,41 @@ function createRuntime({ persistSites = false } = {}) {
   };
 
   async function listenSite(site) {
-    const server = createServer((req, res) => {
+    const handler = (req, res) => {
       handleSite(runtime, site, req, res).catch((error) => {
         const message = error instanceof Error ? error.message : "Request failed";
         if (!res.headersSent) send(res, 502, message, "text/plain; charset=utf-8");
       });
-    });
+    };
+    const server = siteHttpServer(handler);
     try {
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(site.port, "127.0.0.1", () => {
-          server.removeAllListeners("error");
-          server.on("error", (error) => {
-            console.error(error instanceof Error ? error.message : error);
-          });
-          resolve();
-        });
-      });
+      await listenOn(server, site.port, "127.0.0.1");
     } catch (error) {
       server.close();
       throw error;
     }
+    // WebKit resolves "localhost" to ::1 first. Without a listener there,
+    // every new connection to the page's port is refused once before it
+    // falls back to 127.0.0.1.
+    if (!site.port) site.port = server.address().port; // tests listen on port 0
+    const servers = [server];
+    const v6 = siteHttpServer(handler);
+    try {
+      await listenOn(v6, site.port, "::1");
+      servers.push(v6);
+    } catch (error) {
+      v6.close();
+      if (!["EADDRNOTAVAIL", "EAFNOSUPPORT", "EADDRINUSE", "EINVAL"].includes(error?.code)) throw error;
+    }
     site.server = server;
+    site.servers = servers;
     site.pages = new Map();
-    siteServers.push(server);
+    siteServers.push(...servers);
     sites.set(site.origin, site);
-    if (site.origin === NODE_ORIGIN) attachNodeBridge(server);
-    else server.on("upgrade", (_req, socket) => socket.destroy());
+    for (const each of servers) {
+      if (site.origin === NODE_ORIGIN) attachNodeBridge(each);
+      else each.on("upgrade", (_req, socket) => socket.destroy());
+    }
     return site;
   }
 
@@ -1319,6 +1459,32 @@ function createRuntime({ persistSites = false } = {}) {
   }
 
   return runtime;
+}
+
+/**
+ * HTTP server for a site page. The node tab's storage calls reuse keep-alive
+ * connections, so idle ones stay open well past Node's 5 s default instead of
+ * racing the browser's next request on a socket the server is closing.
+ */
+export function siteHttpServer(handler) {
+  const server = createServer(handler);
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 70_000;
+  server.requestTimeout = 120_000;
+  return server;
+}
+
+function listenOn(server, port, host) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.removeAllListeners("error");
+      server.on("error", (error) => {
+        console.error(error instanceof Error ? error.message : error);
+      });
+      resolve();
+    });
+  });
 }
 
 export function preferredSitePort(origin) {
@@ -1598,17 +1764,36 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
     return opfsResult(200, "ok");
   }
   if (op === "lock") {
+    // The node tab sends its own token so a retried lock (first reply lost)
+    // is granted again instead of looking like a second tab.
+    const asked = String(params.token || "");
+    if (asked && !OPFS_TOKEN.test(asked)) throw opfsFail(400, "Bad lock token");
     const current = opfsLocks.get(full);
+    if (current && asked && current.token === asked) {
+      current.at = Date.now();
+      return opfsResult(200, asked);
+    }
     if (current && Date.now() - current.at < OPFS_LOCK_MS) return opfsResult(409, "locked");
-    const token = randomBytes(8).toString("hex");
+    const token = asked || randomBytes(8).toString("hex");
     opfsLocks.set(full, { token, at: Date.now() });
     return opfsResult(200, token);
   }
-  if (op === "touch" || op === "unlock") {
+  if (op === "touch") {
+    // A touch also re-takes a lock this server no longer has (it restarted,
+    // or the holder's timers were starved past the lock's lifetime), unless
+    // another live holder has it.
+    const token = String(params.token || "");
+    if (!OPFS_TOKEN.test(token)) return opfsResult(409, "locked");
     const current = opfsLocks.get(full);
-    if (!current || current.token !== String(params.token || "")) return opfsResult(409, "locked");
-    if (op === "unlock") opfsLocks.delete(full);
-    else current.at = Date.now();
+    if (current && current.token !== token && Date.now() - current.at < OPFS_LOCK_MS) return opfsResult(409, "locked");
+    opfsLocks.set(full, { token, at: Date.now() });
+    return opfsResult(200, "ok");
+  }
+  if (op === "unlock") {
+    const current = opfsLocks.get(full);
+    if (!current) return opfsResult(200, "ok"); // already released (a retried unlock)
+    if (current.token !== String(params.token || "")) return opfsResult(409, "locked");
+    opfsLocks.delete(full);
     return opfsResult(200, "ok");
   }
   throw opfsFail(400, "Unknown storage request");
@@ -1622,25 +1807,122 @@ function withGluePolyfill(asset) {
   };
 }
 
+/** Print a storage problem, at most opfsLog.limit lines a minute. */
+export function logOpfs(line, now = Date.now()) {
+  if (now - opfsLog.windowStart >= opfsLog.windowMs) {
+    if (opfsLog.suppressed) {
+      opfsLog.write(`opfs: ${opfsLog.suppressed} more storage messages in the last minute were not shown`);
+    }
+    opfsLog.windowStart = now;
+    opfsLog.lines = 0;
+    opfsLog.suppressed = 0;
+  }
+  if (opfsLog.lines >= opfsLog.limit) {
+    opfsLog.suppressed += 1;
+    return false;
+  }
+  opfsLog.lines += 1;
+  opfsLog.write(line);
+  return true;
+}
+
+export const opfsLogInternals = opfsLog;
+
+/** HTTP status for a failed storage call: 5xx only for failures worth a retry. */
+export function opfsErrorStatus(error) {
+  const explicit = Number(error?.status);
+  if (explicit) return explicit;
+  const code = String(error?.code || "");
+  if (OPFS_TRANSIENT_CODES.has(code)) return 503;
+  if (!code || OPFS_CLIENT_CODES.has(code)) return 400;
+  return 500;
+}
+
+/** Run storage calls for one file in arrival order. */
+function inOpfsQueue(key, job) {
+  const prior = opfsQueues.get(key) || Promise.resolve();
+  const run = prior.then(job, job);
+  const tail = run.catch(() => {});
+  opfsQueues.set(key, tail);
+  tail.then(() => {
+    if (opfsQueues.get(key) === tail) opfsQueues.delete(key);
+  });
+  return run;
+}
+
+/** Only the node page itself may use its storage endpoint. */
+function opfsRequestAllowed(req, site) {
+  const fetchSite = String(req.headers["sec-fetch-site"] || "");
+  if (fetchSite && fetchSite !== "same-origin") return false;
+  const origin = String(req.headers.origin || "");
+  if (!origin) return true;
+  return origin === `http://${PAGE_HOST}:${site.port}`;
+}
+
 async function handleOpfs(site, req, res, url) {
   if (site.origin !== NODE_ORIGIN) {
     send(res, 404, "That page is not available", "text/plain; charset=utf-8");
     return;
   }
-  if (req.method !== "POST") {
+  const op = url.searchParams.get("op") || "";
+  const method = String(req.method || "");
+  const allowed = method === "POST" || method === "PUT" || (method === "GET" && OPFS_READ_OPS.has(op));
+  if (!allowed) {
     send(res, 405, "Method not allowed", "text/plain; charset=utf-8");
     return;
   }
-  const op = url.searchParams.get("op") || "";
+  if (!opfsRequestAllowed(req, site)) {
+    send(res, 403, "That page is not available", "text/plain; charset=utf-8");
+    return;
+  }
   if (OPFS_STATS) OPFS_STATS.ops[op] = (OPFS_STATS.ops[op] || 0) + 1;
+  const params = Object.fromEntries(url.searchParams.entries());
+  const path = String(params.path || "");
+  const retry = Number(params.retry || 0);
+  if (retry > 0) logOpfs(`opfs: retry ${retry} of ${op} ${path || "/"} (the earlier try failed or lost its reply)`);
+  const started = Date.now();
+  const root = opfsRootFor(site.origin);
+  let key = root;
   try {
-    const raw = await readBody(req, op === "write" || op === "writev" ? 32_000_000 : 1_000_000);
-    const params = Object.fromEntries(url.searchParams.entries());
-    const result = await applyOpfs(opfsRootFor(site.origin), op, params.path || "", raw, params);
+    key = opfsFull(root, path).full;
+  } catch {
+    // applyOpfs reports the bad path below.
+  }
+  const fault = pickOpfsFault();
+  if (fault === "refuse") {
+    send(res, 503, "Test fault", "text/plain; charset=utf-8", SITE_HEADERS);
+    return;
+  }
+  if (fault === "drop") {
+    req.socket.destroy();
+    return;
+  }
+  try {
+    const result = await inOpfsQueue(key, async () => {
+      const raw = method === "GET" ? Buffer.alloc(0) : await readBody(req, op === "write" || op === "writev" ? 32_000_000 : 1_000_000);
+      return applyOpfs(root, op, path, raw, params);
+    });
+    if (fault === "lose-reply") {
+      req.socket.destroy();
+      return;
+    }
+    if (fault === "fail-after") {
+      send(res, 503, "Test fault", "text/plain; charset=utf-8", SITE_HEADERS);
+      return;
+    }
+    const took = Date.now() - started;
+    if (result.status === 409 && op !== "mkdir" && op !== "create") {
+      logOpfs(`opfs: ${op} ${path || "/"} refused (${result.body.toString().slice(0, 40)})`);
+    } else if (took >= OPFS_SLOW_MS) {
+      logOpfs(`opfs: ${op} ${path || "/"} took ${took} ms`);
+    }
     send(res, result.status, result.body, result.type, SITE_HEADERS);
   } catch (error) {
-    const status = Number(error?.status) || 400;
-    send(res, status, error instanceof Error ? error.message : "Storage failed", "text/plain; charset=utf-8", SITE_HEADERS);
+    const status = opfsErrorStatus(error);
+    const message = error instanceof Error ? error.message : "Storage failed";
+    logOpfs(`opfs: ${method} ${op} ${path || "/"} failed with ${status}${error?.code ? ` ${error.code}` : ""}: ${String(message).slice(0, 160)} (${Date.now() - started} ms)`);
+    if (res.headersSent || res.destroyed) return;
+    send(res, status, message, "text/plain; charset=utf-8", SITE_HEADERS);
   }
 }
 
