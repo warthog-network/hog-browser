@@ -10,22 +10,120 @@
     return new DOMException(message, name);
   }
 
-  function syncCall(op, path, query, body) {
-    const xhr = new XMLHttpRequest();
+  // Hog's endpoint is one synchronous HTTP request per storage call, millions
+  // of them during a mainnet sync. One lost request used to surface as an
+  // SQLite "disk I/O error" and stop the node, so transient failures (network
+  // errors, 5xx) are retried with a short backoff. Every call is safe to repeat:
+  // reads and sizes are pure, writes carry their offsets, truncate/flush/mkdir/
+  // create are idempotent on the server, and lock carries a client token.
+  // ~31 s in all: long enough to ride out a machine that is briefly out of
+  // memory or swamped (a game loading, say), short enough to report a real outage.
+  const RETRY_DELAYS = globalThis.__hogOpfsRetryDelays || [5, 20, 50, 100, 250, 500, 1000, 2000, 4000, 8000, 15000];
+  // GET and PUT reuse one keep-alive connection in WebKitGTK; libsoup opens a
+  // new TCP connection for every POST. remove/move stay POST so libsoup never
+  // resends them on its own (a silent resend of a finished remove is a 404).
+  const READ_OPS = { stat: 1, list: 1, size: 1, read: 1 };
+  const POST_OPS = { remove: 1, move: 1 };
+  const stats = { requests: 0, retries: 0, failures: 0 };
+  globalThis.__hogOpfsStats = stats;
+  let sleepCell = null;
+
+  function pause(ms) {
+    try {
+      if (!sleepCell) sleepCell = new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(sleepCell, 0, 0, ms);
+      return;
+    } catch (e) {
+      // The page's main thread may not block in Atomics.wait; spin instead.
+    }
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* wait */ }
+  }
+
+  function transient(status) {
+    return status === 0 || status === 408 || status === 429 || status >= 500;
+  }
+
+  function reportFailure(op, path, status) {
+    stats.failures += 1;
+    try {
+      const channel = new BroadcastChannel("hog-opfs");
+      channel.postMessage({ type: "storage-failure", op, path, status, at: Date.now() });
+      channel.close();
+    } catch (e) {}
+  }
+
+  function requestOnce(op, path, query, body, retry) {
     const origin = self.location && String(self.location.origin || "").indexOf("http") === 0
       ? self.location.origin
       : "";
     let url = origin + "/__hog/opfs?op=" + encodeURIComponent(op) + "&path=" + encodeURIComponent(path || "");
     if (query) url += query.charAt(0) === "&" ? query : "&" + query;
-    xhr.open("POST", url, false);
-    xhr.send(body === undefined ? null : body);
-    const text = xhr.responseText || "";
-    if (xhr.status === 404) throw fail("NotFoundError", text || "Missing");
-    if (xhr.status === 409 && text === "mismatch") throw fail("TypeMismatchError", "Wrong entry type");
-    if (xhr.status === 409 && text === "not empty") throw fail("InvalidModificationError", "Directory is not empty");
-    if (xhr.status === 409) throw fail("NoModificationAllowedError", text || "File is already open");
-    if (xhr.status !== 200) throw fail("NotReadableError", text || "Storage failed");
+    if (retry) url += "&retry=" + retry;
+    const method = READ_OPS[op] ? "GET" : POST_OPS[op] ? "POST" : "PUT";
+    stats.requests += 1;
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open(method, url, false);
+      xhr.send(body === undefined || method === "GET" ? null : body);
+      return { status: Number(xhr.status) || 0, text: xhr.responseText || "" };
+    } catch (e) {
+      return { status: 0, text: "Storage request failed" };
+    }
+  }
+
+  function interpret(status, text) {
+    if (status === 404) throw fail("NotFoundError", text || "Missing");
+    if (status === 409 && text === "mismatch") throw fail("TypeMismatchError", "Wrong entry type");
+    if (status === 409 && text === "not empty") throw fail("InvalidModificationError", "Directory is not empty");
+    if (status === 409) throw fail("NoModificationAllowedError", text || "File is already open");
+    if (status !== 200) throw fail("NotReadableError", text || "Storage failed");
     return text;
+  }
+
+  function syncCall(op, path, query, body, options) {
+    const retries = options && options.retries != null ? options.retries : RETRY_DELAYS.length;
+    for (let attempt = 0; ; attempt += 1) {
+      const out = requestOnce(op, path, query, body, attempt);
+      if (transient(out.status) && attempt < retries) {
+        stats.retries += 1;
+        pause(RETRY_DELAYS[attempt]);
+        continue;
+      }
+      if (attempt > 0 && out.status !== 200) {
+        // An earlier try may have finished on the server before its reply was lost.
+        if (op === "remove" && out.status === 404) return "ok";
+        if (op === "move" && options && options.to && !transient(out.status)) {
+          let moved = false;
+          try {
+            moved = syncCall("stat", path) === "missing" && syncCall("stat", options.to) !== "missing";
+          } catch (e) {}
+          if (moved) return "ok";
+        }
+      }
+      if (transient(out.status)) reportFailure(op, path, out.status);
+      return interpret(out.status, out.text);
+    }
+  }
+
+  function newToken() {
+    const bytes = new Uint8Array(12);
+    try {
+      crypto.getRandomValues(bytes);
+    } catch (e) {
+      for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 1) out += (bytes[i] + 256).toString(16).slice(1);
+    return out;
+  }
+
+  // The token travels with the request, so a retried lock whose first try
+  // already succeeded is recognised as ours instead of "already open".
+  function lockCall(path) {
+    const token = newToken();
+    syncCall("lock", path, "&token=" + token);
+    return token;
   }
 
   function childPath(parent, name) {
@@ -61,6 +159,15 @@
   const CHUNK = 64 * 1024;
   const CACHE_CHUNKS = 1024; // 64 MiB of read cache per open file
   const PENDING_LIMIT = 8 * 1024 * 1024;
+  // Held writes are never dropped. If an early push fails they stay held and
+  // the next flush()/close() sends them or reports the error; past this much
+  // held data the write itself reports it.
+  const PENDING_HARD_LIMIT = 64 * 1024 * 1024;
+  const TOUCH_MS = 10000;
+  // Writes are held at most this long before the next write or lock refresh
+  // sends them. Log files are never flushed by the node, so without this they
+  // stayed in memory until the page closed and were lost.
+  const HOLD_MS = 2000;
   const openHandles = new Map();
 
   function encodeWrites(list) {
@@ -79,15 +186,43 @@
   }
 
   function makeAccess(path, token) {
-    const timer = setInterval(() => {
-      try { syncCall("touch", path, "&token=" + encodeURIComponent(token)); } catch (e) {}
-    }, 10000);
+    let lastTouch = Date.now();
+    function touch() {
+      lastTouch = Date.now();
+      try { syncCall("touch", path, "&token=" + encodeURIComponent(token), undefined, { retries: 2 }); } catch (e) {}
+      sendAged();
+    }
+    // A thread busy in long synchronous work may not run its timers; storage
+    // calls refresh the lock too so it never lapses under an active node.
+    function keepLock() {
+      if (Date.now() - lastTouch > 2 * TOUCH_MS) touch();
+    }
+    let size;
+    try {
+      size = Number(syncCall("size", path));
+    } catch (error) {
+      try { syncCall("unlock", path, "&token=" + encodeURIComponent(token)); } catch (e) {}
+      throw error;
+    }
+    const timer = setInterval(touch, TOUCH_MS);
     let closed = false;
-    let size = Number(syncCall("size", path));
     let diskSize = size; // bytes the server file holds; chunks past it need no read
     const cache = new Map(); // chunk index -> Uint8Array(CHUNK), insertion order = LRU
     let pending = []; // { at, bytes } in write order, not yet on disk
     let pendingBytes = 0;
+    let pendingSince = 0;
+
+    // An early push that fails is not fatal: the writes stay held and
+    // flush()/close() retries and reports. Only refuse to grow forever.
+    function sendAged(force) {
+      if (closed || !pending.length) return;
+      if (!force && pendingBytes < PENDING_LIMIT && Date.now() - pendingSince < HOLD_MS) return;
+      try {
+        push(false);
+      } catch (error) {
+        if (pendingBytes >= PENDING_HARD_LIMIT) throw error;
+      }
+    }
 
     function overlay(index, chunk) {
       const base = index * CHUNK;
@@ -118,19 +253,45 @@
     }
 
     function push(sync) {
+      keepLock();
       if (pending.length) {
-        for (const item of pending) diskSize = Math.max(diskSize, item.at + item.bytes.byteLength);
         const body = encodeWrites(pending);
+        // Throws after retries; the writes stay held for the next push.
+        syncCall("writev", path, sync ? "&sync=1" : "", body);
+        for (const item of pending) diskSize = Math.max(diskSize, item.at + item.bytes.byteLength);
         pending = [];
         pendingBytes = 0;
-        syncCall("writev", path, sync ? "&sync=1" : "", body);
       } else if (sync) {
         syncCall("flush", path);
       }
     }
 
+    function finishClose() {
+      if (closed) return;
+      try {
+        push(true);
+      } catch (error) {
+        // Keep the handle, its held writes and its lock: closing now would
+        // lose data SQLite believes is written. A later close() or a reopen
+        // of this file retries the flush.
+        handle.__hogCloseFailed = true;
+        throw error;
+      }
+      closed = true;
+      handle.__hogCloseFailed = false;
+      clearInterval(timer);
+      if (openHandles.get(path) === handle) openHandles.delete(path);
+      cache.clear();
+      try {
+        syncCall("unlock", path, "&token=" + encodeURIComponent(token));
+      } catch (e) {
+        // The data is on disk; an unreleased lock lapses on its own in 60 s.
+      }
+    }
+
     const handle = {
       read(buffer, options) {
+        keepLock();
         const view = toU8(buffer);
         const at = options && options.at ? Number(options.at) : 0;
         const n = Math.max(0, Math.min(view.byteLength, size - at));
@@ -151,6 +312,7 @@
         const bytes = new Uint8Array(view.byteLength);
         bytes.set(view);
         if (!bytes.byteLength) return 0;
+        if (!pending.length) pendingSince = Date.now();
         pending.push({ at, bytes });
         pendingBytes += bytes.byteLength;
         const first = Math.floor(at / CHUNK);
@@ -164,7 +326,7 @@
           chunk.set(bytes.subarray(from - at, to - at), from - base);
         }
         size = Math.max(size, at + bytes.byteLength);
-        if (pendingBytes >= PENDING_LIMIT) push(false);
+        sendAged(false);
         return bytes.byteLength;
       },
       flush() {
@@ -189,17 +351,24 @@
         return Promise.resolve();
       },
       close() {
-        if (closed) return Promise.resolve();
-        closed = true;
-        clearInterval(timer);
-        if (openHandles.get(path) === handle) openHandles.delete(path);
-        try { push(true); } catch (e) {}
-        cache.clear();
-        syncCall("unlock", path, "&token=" + encodeURIComponent(token));
+        try {
+          finishClose();
+        } catch (error) {
+          return Promise.reject(error);
+        }
         return Promise.resolve();
+      },
+      __hogFinishClose() {
+        finishClose();
       },
       __hogPush() {
         push(false);
+      },
+      __hogDiscard() {
+        // The file was deleted: its held writes have nowhere to go.
+        pending = [];
+        pendingBytes = 0;
+        cache.clear();
       },
     };
     openHandles.set(path, handle);
@@ -210,6 +379,20 @@
   function settle(path) {
     const open = openHandles.get(path);
     if (open) open.__hogPush();
+  }
+
+  function discardUnder(path) {
+    for (const [key, open] of openHandles) {
+      if (key === path || key.indexOf(path + "/") === 0) open.__hogDiscard();
+    }
+  }
+
+  // A handle whose close() failed still holds this file's lock in this thread.
+  // Finish that close (or report why it still fails) before locking again.
+  function openAccess(path) {
+    const stale = openHandles.get(path);
+    if (stale && stale.__hogCloseFailed) stale.__hogFinishClose();
+    return makeAccess(path, lockCall(path));
   }
 
   function makeFile(path) {
@@ -246,7 +429,7 @@
       },
       createSyncAccessHandle() {
         try {
-          return Promise.resolve(makeAccess(path, syncCall("lock", path)));
+          return Promise.resolve(openAccess(path));
         } catch (error) {
           return Promise.reject(error);
         }
@@ -254,7 +437,7 @@
       move(dest, name) {
         const to = childPath(dest && dest.path, name);
         settle(path);
-        syncCall("move", path, "&to=" + encodeURIComponent(to));
+        syncCall("move", path, "&to=" + encodeURIComponent(to), undefined, { to });
         path = to;
         this.path = to;
         return Promise.resolve();
@@ -297,7 +480,9 @@
       removeEntry(name, options) {
         try {
           const query = options && options.recursive ? "&recursive=1" : "";
-          syncCall("remove", childPath(path, name), query);
+          const target = childPath(path, name);
+          syncCall("remove", target, query);
+          discardUnder(target);
           return Promise.resolve();
         } catch (error) {
           return Promise.reject(error);
@@ -333,7 +518,7 @@
   function createSyncAccessHandle() {
     if (this && typeof this.path === "string") {
       try {
-        return Promise.resolve(makeAccess(this.path, syncCall("lock", this.path)));
+        return Promise.resolve(openAccess(this.path));
       } catch (error) {
         return Promise.reject(error);
       }

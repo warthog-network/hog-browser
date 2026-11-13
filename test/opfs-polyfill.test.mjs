@@ -43,7 +43,7 @@ test("node storage applies a write batch in order and can fsync it", async () =>
 });
 
 /** The polyfill in a sandbox, backed by an in-memory copy of Hog's storage endpoint. */
-function sandbox() {
+function sandbox({ clock } = {}) {
   const files = new Map([["", null]]);
   const locks = new Map();
   const calls = [];
@@ -52,6 +52,8 @@ function sandbox() {
     const path = params.get("path") || "";
     calls.push(op);
     const file = files.get(path);
+    if (op === "remove") { if (!files.has(path)) return reply(404, "missing"); files.delete(path); locks.delete(path); return reply(200, "ok"); }
+    if ((op === "writev" || op === "write" || op === "size" || op === "read" || op === "truncate") && !Buffer.isBuffer(file)) return reply(400, "ENOENT");
     if (op === "stat") return reply(200, !files.has(path) ? "missing" : file === null ? "directory" : "file");
     if (op === "create") { if (!files.has(path)) files.set(path, Buffer.alloc(0)); return reply(200, "ok"); }
     if (op === "mkdir") { files.set(path, null); return reply(200, "ok"); }
@@ -107,6 +109,7 @@ function sandbox() {
     clearInterval: () => {},
     location: { origin: "http://localhost:43100" },
   };
+  if (clock) context.Date = { now: () => clock.now };
   context.self = context;
   context.navigator = { storage: new StorageManager() };
   vm.createContext(context);
@@ -190,5 +193,59 @@ test("reading a file outside its sync handle sees held writes", async () => {
   assert.equal(file.size, 3);
   const bytes = new Uint8Array(await file.slice(0, 3).arrayBuffer());
   assert.deepEqual([...bytes], [1, 2, 3]);
+  await h.close();
+});
+
+test("held writes reach the disk within two seconds even if the file is never flushed", async () => {
+  const clock = { now: 1_000_000 };
+  const { context, files, calls } = sandbox({ clock });
+  const root = await context.navigator.storage.getDirectory();
+  const fh = await root.getFileHandle("timing.log", { create: true });
+  const h = await fh.createSyncAccessHandle();
+  calls.length = 0;
+  h.write(new Uint8Array([1, 2]), { at: 0 });
+  clock.now += 500;
+  h.write(new Uint8Array([3]), { at: 2 });
+  assert.equal(calls.length, 0, "still held");
+  clock.now += 1600;
+  h.write(new Uint8Array([4]), { at: 3 });
+  assert.deepEqual(calls, ["writev"], "the node's log files never call flush()");
+  assert.deepEqual([...files.get("timing.log")], [1, 2, 3, 4]);
+  await h.close();
+});
+
+test("removing a file drops its held writes instead of failing a later close", async () => {
+  const { context, files } = sandbox();
+  const root = await context.navigator.storage.getDirectory();
+  const fh = await root.getFileHandle("chain.db3-journal", { create: true });
+  const h = await fh.createSyncAccessHandle();
+  h.write(new Uint8Array([9, 9, 9]), { at: 0 });
+  await root.removeEntry("chain.db3-journal");
+  assert.equal(files.has("chain.db3-journal"), false);
+  await h.close();
+});
+
+test("a failed early push keeps its writes held; flush sends them once storage answers again", async () => {
+  const { context, files } = sandbox();
+  const root = await context.navigator.storage.getDirectory();
+  const fh = await root.getFileHandle("chain.db3", { create: true });
+  const h = await fh.createSyncAccessHandle();
+  const Real = context.XMLHttpRequest;
+  let down = true;
+  let refused = 0;
+  context.XMLHttpRequest = class extends Real {
+    send(body) {
+      if (down && this.url.searchParams.get("op") === "writev") { refused += 1; this.status = 400; this.responseText = "Disk said no"; return; }
+      super.send(body);
+    }
+  };
+  const big = new Uint8Array(9 * 1024 * 1024).fill(5);
+  assert.equal(h.write(big, { at: 0 }), big.length, "an early push failure does not fail the write");
+  assert.equal(refused, 1, "the 8 MiB early push was tried");
+  assert.throws(() => h.flush(), /Disk said no/);
+  down = false;
+  await h.flush();
+  assert.equal(files.get("chain.db3").length, big.length);
+  assert.equal(files.get("chain.db3")[big.length - 1], 5);
   await h.close();
 });
