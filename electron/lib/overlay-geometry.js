@@ -40,10 +40,25 @@ function menuBounds(rects, width, height) {
   return unionBounds({ x: Math.floor(first.x), y: Math.floor(first.y), width: 0, height: 0 }, rects, width, height);
 }
 
+/** "pill:x:y:w:h:side:label" from the Hog UI -> the floating Tabs / Wallet label. */
+function parsePill(command) {
+  if (typeof command !== "string" || !command.startsWith("pill:")) return null;
+  const parts = command.split(":");
+  if (parts.length < 7) return null;
+  const [x, y, w, h] = parts.slice(1, 5).map((n) => Number.parseInt(n, 10));
+  const side = parts[5];
+  const label = parts.slice(6).join(":");
+  if (![x, y, w, h].every(Number.isFinite)) return null;
+  if (w < 48 || w > 180 || h < 24 || h > 48) return null;
+  if (side !== "tabs" && side !== "wallet") return null;
+  if (!label || label.length > 32) return null;
+  return { x: Math.max(0, x), y: Math.max(0, y), w, h, side, label };
+}
+
 /** Clean up the menu snapshot the Hog UI preload sends. */
 function cleanSurface(raw) {
   const kinds = new Set(["suggestions", "history", "settings"]);
-  const out = { menus: [], cover: false, css: [] };
+  const out = { menus: [], toasts: [], cover: false, css: [] };
   if (!raw || typeof raw !== "object") return out;
   const word = (v) => (typeof v === "string" ? v.slice(0, 300) : "");
   if (raw.htmlClass) out.htmlClass = word(raw.htmlClass);
@@ -53,9 +68,14 @@ function cleanSurface(raw) {
   if (Array.isArray(raw.css)) {
     out.css = raw.css.filter((href) => typeof href === "string" && /^http:\/\/(127\.0\.0\.1|localhost):\d+\/[\w./-]+\.css$/.test(href)).slice(0, 8);
   }
-  if (Array.isArray(raw.menus)) {
-    for (const menu of raw.menus.slice(0, 3)) {
-      if (!menu || !kinds.has(menu.kind) || typeof menu.html !== "string" || menu.html.length > 400000) continue;
+  const lists = [
+    ["menus", kinds, 3],
+    ["toasts", new Set(["toasts"]), 1],
+  ];
+  for (const [field, allowed, max] of lists) {
+    if (!Array.isArray(raw[field])) continue;
+    for (const menu of raw[field].slice(0, max)) {
+      if (!menu || !allowed.has(menu.kind) || typeof menu.html !== "string" || menu.html.length > 400000) continue;
       const r = menu.rect || {};
       const rect = { x: Number(r.x), y: Number(r.y), w: Number(r.w), h: Number(r.h) };
       if (![rect.x, rect.y, rect.w, rect.h].every(Number.isFinite) || rect.w < 3 || rect.h < 3) continue;
@@ -63,10 +83,10 @@ function cleanSurface(raw) {
         .slice(-12)
         .filter((c) => c && /^[a-z][a-z0-9-]*$/.test(c.tag))
         .map((c) => ({ tag: c.tag, id: word(c.id), cls: word(c.cls) }));
-      out.menus.push({ kind: menu.kind, html: menu.html, chain, rect, scroll: Number(menu.scroll) || 0 });
+      out[field].push({ kind: menu.kind, html: menu.html, chain, rect, scroll: Number(menu.scroll) || 0 });
     }
   }
   return out;
 }
 
-module.exports = { GRIP_W, GRIP_HOT_W, GRIP_H, gripBounds, unionBounds, menuBounds, cleanSurface };
+module.exports = { GRIP_W, GRIP_HOT_W, GRIP_H, gripBounds, unionBounds, menuBounds, cleanSurface, parsePill };

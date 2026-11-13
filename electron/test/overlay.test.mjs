@@ -35,5 +35,16 @@ test("surface reports are cleaned", () => {
   assert.deepEqual(s.css, ["http://127.0.0.1:4188/app.css"]);
   assert.equal(s.menus.length, 1);
   assert.equal(s.menus[0].kind, "settings");
-  assert.deepEqual(geo.cleanSurface(null), { menus: [], cover: false, css: [] });
+  assert.deepEqual(geo.cleanSurface(null), { menus: [], toasts: [], cover: false, css: [] });
+  const t = geo.cleanSurface({ toasts: [{ kind: "toasts", html: "<div></div>", rect: { x: 900, y: 600, w: 300, h: 60 } }, { kind: "toasts", html: "<b></b>", rect: { x: 1, y: 1, w: 9, h: 9 } }] });
+  assert.equal(t.toasts.length, 1);
+  assert.equal(t.menus.length, 0);
+});
+
+test("the floating Tabs / Wallet label is parsed like the GTK shell does", () => {
+  assert.deepEqual(geo.parsePill("pill:2:120:112:36:tabs:Tabs ›"), { x: 2, y: 120, w: 112, h: 36, side: "tabs", label: "Tabs ›" });
+  assert.equal(geo.parsePill("pill:2:120:112:36:wallet:a:b").label, "a:b");
+  assert.equal(geo.parsePill("pill:2:120:12:36:tabs:x"), null);
+  assert.equal(geo.parsePill("pill:2:120:112:36:evil:x"), null);
+  assert.equal(geo.parsePill("pill:hide"), null);
 });

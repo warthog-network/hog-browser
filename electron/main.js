@@ -498,7 +498,7 @@ class PageHost {
   layout() {
     if (!win || win.isDestroyed()) return;
     const [width, height] = win.getContentSize();
-    const bounds = policy.viewBounds(this.place, width, height);
+    const bounds = policy.edgeInset(policy.viewBounds(this.place, width, height), this.gripPaint);
     for (const [tabId, entry] of this.views) {
       if (this.fullTab === tabId) {
         entry.view.setBounds({ x: 0, y: 0, width, height });
@@ -937,13 +937,13 @@ function onContainers(command) {
 function onWindowMessage(command) {
   if (typeof command !== "string" || command.length > 2_000_000) return;
   if (pages && pages.command(command)) return;
-  if (command === "pill:hide" || command.startsWith("pill:")) return; // labels are drawn in the page grips
+  if (command === "pill:hide" || command.startsWith("pill:")) return overlays && overlays.setPill(command === "pill:hide" ? null : command);
   if (command.startsWith("edges:")) {
     if (!pages) return;
     const paint = policy.parseEdges(command, pages.place.top);
     if (paint && !(overlays && overlays.dragging)) {
       pages.gripPaint = paint;
-      pages.repaint();
+      pages.layout(); // rail lines change the page inset; layout() repaints
     }
     return;
   }
@@ -1042,15 +1042,17 @@ function prepareOverlaySession(ses) {
 class Overlays {
   constructor() {
     prepareOverlaySession(session.fromPartition(OVERLAY_PARTITION));
-    this.surface = { menus: [], cover: false, css: [] };
+    this.surface = { menus: [], toasts: [], cover: false, css: [] };
     this.sent = new Map();
-    this.hot = { tabs: false, wallet: false };
     this.dragging = null;
     this.dragTop = 0;
+    this.pill = null; // { x, y, w, h, side, label } in window coordinates
     this.snapWant = false;
     this.snapTab = null;
     this.snapToken = 0;
     this.grips = { tabs: this.make("grip", "tabs"), wallet: this.make("grip", "wallet") };
+    this.pillView = this.make("pill");
+    this.toastView = this.make("toasts");
     this.menu = this.make("menu");
   }
 
@@ -1087,13 +1089,23 @@ class Overlays {
     return view;
   }
 
+  views() {
+    return [this.grips.tabs, this.grips.wallet, this.pillView, this.toastView, this.menu];
+  }
+
   /** Keep the overlays above every page view (addChildView re-orders). */
   raise() {
-    for (const view of [this.grips.tabs, this.grips.wallet, this.menu]) win.contentView.addChildView(view);
+    for (const view of this.views()) win.contentView.addChildView(view);
+    if (typeof findBar !== "undefined" && findBar) findBar.raise();
   }
 
   setSurface(raw) {
     this.surface = geometry.cleanSurface(raw);
+    this.sync();
+  }
+
+  setPill(raw) {
+    this.pill = geometry.parsePill(raw);
     this.sync();
   }
 
@@ -1104,6 +1116,19 @@ class Overlays {
     view.webContents.executeJavaScript(`window.__hogOverlay && window.__hogOverlay(${key})`, false).catch(() => {});
   }
 
+  hide(view) {
+    if (view.getVisible()) view.setVisible(false);
+  }
+
+  showCopies(view, items, extra) {
+    const [width, height] = win.getContentSize();
+    const bounds = geometry.menuBounds(items.map((m) => m.rect), width, height);
+    view.setBounds(bounds);
+    const { css, htmlClass, bodyClass, theme } = this.surface;
+    this.send(view, { menus: items, css, htmlClass, bodyClass, theme, origin: { x: bounds.x, y: bounds.y }, ...extra });
+    if (!view.getVisible()) view.setVisible(true);
+  }
+
   sync() {
     if (!win || win.isDestroyed() || !pages) return;
     const page = pages.pageBounds();
@@ -1112,37 +1137,42 @@ class Overlays {
     this.snapshot(cover);
     const active = live && !cover;
     if (process.env.HOG_PREVIEW_DEBUG) {
-      const key = `${live}:${cover}:${this.surface.menus.length}:${JSON.stringify(pages.gripPaint)}`;
-      if (key !== this.debugKey) log(`overlays live=${live} cover=${cover} menus=${this.surface.menus.length} grips=${JSON.stringify(pages.gripPaint)}`);
+      const key = `${live}:${cover}:${this.surface.menus.length}:${this.surface.toasts.length}:${JSON.stringify(pages.gripPaint)}`;
+      if (key !== this.debugKey) log(`overlays live=${live} cover=${cover} menus=${this.surface.menus.length} toasts=${this.surface.toasts.length} grips=${JSON.stringify(pages.gripPaint)}`);
       this.debugKey = key;
     }
 
     const menus = active ? this.surface.menus : [];
-    if (menus.length && this.menu.ready) {
-      const [width, height] = win.getContentSize();
-      const bounds = geometry.menuBounds(menus.map((m) => m.rect), width, height);
-      this.menu.setBounds(bounds);
-      const { css, htmlClass, bodyClass, theme } = this.surface;
-      this.send(this.menu, { menus, css, htmlClass, bodyClass, theme, origin: { x: bounds.x, y: bounds.y } });
-      this.menu.setVisible(true);
-    } else if (this.menu.getVisible()) {
-      this.menu.setVisible(false);
-    }
+    if (menus.length && this.menu.ready) this.showCopies(this.menu, menus);
+    else this.hide(this.menu);
+
+    // Toasts stay up over the page even while a Hog panel covers it.
+    const toasts = live ? this.surface.toasts : [];
+    if (toasts.length && this.toastView.ready) this.showCopies(this.toastView, toasts);
+    else this.hide(this.toastView);
 
     const paint = pages.gripPaint;
     for (const side of ["tabs", "wallet"]) {
       const view = this.grips[side];
       if (!(active && paint && paint[side] && view.ready)) {
-        if (view.getVisible()) view.setVisible(false);
+        this.hide(view);
         if (this.dragging === side) this.dragging = null;
-        this.hot[side] = false;
         continue;
       }
       const top = this.dragging === side ? this.dragTop : paint[`${side}Top`];
-      const bounds = geometry.gripBounds(side, page, top, this.hot[side] && this.dragging !== side);
+      const bounds = geometry.gripBounds(side, page, top, false);
       view.setBounds(bounds);
       this.send(view, { top: bounds.top });
       if (!view.getVisible()) view.setVisible(true);
+    }
+
+    const pill = active && this.pillView.ready ? this.pill : null;
+    if (pill) {
+      this.pillView.setBounds({ x: pill.x, y: pill.y, width: pill.w, height: pill.h });
+      this.send(this.pillView, { side: pill.side, label: pill.label });
+      if (!this.pillView.getVisible()) this.pillView.setVisible(true);
+    } else {
+      this.hide(this.pillView);
     }
   }
 
@@ -1189,15 +1219,36 @@ class Overlays {
       if (parts[0] === "menu" && this.menu.getVisible()) pages.onMenuMessage(parts);
       return;
     }
+    if (wc === this.toastView.webContents) {
+      // menu:toasts:<button index> -> click that button in the Hog UI's toasts.
+      const index = Number.parseInt(parts[2], 10);
+      if (parts[0] === "menu" && parts[1] === "toasts" && parts.length === 3 && index >= 0 && index < 50 && this.toastView.getVisible()) {
+        tellChrome(`(function(){var b=document.querySelectorAll('#hog-toasts button')[${index}]; if (b && !b.disabled && !b.hidden) b.click();})()`);
+      }
+      return;
+    }
+    if (wc === this.pillView.webContents) {
+      if (!this.pillView.getVisible() || !this.pill) return;
+      const side = this.pill.side;
+      if (message === "enter") tellChrome("window.__hogPillHold && window.__hogPillHold()");
+      else if (message === "leave") {
+        this.pill = null;
+        this.sync();
+        tellChrome("window.__hogPillHide && window.__hogPillHide()");
+      } else if (message === "click") {
+        this.pill = null;
+        this.sync();
+        tellChrome(`window.__hogPillHide && window.__hogPillHide(); document.getElementById('${side === "wallet" ? "wallet-edge" : "tabs-edge"}').click()`);
+      }
+      return;
+    }
     const side = wc === this.grips.tabs.webContents ? "tabs" : wc === this.grips.wallet.webContents ? "wallet" : null;
     if (!side || parts[1] !== side || !this.grips[side].getVisible()) return;
+    // Same protocol as the WebKit shell's EdgeSpot widgets (__hogSpot*).
     const kind = parts[0];
-    if ((kind === "hot" || kind === "cold") && parts.length === 2) {
-      this.hot[side] = kind === "hot";
-      this.sync();
-    } else if (kind === "click" && parts.length === 2) {
-      this.hot[side] = false;
-      tellChrome(`window.__hogEdgeClick && window.__hogEdgeClick('${side}')`);
+    if ((kind === "in" || kind === "out" || kind === "down") && parts.length === 2) {
+      const name = { in: "__hogSpotIn", out: "__hogSpotOut", down: "__hogSpotDown" }[kind];
+      tellChrome(`window.${name} && window.${name}('${side}')`);
     } else if (kind === "move" && parts.length === 3) {
       const top = Number.parseInt(parts[2], 10);
       if (!Number.isFinite(top) || top < -200 || top > 10000) return;
@@ -1205,12 +1256,12 @@ class Overlays {
       this.dragging = side;
       this.dragTop = geometry.gripBounds(side, page, top, false).top;
       this.sync();
-      tellChrome(`window.__hogEdgeMove && window.__hogEdgeMove('${side}', ${this.dragTop})`);
-    } else if (kind === "end" && parts.length === 2) {
-      if (pages.gripPaint) pages.gripPaint[`${side}Top`] = this.dragTop;
+      tellChrome(`window.__hogSpotSlide && window.__hogSpotSlide('${side}', ${page.y + this.dragTop})`);
+    } else if (kind === "up" && parts.length === 3) {
+      const moved = parts[2] === "1";
+      if (moved && pages.gripPaint) pages.gripPaint[`${side}Top`] = this.dragTop;
       this.dragging = null;
-      this.hot[side] = false;
-      tellChrome(`window.__hogEdgeEnd && window.__hogEdgeEnd('${side}')`);
+      tellChrome(`window.__hogSpotUp && window.__hogSpotUp('${side}', ${moved ? 1 : 0})`);
       this.sync();
     }
   }

@@ -54,7 +54,11 @@ test("view and edge commands", () => {
   assert.equal(policy.parseView("view:x"), null);
   assert.deepEqual(policy.viewBounds({ left: 10, top: 50, right: 20, bottom: 0 }, 1000, 700), { x: 10, y: 50, width: 970, height: 650 });
   const edges = "edges:0:0:0:0:0:0:0:0:0:200:16:36:0:0:0:0";
-  assert.deepEqual(policy.parseEdges(edges, 50), { tabs: true, tabsTop: 150, wallet: false, walletTop: -50 });
+  assert.deepEqual(policy.parseEdges(edges, 50), { tabs: true, tabsTop: 150, wallet: false, walletTop: -50, tabsLine: null, walletLine: null });
+  const lines = policy.parseEdges("edges:0:34:2:700:998:34:2:700:0:200:16:36:984:200:16:36", 34);
+  assert.deepEqual(lines.tabsLine, { x: 0, w: 2 });
+  assert.deepEqual(policy.edgeInset({ x: 0, y: 34, width: 1000, height: 700 }, lines), { x: 2, y: 34, width: 996, height: 700 });
+  assert.deepEqual(policy.edgeInset({ x: 0, y: 34, width: 1000, height: 700 }, null), { x: 0, y: 34, width: 1000, height: 700 });
 });
 
 test("the grip script is reused from the GTK shell, minus WebKit's handler", () => {

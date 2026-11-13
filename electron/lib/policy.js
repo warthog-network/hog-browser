@@ -169,7 +169,19 @@ function parseEdges(command, pageTop) {
     tabsTop: nums[9] - pageTop,
     wallet: nums[14] > 0,
     walletTop: nums[13] - pageTop,
+    tabsLine: nums[2] > 0 ? { x: nums[0], w: nums[2] } : null,
+    walletLine: nums[6] > 0 ? { x: nums[4], w: nums[6] } : null,
   };
+}
+
+/** Leave the gold rail lines of closed drawers visible: the Hog UI draws
+ *  them at the stage edge, so keep the page view off those pixels. */
+function edgeInset(bounds, paint) {
+  if (!paint) return bounds;
+  const clamp = (n) => Math.max(0, Math.min(8, Math.round(n)));
+  const left = paint.tabsLine ? clamp(paint.tabsLine.x + paint.tabsLine.w - bounds.x) : 0;
+  const right = paint.walletLine ? clamp(bounds.x + bounds.width - paint.walletLine.x) : 0;
+  return { x: bounds.x + left, y: bounds.y, width: Math.max(0, bounds.width - left - right), height: bounds.height };
 }
 
 /** The Chrome user agent without "Electron/" or the app name, so sites
@@ -224,4 +236,5 @@ module.exports = {
   rewriteMessageHandler,
   uniqueDownloadPath,
   viewBounds,
+  edgeInset,
 };

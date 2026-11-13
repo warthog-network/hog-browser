@@ -20,15 +20,15 @@
     font: 600 13px/1 'Segoe UI', 'Helvetica Neue', sans-serif; }
   button.grip.tabs { border-radius: 0 8px 8px 0; }
   button.grip.wallet { border-radius: 8px 0 0 8px; }
-  button.grip.hot { background: #17181b; border: 1px solid rgba(255,255,255,.14); }
-  button.grip.tabs.hot { border-radius: 0 999px 999px 0; border-left: 0; justify-content: flex-start; padding: 0 12px; }
-  button.grip.wallet.hot { border-radius: 999px 0 0 999px; border-right: 0; justify-content: flex-end; padding: 0 12px; }
-  button.grip.drag, button.grip.drag.hot { background: #fdb913; border: 0; padding: 0; cursor: grabbing; justify-content: center; }
+  button.grip.drag { cursor: grabbing; }
+  button.pill-label { all: initial; position: absolute; inset: 0; box-sizing: border-box;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    background: #242624; color: #f4f4f6; user-select: none; white-space: nowrap;
+    font: 600 13px/1 Montserrat, Inter, Ubuntu, 'Segoe UI', 'Helvetica Neue', sans-serif; }
+  button.pill-label.tabs { border-radius: 0 999px 999px 0; }
+  button.pill-label.wallet { border-radius: 999px 0 0 999px; }
   .dots { width: 9px; height: 9px; display: grid; grid-template-columns: 3px 3px; gap: 3px; }
   .dots i { width: 3px; height: 3px; border-radius: 50%; background: #2a1d05; display: block; }
-  button.grip.hot:not(.drag) .dots { display: none; }
-  .label { display: none; white-space: nowrap; }
-  button.grip.hot:not(.drag) .label { display: block; }
 </style>
 </head>
 <body>

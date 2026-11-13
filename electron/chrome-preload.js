@@ -77,7 +77,7 @@ function overlaps(a, b) {
 
 function readSurface() {
   const view = document.getElementById("view");
-  const out = { menus: [], cover: false, css: [] };
+  const out = { menus: [], toasts: [], cover: false, css: [] };
   if (!view || !document.body) return out;
   const area = view.getBoundingClientRect();
   const menuEls = [];
@@ -95,6 +95,14 @@ function readSurface() {
     }
     out.menus.push({ kind, html: el.outerHTML, chain, rect: { x: r.left, y: r.top, w: r.width, h: r.height }, scroll: list ? list.scrollTop : 0 });
   }
+  // Download, copy and update notices: the toast stack sits over the page.
+  const toasts = document.getElementById("hog-toasts");
+  if (toasts && toasts.children.length && shown(toasts)) {
+    const r = toasts.getBoundingClientRect();
+    if (overlaps(r, area)) {
+      out.toasts.push({ kind: "toasts", html: toasts.outerHTML, chain: [], rect: { x: r.left, y: r.top, w: r.width, h: r.height }, scroll: 0 });
+    }
+  }
   for (const el of document.querySelectorAll(COVER_SELECTOR)) {
     if (view.contains(el) || el.contains(view)) continue;
     if (menuEls.some((menu) => menu === el || menu.contains(el))) continue;
@@ -104,7 +112,7 @@ function readSurface() {
       break;
     }
   }
-  if (out.menus.length) {
+  if (out.menus.length || out.toasts.length) {
     out.css = [...document.querySelectorAll('link[rel="stylesheet"]')].map((link) => link.href).filter(Boolean);
     out.htmlClass = document.documentElement.getAttribute("class") || "";
     out.bodyClass = document.body.getAttribute("class") || "";
