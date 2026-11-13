@@ -185,13 +185,13 @@ function buildPreviewCard() {
     #preview-card .default-browser-row { flex-wrap: wrap; }
     #preview-card .default-browser-copy { flex: 1 1 260px; }
     #preview-card .hog-update-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; flex: 0 1 auto; }
-    #preview-card button { border: 1px solid rgba(var(--accent-rgb), 0.55); background: var(--panel); color: var(--gold); border-radius: 999px; padding: 6px 14px; white-space: nowrap; cursor: pointer; }
+    #preview-card button { border: 1px solid rgba(var(--accent-rgb), 0.55); background: var(--panel); color: var(--gold); border-radius: 999px; padding: 6px 14px; max-width: 100%; white-space: normal; text-align: center; cursor: pointer; }
     #preview-card button.is-on { background: rgba(var(--accent-rgb), 0.12); border-color: rgba(var(--accent-rgb), 0.7); }
     #preview-card button:disabled { opacity: 0.6; cursor: wait; }
     #preview-card .default-browser-row + .default-browser-row { margin-top: 12px; }
     #preview-card p.error:empty, #preview-card p.note:empty { display: none; }`;
   card.append(style, el("p", { class: "eyebrow" }, "Chromium preview"));
-  card.append(previewRow("Import from Hog", "preview-import-status", [["preview-import", "Import bookmarks, history, settings…"], ["preview-import-wallet", "Import wallet…"]]));
+  card.append(previewRow("Import from Hog", "preview-import-status", [["preview-import", "Import bookmarks, history…"], ["preview-import-wallet", "Import wallet…"]]));
   card.append(previewRow("Third-party cookies", "preview-cookies-status", [["preview-cookies", "Allow"]]));
   card.append(previewRow("Location for sites", "preview-location-status", [["preview-location-system", "System (GeoClue)"], ["preview-location-beacondb", "BeaconDB"], ["preview-location-off", "Off"]]));
   card.append(previewRow("Site permissions", "preview-perms-status", [["preview-perms-forget", "Forget all"]]));
