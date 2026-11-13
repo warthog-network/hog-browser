@@ -153,3 +153,106 @@ window.addEventListener("resize", queueSurface);
 window.addEventListener("scroll", queueSurface, true);
 window.addEventListener("transitionend", queueSurface, true);
 window.addEventListener("animationend", queueSurface, true);
+
+// ---------------------------------------------------------------- preview settings card
+// Settings -> General gets a "Chromium preview" card for things only the
+// preview has: import from the WebKit Hog, third-party cookies, remembered
+// site permissions and preview updates. It is built here (not in public/),
+// so the WebKit Hog's UI is untouched.
+let previewState = null;
+
+function el(tag, attrs = {}, text = "") {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (text) node.textContent = text;
+  return node;
+}
+
+function previewRow(title, statusId, buttons) {
+  const row = el("div", { class: "engine-row default-browser-row" });
+  const copy = el("div", { class: "default-browser-copy" });
+  copy.append(el("strong", {}, title), el("p", { id: statusId, class: "note", role: "status" }), el("p", { id: `${statusId}-error`, class: "error", role: "status" }));
+  const actions = el("div", { class: "hog-update-actions" });
+  for (const [id, label] of buttons) actions.append(el("button", { type: "button", id }, label));
+  row.append(copy, actions);
+  return row;
+}
+
+function buildPreviewCard() {
+  const card = el("section", { id: "preview-card", class: "connect-card", "aria-label": "Chromium preview" });
+  const style = el("style");
+  style.textContent = `
+    #preview-card .hog-update-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+    #preview-card button { border: 1px solid rgba(var(--accent-rgb), 0.55); background: var(--panel); color: var(--gold); border-radius: 999px; padding: 6px 14px; white-space: nowrap; cursor: pointer; }
+    #preview-card button.is-on { background: rgba(var(--accent-rgb), 0.12); border-color: rgba(var(--accent-rgb), 0.7); }
+    #preview-card button:disabled { opacity: 0.6; cursor: wait; }
+    #preview-card .default-browser-row + .default-browser-row { margin-top: 12px; }
+    #preview-card p.error:empty, #preview-card p.note:empty { display: none; }`;
+  card.append(style, el("p", { class: "eyebrow" }, "Chromium preview"));
+  card.append(previewRow("Import from Hog", "preview-import-status", [["preview-import", "Import bookmarks, history, settings…"], ["preview-import-wallet", "Import wallet…"]]));
+  card.append(previewRow("Third-party cookies", "preview-cookies-status", [["preview-cookies", "Allow"]]));
+  card.append(previewRow("Site permissions", "preview-perms-status", [["preview-perms-forget", "Forget all"]]));
+  card.append(previewRow("Preview updates", "preview-update-status", [["preview-update-check", "Check now"], ["preview-update-auto", "Check on start"], ["preview-update-open", "Open release"]]));
+  card.addEventListener("click", (event) => {
+    const button = event.target.closest && event.target.closest("button");
+    if (!button || button.disabled) return;
+    const send = (action, value) => ipcRenderer.send("hog:preview", { action, value });
+    const id = button.id;
+    if (id === "preview-import") send("import");
+    else if (id === "preview-import-wallet") send("import-wallet");
+    else if (id === "preview-cookies") send("cookies", !(previewState && previewState.blockThirdPartyCookies));
+    else if (id === "preview-perms-forget") send("forget-permissions");
+    else if (id === "preview-update-check") send("update-check");
+    else if (id === "preview-update-auto") send("update-auto", !(previewState && previewState.previewUpdateChecks));
+    else if (id === "preview-update-open") send("update-open");
+  });
+  return card;
+}
+
+function setText(id, text) {
+  const node = document.getElementById(id);
+  if (node) node.textContent = text || "";
+}
+
+function renderPreviewCard() {
+  const s = previewState;
+  if (!s || !document.getElementById("preview-card")) return;
+  setText("preview-import-status", s.importStatus || (s.webkitFound ? "Copy bookmarks, favorites, history and settings from the WebKit Hog on this computer. The wallet is separate and only on request." : "No WebKit Hog data was found on this computer."));
+  setText("preview-import-status-error", s.importError);
+  for (const id of ["preview-import", "preview-import-wallet"]) {
+    const b = document.getElementById(id);
+    if (b) b.disabled = !s.webkitFound || Boolean(s.busy);
+  }
+  setText("preview-cookies-status", s.blockThirdPartyCookies ? "Blocked, like Hog: sites only get cookies when they are the site in the address bar." : "Allowed: embedded sites (logins, comments, ads) can use their cookies.");
+  setText("preview-cookies", s.blockThirdPartyCookies ? "Allow" : "Block");
+  const cookieButton = document.getElementById("preview-cookies");
+  if (cookieButton) cookieButton.setAttribute("aria-pressed", String(Boolean(s.blockThirdPartyCookies)));
+  setText("preview-perms-status", s.permissions ? `${s.permissions} remembered answer${s.permissions === 1 ? "" : "s"} for notifications, location, camera or microphone.` : "No remembered answers. Sites ask before notifications, location, camera or microphone.");
+  const forget = document.getElementById("preview-perms-forget");
+  if (forget) forget.disabled = !s.permissions;
+  setText("preview-update-status", s.updateStatus || `This is the Chromium preview ${s.version}.`);
+  setText("preview-update-status-error", s.updateError);
+  setText("preview-update-auto", s.previewUpdateChecks ? "Stop checking on start" : "Check on start");
+  const open = document.getElementById("preview-update-open");
+  if (open) open.hidden = !s.updateUrl;
+}
+
+function ensurePreviewCard() {
+  const general = document.getElementById("settings-general");
+  if (!general || document.getElementById("preview-card")) return;
+  const after = document.getElementById("default-browser-card");
+  const card = buildPreviewCard();
+  if (after && after.parentElement === general) after.after(card);
+  else general.append(card);
+  ipcRenderer.send("hog:preview", { action: "state" });
+  renderPreviewCard();
+}
+
+ipcRenderer.on("hog:preview-state", (_event, state) => {
+  previewState = state && typeof state === "object" ? state : null;
+  renderPreviewCard();
+});
+window.addEventListener("DOMContentLoaded", () => {
+  ensurePreviewCard();
+  new MutationObserver(() => ensurePreviewCard()).observe(document.body, { childList: true, subtree: true });
+});

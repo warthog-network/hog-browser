@@ -29,6 +29,11 @@ const { HogServer } = require("./lib/server");
 const { GuardBridge } = require("./lib/guard");
 const geometry = require("./lib/overlay-geometry");
 const contextMenu = require("./lib/context-menu");
+const cookies = require("./lib/cookies");
+const { PreviewSettings, SitePermissions } = require("./lib/preview-settings");
+const webkitImport = require("./lib/webkit-import");
+const previewUpdate = require("./lib/preview-update");
+const { DefaultBrowser } = require("./lib/default-browser");
 
 const APP_NAME = "Hog (Chromium preview)";
 const HOG_DATA = process.env.HOG_DATA || path.join(os.homedir(), ".local", "share", "hog-browser");
@@ -77,6 +82,8 @@ let guard = null;
 let win = null;
 let pages = null;
 let overlays = null;
+const previewSettings = new PreviewSettings(PREVIEW_DATA);
+const sitePermissions = new SitePermissions(PREVIEW_DATA);
 let findBar = null;
 let chromeReady = false;
 const pendingUrls = [];
@@ -233,6 +240,56 @@ function loadBlocker() {
   return blockerReady;
 }
 
+function topUrlOf(details) {
+  try {
+    if (details.frame && details.frame.top) return details.frame.top.url;
+  } catch {
+    /* frame gone */
+  }
+  try {
+    return details.webContents ? details.webContents.getURL() : "";
+  } catch {
+    return "";
+  }
+}
+
+function thirdPartyRequest(details) {
+  if (!previewSettings || !previewSettings.get("blockThirdPartyCookies")) return false;
+  return cookies.isThirdParty(details.url, topUrlOf(details), details.resourceType);
+}
+
+const ASKED_PERMISSIONS = {
+  notifications: { title: "Notifications", what: () => "show notifications" },
+  geolocation: { title: "Location", what: () => "know your location" },
+  media: { title: "Camera and microphone", what: (kinds) => `use your ${kinds.join(" and ").replace("audio", "microphone").replace("video", "camera") || "camera or microphone"}` },
+};
+
+function askPermission(store, permission, origin, mediaTypes, persistent) {
+  const key = SitePermissions.key(origin, permission, mediaTypes);
+  const known = store.lookup(key);
+  if (known !== undefined) return Promise.resolve(known);
+  const info = ASKED_PERMISSIONS[permission];
+  return dialog
+    .showMessageBox(win, {
+      type: "question",
+      buttons: ["Block", "Allow"],
+      defaultId: 0,
+      cancelId: 0,
+      title: info.title,
+      message: `${origin} wants to ${info.what(mediaTypes)}.`,
+      checkboxLabel: persistent ? "Remember for this site" : undefined,
+      checkboxChecked: persistent,
+      detail: persistent ? "You can forget remembered answers in Settings → General." : "This is an Iso tab: Hog forgets the answer when the tab closes.",
+    })
+    .then(({ response, checkboxChecked }) => {
+      const allow = response === 1;
+      store.answer(key, allow, persistent && checkboxChecked);
+      if (persistent && checkboxChecked) sendPreviewState();
+      return allow;
+    })
+    .catch(() => false);
+}
+
 function preparePageSession(ses) {
   if (preparedSessions.has(ses)) return;
   preparedSessions.add(ses);
@@ -252,12 +309,22 @@ function preparePageSession(ses) {
     return callback({});
   });
   // Global Privacy Control, like Brave (page-preload.js sets navigator.globalPrivacyControl).
+  // Third-party cookies are blocked like WebKit Hog does (Settings -> General).
   ses.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
-    callback({ requestHeaders: { ...details.requestHeaders, "Sec-GPC": "1" } });
+    let headers = { ...details.requestHeaders, "Sec-GPC": "1" };
+    if (thirdPartyRequest(details)) headers = cookies.stripHeader(headers, "Cookie").headers;
+    callback({ requestHeaders: headers });
   });
   ses.webRequest.onHeadersReceived({ urls: ["<all_urls>"] }, (details, callback) => {
-    if (blocker) return blocker.onHeadersReceived(details, callback);
-    return callback({});
+    let changed = null;
+    if (details.responseHeaders && thirdPartyRequest(details)) {
+      const { headers, removed } = cookies.stripHeader(details.responseHeaders, "Set-Cookie");
+      if (removed) changed = headers;
+    }
+    const next = changed ? { ...details, responseHeaders: changed } : details;
+    const done = (result) => callback(result && result.responseHeaders ? result : changed ? { responseHeaders: changed } : result || {});
+    if (blocker) return blocker.onHeadersReceived(next, done);
+    return done({});
   });
   loadBlocker().then((ready) => {
     if (!ready) return;
@@ -272,38 +339,26 @@ function preparePageSession(ses) {
       }
     }
   });
-  const granted = new Map();
+  const persistent = ses.isPersistent();
+  const isoAnswers = new SitePermissions(null); // Iso tabs: in memory only
   ses.setPermissionRequestHandler((wc, permission, callback, details) => {
     const always = ["fullscreen", "clipboard-sanitized-write", "pointerLock", "window-management"];
     if (always.includes(permission)) return callback(true);
-    if (permission !== "media") return callback(false);
+    if (!ASKED_PERMISSIONS[permission]) return callback(false);
     const origin = policy.pageOrigin(details.requestingUrl || wc.getURL(), ports());
     if (!origin) return callback(false);
-    const kinds = (details.mediaTypes || []).join(" and ") || "camera or microphone";
-    const key = `${origin} ${kinds}`;
-    if (granted.has(key)) return callback(granted.get(key));
-    dialog
-      .showMessageBox(win, {
-        type: "question",
-        buttons: ["Block", "Allow"],
-        defaultId: 0,
-        cancelId: 0,
-        title: "Camera and microphone",
-        message: `${origin} wants to use your ${kinds}.`,
-        detail: "Hog remembers your answer until it closes.",
-      })
-      .then(({ response }) => {
-        granted.set(key, response === 1);
-        callback(response === 1);
-      })
-      .catch(() => callback(false));
+    const mediaTypes = permission === "media" ? (details.mediaTypes || []).filter((t) => t === "audio" || t === "video") : [];
+    const store = persistent ? sitePermissions : isoAnswers;
+    askPermission(store, permission, origin, mediaTypes, persistent).then(callback, () => callback(false));
   });
-  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
+  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
     if (["fullscreen", "clipboard-sanitized-write", "pointerLock"].includes(permission)) return true;
-    if (permission === "media") {
-      for (const [key, value] of granted) if (value && key.startsWith(`${requestingOrigin} `)) return true;
-    }
-    return false;
+    if (!ASKED_PERMISSIONS[permission]) return false;
+    const origin = policy.pageOrigin(requestingOrigin, ports());
+    if (!origin) return false;
+    const store = persistent ? sitePermissions : isoAnswers;
+    const kinds = permission === "media" && details && details.mediaType ? [details.mediaType] : [];
+    return store.allows(origin, permission, kinds);
   });
   ses.on("will-download", (_event, item) => {
     if (pages) pages.downloads.start(item);
@@ -933,12 +988,11 @@ function onBookmarks(command) {
 
 const CONTAINER_ACTIONS = new Set("list add remove start stop restart logs launch create run recreate engine engine-start shell shell-close commit modprobe endpoint tailscale-up share-list share-status share-computer share-network share-remove share-publish share-pick share-drop media-open media-mkdir media-remove media-pick media-pick-folder browser-default browser-default-set browser-default-clear jellyfin-gpu jellyfin-gpu-set jellyfin-gpu-clear jellyfin-gpu-install runtime-set network-list network-create network-remove network-connect network-disconnect update-status update-check update-check-now update-install update-restart samba-status samba-save samba-on samba-off".split(" "));
 
-// The preview never installs the WebKit Hog's .deb or changes the default browser.
+// The preview never installs the WebKit Hog's .deb. The default-browser
+// buttons point at the preview's own .desktop file (lib/default-browser.js).
 const PREVIEW_BLOCKED = {
   "update-install": "Update the installed Hog from Hog itself. The Chromium preview does not install packages.",
   "update-restart": "Restart the Chromium preview from your app menu.",
-  "browser-default-set": "The Chromium preview does not change your default browser.",
-  "browser-default-clear": "The Chromium preview does not change your default browser.",
 };
 
 function onContainers(command) {
@@ -953,6 +1007,11 @@ function onContainers(command) {
   const hookName = action.startsWith("update-") ? "__hogUpdate" : action.startsWith("samba-") ? "__hogSamba" : "__hogContainers";
   if (PREVIEW_BLOCKED[action]) {
     hook(hookName, { ok: false, error: PREVIEW_BLOCKED[action], items: [] });
+    return;
+  }
+  if (action.startsWith("browser-default")) {
+    const job = action === "browser-default-set" ? defaultBrowser.set() : action === "browser-default-clear" ? defaultBrowser.clear() : defaultBrowser.status();
+    job.then((payload) => hook(hookName, payload), (error) => hook(hookName, { ok: false, error: error.message }));
     return;
   }
   if (!guard) return;
@@ -1498,6 +1557,164 @@ function createWindow() {
   wc.loadURL(server.url);
 }
 
+// ---------------------------------------------------------------- preview settings card
+
+const defaultBrowser = new DefaultBrowser(PREVIEW_DATA);
+const preview = { busy: false, importStatus: "", importError: "", updateStatus: "", updateError: "", updateUrl: "", updateTimer: null };
+
+function webkitStorageFile() {
+  return webkitImport.localStorageFile(HOG_DATA);
+}
+
+function previewState() {
+  return {
+    version: app.getVersion(),
+    webkitFound: Boolean(webkitStorageFile()),
+    busy: preview.busy,
+    importStatus: preview.importStatus,
+    importError: preview.importError,
+    blockThirdPartyCookies: previewSettings.get("blockThirdPartyCookies"),
+    permissions: sitePermissions.count(),
+    previewUpdateChecks: previewSettings.get("previewUpdateChecks"),
+    updateStatus: preview.updateStatus,
+    updateError: preview.updateError,
+    updateUrl: preview.updateUrl,
+  };
+}
+
+function sendPreviewState() {
+  if (win && !win.isDestroyed()) win.webContents.send("hog:preview-state", previewState());
+}
+
+async function chromeStorageRead(keys) {
+  const code = `JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map((k) => [k, localStorage.getItem(k)]).filter((e) => e[1] !== null)))`;
+  return JSON.parse(await win.webContents.executeJavaScript(code, true));
+}
+
+async function chromeStorageWrite(writes) {
+  const code = `(() => { const w = ${JSON.stringify(writes)}; for (const k of Object.keys(w)) localStorage.setItem(k, w[k]); return Object.keys(w).length; })()`;
+  return win.webContents.executeJavaScript(code, true);
+}
+
+async function readWebKitKeys(keys) {
+  const file = webkitStorageFile();
+  if (!file) throw new Error("No WebKit Hog data was found on this computer.");
+  const out = await webkitImport.readWebKit({ helper: path.join(ROOT, "webkit-import.py"), file, keys });
+  if (!out.ok) throw new Error(out.error || "Could not read Hog's saved data.");
+  return out.items || {};
+}
+
+function relaunchSoon() {
+  setTimeout(() => {
+    app.relaunch();
+    app.quit();
+  }, 400);
+}
+
+async function runImport() {
+  const bm = await import(require("node:url").pathToFileURL(path.join(ROOT, "public", "bookmarks-store.js")).href);
+  const keys = [...webkitImport.BOOKMARK_KEYS, webkitImport.HISTORY_KEY, ...webkitImport.SETTINGS_KEYS];
+  const fromWebKit = await readWebKitKeys(keys);
+  const mine = await chromeStorageRead(keys);
+  const plan = webkitImport.planImport(mine, fromWebKit, bm);
+  const s = plan.summary;
+  const { response } = await dialog.showMessageBox(win, {
+    type: "question",
+    buttons: ["Cancel", "Import and restart"],
+    defaultId: 1,
+    cancelId: 0,
+    title: "Import from Hog",
+    message: "Copy your WebKit Hog data into the Chromium preview?",
+    detail: `Bookmarks after import: ${s.bookmarks} (${s.added} new, ${s.favorites} favorites)\nHistory entries from Hog: ${s.history}\nSettings: ${s.settings}\n\nThe WebKit Hog's data is only read, never changed. The wallet is not copied. The preview restarts to load the imported data.`,
+  });
+  if (response !== 1) return "Import cancelled.";
+  await chromeStorageWrite(plan.writes);
+  relaunchSoon();
+  return "Imported. Restarting the preview…";
+}
+
+async function runWalletImport() {
+  const keys = webkitImport.WALLET_KEYS;
+  const fromWebKit = await readWebKitKeys(keys);
+  const mine = await chromeStorageRead(keys);
+  const plan = webkitImport.planWallet(mine, fromWebKit);
+  if (!plan.ok) throw new Error(plan.error);
+  const { response } = await dialog.showMessageBox(win, {
+    type: "warning",
+    buttons: ["Cancel", "Copy wallet"],
+    defaultId: 0,
+    cancelId: 0,
+    title: "Copy wallet from Hog",
+    message: "Copy the WebKit Hog's wallet into the Chromium preview?",
+    detail: "This copies the encrypted wallet record (and the account name, chain and connected sites) to the preview's own storage on this computer. It stays locked with the same password; nothing is decrypted and nothing leaves this computer.\n\nBoth browsers will then hold the same wallet. Only continue if you trust this preview build.",
+  });
+  if (response !== 1) return "Wallet not copied.";
+  await chromeStorageWrite(plan.writes);
+  relaunchSoon();
+  return "Wallet copied. Restarting the preview…";
+}
+
+async function runUpdateCheck() {
+  preview.updateError = "";
+  preview.updateStatus = "Checking…";
+  sendPreviewState();
+  try {
+    const found = await previewUpdate.checkPreviewUpdate(app.getVersion());
+    preview.updateUrl = found ? found.url : "";
+    preview.updateStatus = found ? `Preview ${found.version} is available (${found.deb}).` : `No newer preview build is published. This is ${app.getVersion()}.`;
+  } catch (error) {
+    preview.updateStatus = "";
+    preview.updateError = `Could not check for preview builds (${error.message}).`;
+  }
+  sendPreviewState();
+}
+
+function scheduleUpdateChecks() {
+  clearInterval(preview.updateTimer);
+  preview.updateTimer = null;
+  if (!previewSettings.get("previewUpdateChecks")) return;
+  setTimeout(() => previewSettings.get("previewUpdateChecks") && runUpdateCheck(), 60_000);
+  preview.updateTimer = setInterval(() => previewSettings.get("previewUpdateChecks") && runUpdateCheck(), 12 * 3600_000);
+}
+
+async function guarded(statusKey, job) {
+  if (preview.busy) return;
+  preview.busy = true;
+  preview.importError = "";
+  preview.importStatus = "Working…";
+  sendPreviewState();
+  try {
+    preview.importStatus = await job();
+  } catch (error) {
+    preview.importStatus = "";
+    preview.importError = error.message;
+  } finally {
+    preview.busy = false;
+    sendPreviewState();
+  }
+}
+
+function onPreviewMessage(message) {
+  const action = message && typeof message.action === "string" ? message.action : "";
+  if (action === "cookies") previewSettings.set("blockThirdPartyCookies", Boolean(message.value));
+  else if (action === "forget-permissions") sitePermissions.forgetAll();
+  else if (action === "update-auto") {
+    previewSettings.set("previewUpdateChecks", Boolean(message.value));
+    scheduleUpdateChecks();
+  } else if (action === "update-check") return void runUpdateCheck();
+  else if (action === "update-open") {
+    if (preview.updateUrl && pages) pages.tell({ event: "popup", url: preview.updateUrl, isolated: false });
+  } else if (action === "import") return void guarded("import", runImport);
+  else if (action === "import-wallet") return void guarded("import", runWalletImport);
+  else if (action !== "state") return;
+  sendPreviewState();
+}
+
+ipcMain.on("hog:preview", (event, message) => {
+  if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) return;
+  onPreviewMessage(message);
+});
+
 // Messages come only from our own preloads; check the sender anyway.
 ipcMain.on("hogwin", (event, command) => {
   if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame) return;
@@ -1580,6 +1797,7 @@ if (!app.requestSingleInstanceLock()) {
     guard = new GuardBridge({ root: ROOT, dataDir: HOG_DATA, origin: `http://127.0.0.1:${server.port}`, log });
     for (const url of urlsFromArgv(process.argv)) openExternalUrl(url);
     createWindow();
+    scheduleUpdateChecks();
     loadBlocker();
     // If the WebKit Hog owned the server and quits, start our own and reload.
     setInterval(async () => {
