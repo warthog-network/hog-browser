@@ -1,6 +1,7 @@
 name: Chromium preview (Electron)
 
-# Builds "Hog (Chromium preview)" from electron/ as a .deb and an AppImage and
+# Builds "Hog (Chromium preview)" from electron/ as a .deb and an AppImage (and an
+# unsigned Windows installer + zip) and
 # uploads them as workflow artifacts. Does not publish a release and does not
 # run on main. The main Release workflow (release.yml) is separate and unchanged.
 on:
@@ -61,5 +62,53 @@ jobs:
             electron/dist/*.deb
             electron/dist/*.AppImage
             electron/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  # Unsigned Windows build (NSIS installer + zip), artifact only. Untested on
+  # Windows: Settings -> Containers / Samba / Tailscale use Linux tools.
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout hog-browser
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            electron/package-lock.json
+
+      - name: Hog dependencies and bundles
+        run: |
+          npm ci
+          npm run build
+
+      - name: Electron shell dependencies
+        working-directory: electron
+        run: npm ci
+
+      - name: Build NSIS installer and zip
+        working-directory: electron
+        run: |
+          npm run dist:win
+          cd dist
+          sha256sum *.exe *.zip > SHA256SUMS-windows
+          cat SHA256SUMS-windows
+          ls -l
+
+      - name: Upload Windows preview packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: hog-chromium-preview-windows-${{ github.sha }}
+          path: |
+            electron/dist/*.exe
+            electron/dist/*.zip
+            electron/dist/SHA256SUMS-windows
           if-no-files-found: error
           retention-days: 30

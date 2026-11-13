@@ -84,18 +84,26 @@ views stacked above the page view:
   the default). It copies the encrypted wallet record, account name, chain and
   connected sites; nothing is decrypted, and it refuses if the preview already
   has a wallet.
-- **Third-party cookies** are blocked by default (Cookie and Set-Cookie are
-  removed from requests to another site than the one in the address bar).
-  This works on HTTP headers; script `document.cookie` inside third-party
-  frames still works, as with WebKit's ITP.
+- **Third-party cookies** are blocked by default: Cookie and Set-Cookie are
+  removed from requests to another site than the one in the address bar, and
+  frames from another site get an empty `document.cookie` that ignores writes
+  and no `cookieStore` (`frame-preload.js`, run in every iframe through
+  `nodeIntegrationInSubFrames` with the sandbox still on, so no Node there).
 - **Site permissions**: notifications, location, camera and microphone ask with
   a "Remember for this site" box; "Forget all" clears the answers
-  (`site-permissions.json`). Iso tabs remember only until they close. Location
-  needs a Google API key in Electron, so sites usually get "position
-  unavailable" even when allowed.
+  (`site-permissions.json`). Iso tabs remember only until they close.
+- **Location for sites** never uses Google's service (Electron would need a
+  Google API key). `navigator.geolocation` in pages goes through Hog, asks like
+  other permissions, then uses the chosen provider: **System** (GeoClue, the
+  desktop location service; GNOME Settings → Privacy → Location Services
+  decides, `geoclue-locate.py` via python3-gi), **BeaconDB** (beacondb.net,
+  open; locates by IP address, about city level) or **Off**.
 - **Preview updates** check GitHub pre-releases tagged `preview-*` that carry a
-  `hog-chromium-preview_<version>_amd64.deb`, and only link the release page.
-  The WebKit Hog's updater reads `/releases/latest`, which never includes
+  `hog-chromium-preview_<version>_amd64.deb` and a `SHA256SUMS`. **Install
+  update** (installed .deb only) downloads both, checks the hash and the
+  package name and version, then runs `pkexec apt-get install` on the file,
+  which shows the system password prompt; **Restart now** relaunches. The
+  WebKit Hog's updater reads `/releases/latest`, which never includes
   pre-releases, so it cannot be affected. Checks are off by default; nothing is
   found until a preview pre-release is published.
 - **Default browser** (the Browser card) points http/https at
@@ -104,8 +112,22 @@ views stacked above the page view:
 
 Right-click gives open in new / Iso tab, copy link, save link or image to
 Downloads, copy image, spelling suggestions, search for the selection, back /
-forward / reload, print and Inspect. Ctrl+P prints (GTK dialog; without a
-printer set up it saves `<title>.pdf` in Downloads).
+forward / reload, Save page as (Ctrl+S: complete HTML or one .mhtml file),
+print and Inspect. Ctrl+P prints (GTK dialog; without a printer set up it
+saves `<title>.pdf` in Downloads).
+
+Pop-ups: a page can only open something right after a click or key press.
+`window.open` with a size or `popup` (sign-in windows: Google, GitHub, wallets)
+gets a small window that keeps `window.opener`, shows the site's address in
+its title and follows the same navigation rules as tabs; other new windows
+open as Hog tabs; anything without a click is blocked.
+
+Window: the top bar's empty space and the ⋮⋮ grip move the window; the edges
+resize it (a 5 px band inside the edge on X11; on Wayland, where Electron 45
+runs natively by default, GTK draws a shadow with a resize border outside).
+
+Windows: CI also builds an unsigned NSIS installer and zip (artifact only,
+untested; Containers, Samba and Tailscale need Linux).
 
 ## What maps to what
 

@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.40-preview.3",
+  "version": "0.1.40-preview.4",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",
@@ -12,7 +12,8 @@
     "stage": "bash ./stage.sh",
     "start": "bash ./stage.sh && electron .",
     "dist": "bash ./stage.sh && electron-builder --linux AppImage deb --publish never",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "dist:win": "bash ./stage.sh && electron-builder --win nsis zip --x64 --publish never"
   },
   "dependencies": {
     "@ghostery/adblocker-electron": "^2.20.3",
@@ -36,6 +37,7 @@
       "lib/**",
       "chrome-preload.js",
       "page-preload.js",
+      "frame-preload.js",
       "overlay-preload.js",
       "overlay.js",
       "overlay.html",
@@ -85,7 +87,26 @@
         "libasound2t64 | libasound2",
         "libgbm1"
       ],
-      "maintainer": "jax <jaxwhitefang@proton.me>"
+      "maintainer": "jax <jaxwhitefang@proton.me>",
+      "recommends": [
+        "python3-gi",
+        "geoclue-2.0"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "icon": "build/icons/512x512.png",
+      "executableName": "hog-chromium-preview"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Hog (Chromium preview)",
+      "artifactName": "hog-chromium-preview_${version}_setup_${arch}.${ext}"
     }
   },
   "desktopName": "hog-chromium-preview"
