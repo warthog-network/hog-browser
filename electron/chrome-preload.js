@@ -182,7 +182,9 @@ function buildPreviewCard() {
   const card = el("section", { id: "preview-card", class: "connect-card", "aria-label": "Chromium preview" });
   const style = el("style");
   style.textContent = `
-    #preview-card .hog-update-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+    #preview-card .default-browser-row { flex-wrap: wrap; }
+    #preview-card .default-browser-copy { flex: 1 1 260px; }
+    #preview-card .hog-update-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; flex: 0 1 auto; }
     #preview-card button { border: 1px solid rgba(var(--accent-rgb), 0.55); background: var(--panel); color: var(--gold); border-radius: 999px; padding: 6px 14px; white-space: nowrap; cursor: pointer; }
     #preview-card button.is-on { background: rgba(var(--accent-rgb), 0.12); border-color: rgba(var(--accent-rgb), 0.7); }
     #preview-card button:disabled { opacity: 0.6; cursor: wait; }
@@ -191,8 +193,9 @@ function buildPreviewCard() {
   card.append(style, el("p", { class: "eyebrow" }, "Chromium preview"));
   card.append(previewRow("Import from Hog", "preview-import-status", [["preview-import", "Import bookmarks, history, settings…"], ["preview-import-wallet", "Import wallet…"]]));
   card.append(previewRow("Third-party cookies", "preview-cookies-status", [["preview-cookies", "Allow"]]));
+  card.append(previewRow("Location for sites", "preview-location-status", [["preview-location-system", "System (GeoClue)"], ["preview-location-beacondb", "BeaconDB"], ["preview-location-off", "Off"]]));
   card.append(previewRow("Site permissions", "preview-perms-status", [["preview-perms-forget", "Forget all"]]));
-  card.append(previewRow("Preview updates", "preview-update-status", [["preview-update-check", "Check now"], ["preview-update-auto", "Check on start"], ["preview-update-open", "Open release"]]));
+  card.append(previewRow("Preview updates", "preview-update-status", [["preview-update-check", "Check now"], ["preview-update-auto", "Check on start"], ["preview-update-install", "Install update"], ["preview-update-restart", "Restart now"], ["preview-update-open", "Open release"]]));
   card.addEventListener("click", (event) => {
     const button = event.target.closest && event.target.closest("button");
     if (!button || button.disabled) return;
@@ -202,9 +205,12 @@ function buildPreviewCard() {
     else if (id === "preview-import-wallet") send("import-wallet");
     else if (id === "preview-cookies") send("cookies", !(previewState && previewState.blockThirdPartyCookies));
     else if (id === "preview-perms-forget") send("forget-permissions");
+    else if (id.startsWith("preview-location-")) send("location", id.slice("preview-location-".length));
     else if (id === "preview-update-check") send("update-check");
     else if (id === "preview-update-auto") send("update-auto", !(previewState && previewState.previewUpdateChecks));
     else if (id === "preview-update-open") send("update-open");
+    else if (id === "preview-update-install") send("update-install");
+    else if (id === "preview-update-restart") send("update-restart");
   });
   return card;
 }
@@ -227,6 +233,22 @@ function renderPreviewCard() {
   setText("preview-cookies", s.blockThirdPartyCookies ? "Allow" : "Block");
   const cookieButton = document.getElementById("preview-cookies");
   if (cookieButton) cookieButton.setAttribute("aria-pressed", String(Boolean(s.blockThirdPartyCookies)));
+  const loc = s.locationProvider || "system";
+  setText(
+    "preview-location-status",
+    loc === "system"
+      ? "Sites that you allow get your location from the desktop's location service (GeoClue: Settings → Privacy → Location Services). No Google service is used."
+      : loc === "beacondb"
+        ? "Sites that you allow get an approximate location from BeaconDB (beacondb.net, an open location service; it sees your IP address)."
+        : "Location is off: sites get “position unavailable”.",
+  );
+  for (const name of ["system", "beacondb", "off"]) {
+    const b = document.getElementById(`preview-location-${name}`);
+    if (b) {
+      b.classList.toggle("is-on", loc === name);
+      b.setAttribute("aria-pressed", String(loc === name));
+    }
+  }
   setText("preview-perms-status", s.permissions ? `${s.permissions} remembered answer${s.permissions === 1 ? "" : "s"} for notifications, location, camera or microphone.` : "No remembered answers. Sites ask before notifications, location, camera or microphone.");
   const forget = document.getElementById("preview-perms-forget");
   if (forget) forget.disabled = !s.permissions;
@@ -235,6 +257,14 @@ function renderPreviewCard() {
   setText("preview-update-auto", s.previewUpdateChecks ? "Stop checking on start" : "Check on start");
   const open = document.getElementById("preview-update-open");
   if (open) open.hidden = !s.updateUrl;
+  const install = document.getElementById("preview-update-install");
+  if (install) {
+    install.hidden = !s.updateCanInstall;
+    install.disabled = Boolean(s.updateBusy);
+  }
+  const restart = document.getElementById("preview-update-restart");
+  if (restart) restart.hidden = !s.updateInstalled;
+  if (!s.updateError && s.updateUrl && !s.updateCanInstall && s.updateInstallNote && !s.updateInstalled) setText("preview-update-status-error", s.updateInstallNote);
 }
 
 function ensurePreviewCard() {

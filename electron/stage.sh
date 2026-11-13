@@ -40,6 +40,6 @@ cp -a \
 cp -a "${ROOT}/public" "${ROOT}/vendor" "${ROOT}/node-defi" "${ROOT}/node-mainnet" "${OUT}/"
 # server.mjs only imports "ws" from npm; the wallet and xterm are prebuilt bundles in public/.
 cp -a "${ROOT}/node_modules/ws" "${OUT}/node_modules/"
-cp -a "${HERE}/guard-bridge.py" "${HERE}/webkit-import.py" "${OUT}/"
+cp -a "${HERE}/guard-bridge.py" "${HERE}/webkit-import.py" "${HERE}/geoclue-locate.py" "${OUT}/"
 find "${OUT}" -type d -name '__pycache__' -prune -exec rm -rf {} +
 echo "staged $(du -sh "${OUT}" | cut -f1) into ${OUT}"

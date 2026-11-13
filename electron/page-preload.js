@@ -5,21 +5,29 @@
 // They post to window.__hogEdgePost instead of WebKit's message handler.
 const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
-contextBridge.exposeInMainWorld("__hogEdgePost", (message) => {
-  ipcRenderer.send("hogedge", String(message).slice(0, 250000));
-});
+// With nodeIntegrationInSubFrames (sandboxed, so still no Node) this preload
+// also runs in iframes; only the click tracking below applies there.
+const TOP = window === window.top;
 
-let scripts = [];
-try {
-  scripts = ipcRenderer.sendSync("hog:page-scripts", String(location.href)) || [];
-} catch {
-  scripts = [];
+// navigator.geolocation goes through Hog (lib/geolocation.js): asks the user
+// like other permissions, then GeoClue or BeaconDB instead of Google.
+if (TOP) {
+  contextBridge.exposeInMainWorld("__hogEdgePost", (message) => {
+    ipcRenderer.send("hogedge", String(message).slice(0, 250000));
+  });
+  contextBridge.exposeInMainWorld("__hogGeo", (high) => ipcRenderer.invoke("hog:geo", { high: Boolean(high) }));
+  let scripts = [];
+  try {
+    scripts = ipcRenderer.sendSync("hog:page-scripts", String(location.href)) || [];
+  } catch {
+    scripts = [];
+  }
+  for (const source of scripts) {
+    webFrame.executeJavaScript(source).catch(() => {});
+  }
 }
 const gpc = "try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:function(){return true},configurable:true})}catch(e){}";
 webFrame.executeJavaScript(gpc).catch(() => {});
-for (const source of scripts) {
-  webFrame.executeJavaScript(source).catch(() => {});
-}
 
 // A page may open a new tab only right after a click or key press.
 let last = 0;

@@ -65,3 +65,60 @@ test("default browser: set remembers the previous browser, clear restores it", a
   assert.equal((await missing.set()).ok, false);
   assert.equal((await missing.status()).defaultBrowserAvailable, false);
 });
+
+test("one-click update: SHA256SUMS, package check, pkexec hand-off", async () => {
+  const crypto = await import("node:crypto");
+  const { EventEmitter } = await import("node:events");
+  const deb = Buffer.from("not really a deb but bytes");
+  const hex = crypto.createHash("sha256").update(deb).digest("hex");
+  const name = "hog-chromium-preview_0.1.40-preview.5_amd64.deb";
+  assert.equal(up.hashFor(`${hex}  ${name}\nffff  other`, name), hex);
+  assert.equal(up.hashFor(`${hex} *${name}`, name), hex);
+  assert.equal(up.hashFor("junk", name), "");
+  assert.equal(up.debianVersion("0.1.40-preview.5"), "0.1.40~preview.5");
+  assert.equal(up.canInstallDeb({ isPackaged: false, execPath: "/x" }).ok, false);
+  assert.equal(up.canInstallDeb({ isPackaged: true, execPath: "/opt/Hog (Chromium preview)/hog-chromium-preview", env: { APPIMAGE: "/a" } }).ok, false);
+  assert.equal(up.canInstallDeb({ isPackaged: true, execPath: "/opt/Hog (Chromium preview)/hog-chromium-preview", env: {}, exists: () => true }).ok, true);
+
+  const base = `${up.DOWNLOAD_PREFIX}preview-0.1.40-5/`;
+  const found = { version: "0.1.40-preview.5", deb: name, debUrl: base + name, sumsUrl: `${base}SHA256SUMS` };
+  const fetchWith = (sums, body) => async (url) => (url.endsWith("SHA256SUMS") ? new Response(sums) : new Response(body, { headers: { "content-length": String(body.length) } }));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hogup-"));
+  let progress = 0;
+  const file = await up.downloadVerified(found, path.join(dir, "a"), { fetchImpl: fetchWith(`${hex}  ${name}\n`, deb), onProgress: () => (progress += 1) });
+  assert.deepEqual(fs.readFileSync(file), deb);
+  assert.ok(progress > 0);
+  await assert.rejects(up.downloadVerified(found, path.join(dir, "b"), { fetchImpl: fetchWith(`${"0".repeat(64)}  ${name}\n`, deb) }), /does not match/);
+  assert.ok(!fs.existsSync(path.join(dir, "b", name)));
+  await assert.rejects(up.downloadVerified({ ...found, sumsUrl: "" }, dir, { fetchImpl: fetchWith("", deb) }), /SHA256SUMS/);
+  await assert.rejects(up.downloadVerified({ ...found, debUrl: "https://evil.example/x.deb" }, dir, { fetchImpl: fetchWith("", deb) }), /no preview \.deb/);
+
+  const fields = (out) => async () => ({ code: 0, stdout: out, stderr: "" });
+  await up.checkDebFields("/x.deb", "0.1.40-preview.5", fields("Package: hog-chromium-preview\nVersion: 0.1.40~preview.5\n"));
+  await assert.rejects(up.checkDebFields("/x.deb", "0.1.40-preview.5", fields("Package: hog-browser\nVersion: 0.1.40~preview.5\n")), /not hog-chromium-preview/);
+  await assert.rejects(up.checkDebFields("/x.deb", "0.1.40-preview.5", fields("Package: hog-chromium-preview\nVersion: 0.1.40~preview.4\n")), /expected/);
+
+  const calls = [];
+  const fakeSpawn = (code) => (cmd, args) => {
+    calls.push([cmd, ...args]);
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    setImmediate(() => child.emit("close", code));
+    return child;
+  };
+  assert.deepEqual(await up.installDeb("/tmp/d/x.deb", fakeSpawn(0)), { ok: true });
+  assert.deepEqual(calls[0], ["/usr/bin/pkexec", "/usr/bin/apt-get", "install", "-y", "--no-install-recommends", "/tmp/d/x.deb"]);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126))).error, /cancelled/);
+  assert.equal((await up.installDeb("x.deb", fakeSpawn(0))).ok, false);
+});
+
+test("pickUpdate carries the download and SHA256SUMS links", () => {
+  const r = rel("preview-0.1.40-5", "0.1.40-preview.5");
+  r.assets = [
+    { name: "hog-chromium-preview_0.1.40-preview.5_amd64.deb", browser_download_url: `${up.DOWNLOAD_PREFIX}preview-0.1.40-5/hog-chromium-preview_0.1.40-preview.5_amd64.deb` },
+    { name: "SHA256SUMS", browser_download_url: `${up.DOWNLOAD_PREFIX}preview-0.1.40-5/SHA256SUMS` },
+  ];
+  const best = up.pickUpdate([r], "0.1.40-preview.4");
+  assert.ok(up.validDownloadUrl(best.debUrl));
+  assert.ok(best.sumsUrl.endsWith("/SHA256SUMS"));
+});

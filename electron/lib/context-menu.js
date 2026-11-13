@@ -18,7 +18,7 @@ function webUrl(raw, allowed) {
  *   isEditable, editFlags, misspelledWord, dictionarySuggestions, x, y).
  * actions: { openTab(url, iso), copy(text), download(url), copyImage(x, y),
  *   search(text), replaceMisspelling(word), addWord(word), back(), forward(),
- *   reload(), print(), inspect(x, y), canBack, canForward }.
+ *   reload(), savePage(), print(), inspect(x, y), canBack, canForward }.
  * page: false for the Hog UI (only edit items and spelling there).
  */
 function buildTemplate(params, actions, { page = true, allowed = (u) => u } = {}) {
@@ -78,6 +78,7 @@ function buildTemplate(params, actions, { page = true, allowed = (u) => u } = {}
       { label: "Back", enabled: Boolean(actions.canBack), click: () => actions.back() },
       { label: "Forward", enabled: Boolean(actions.canForward), click: () => actions.forward() },
       { label: "Reload", click: () => actions.reload() },
+      { label: "Save page as…", click: () => actions.savePage() },
       { label: "Print…", click: () => actions.print() },
     ]);
   }

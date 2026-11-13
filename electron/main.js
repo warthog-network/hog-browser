@@ -34,12 +34,15 @@ const { PreviewSettings, SitePermissions } = require("./lib/preview-settings");
 const webkitImport = require("./lib/webkit-import");
 const previewUpdate = require("./lib/preview-update");
 const { DefaultBrowser } = require("./lib/default-browser");
+const geolocation = require("./lib/geolocation");
 
 const APP_NAME = "Hog (Chromium preview)";
 const HOG_DATA = process.env.HOG_DATA || path.join(os.homedir(), ".local", "share", "hog-browser");
 // The preview's own browser profile (cookies, wallet localStorage, node chain,
 // history). Never the WebKit Hog's ~/.local/share/hog-browser/pages.
-const PREVIEW_DATA = process.env.HOG_PREVIEW_DATA || path.join(os.homedir(), ".local", "share", "hog-chromium-preview");
+const PREVIEW_DATA =
+  process.env.HOG_PREVIEW_DATA ||
+  (process.platform === "win32" ? path.join(app.getPath("appData"), "hog-chromium-preview") : path.join(os.homedir(), ".local", "share", "hog-chromium-preview"));
 const CHROME_PARTITION = "persist:hog";
 const PAGES_PARTITION = "persist:pages";
 
@@ -199,6 +202,20 @@ class PageDownloads {
     }
   }
 
+  /** A file Hog saved itself (Save page as): show the usual "done" toast. */
+  notifySaved(filePath) {
+    const id = String(this.nextId++);
+    const entry = { item: null, name: path.basename(filePath), path: filePath, done: true, shown: 1 };
+    this.items.set(id, entry);
+    let size = 0;
+    try {
+      size = fs.statSync(filePath).size;
+    } catch {
+      size = 0;
+    }
+    this.emit(id, "done", { progress: 1, received: size });
+  }
+
   command(command) {
     const parts = command.split(":");
     if (parts.length !== 3 || !/^\d+$/.test(parts[2])) return;
@@ -264,6 +281,14 @@ const ASKED_PERMISSIONS = {
   media: { title: "Camera and microphone", what: (kinds) => `use your ${kinds.join(" and ").replace("audio", "microphone").replace("video", "camera") || "camera or microphone"}` },
 };
 
+const isoPermissionStores = new WeakMap();
+/** Remembered answers for a session: the saved store, or memory for Iso tabs. */
+function permissionStore(ses) {
+  if (ses.isPersistent()) return sitePermissions;
+  if (!isoPermissionStores.has(ses)) isoPermissionStores.set(ses, new SitePermissions(null));
+  return isoPermissionStores.get(ses);
+}
+
 function askPermission(store, permission, origin, mediaTypes, persistent) {
   const key = SitePermissions.key(origin, permission, mediaTypes);
   const known = store.lookup(key);
@@ -326,6 +351,7 @@ function preparePageSession(ses) {
     if (blocker) return blocker.onHeadersReceived(next, done);
     return done({});
   });
+  ses.registerPreloadScript({ type: "frame", filePath: path.join(__dirname, "frame-preload.js") });
   loadBlocker().then((ready) => {
     if (!ready) return;
     try {
@@ -340,7 +366,7 @@ function preparePageSession(ses) {
     }
   });
   const persistent = ses.isPersistent();
-  const isoAnswers = new SitePermissions(null); // Iso tabs: in memory only
+  const isoAnswers = permissionStore(ses);
   ses.setPermissionRequestHandler((wc, permission, callback, details) => {
     const always = ["fullscreen", "clipboard-sanitized-write", "pointerLock", "window-management"];
     if (always.includes(permission)) return callback(true);
@@ -470,6 +496,9 @@ class PageHost {
         spellcheck: true,
         safeDialogs: true,
         navigateOnDragDrop: false,
+        // Preloads also run in iframes (still sandboxed, no Node): frame-preload.js
+        // blocks script cookies in third-party frames, clicks there count as gestures.
+        nodeIntegrationInSubFrames: true,
       },
     });
     view.setBackgroundColor("#ffffff");
@@ -482,14 +511,16 @@ class PageHost {
     win.contentView.addChildView(view);
     if (overlays) overlays.raise();
 
-    wc.setWindowOpenHandler(({ url }) => {
-      if (process.env.HOG_PREVIEW_DEBUG) log(`popup ${url} gesture=${this.recentGesture(wc.id)}`);
-      // A click may open a new tab. A page may not open one by itself.
-      if (url && policy.pageAllowed(url, ports()) && this.recentGesture(wc.id)) {
-        this.tell({ event: "popup", url, isolated: entry.isolated });
-      }
+    wc.setWindowOpenHandler((details) => {
+      const decision = policy.popupDecision(details, { allowed: policy.pageAllowed(details.url, ports()), gesture: this.recentGesture(wc.id) });
+      if (process.env.HOG_PREVIEW_DEBUG) log(`popup ${details.url} ${details.disposition} gesture=${this.recentGesture(wc.id)} -> ${decision.kind}`);
+      // A click may open a new tab, or a sign-in popup window that keeps
+      // window.opener (OAuth). A page may not open either by itself.
+      if (decision.kind === "tab") this.tell({ event: "popup", url: details.url, isolated: entry.isolated });
+      if (decision.kind === "window") return { action: "allow", outlivesOpener: false, overrideBrowserWindowOptions: popupWindowOptions(decision) };
       return { action: "deny" };
     });
+    wc.on("did-create-window", (child) => preparePopupWindow(child, entry));
     const guardNav = (event, url) => {
       if (policy.pageAllowed(url, ports()) || policy.inPageNavigation(url)) return;
       event.preventDefault();
@@ -811,6 +842,11 @@ function onShortcutInput(event, input, wc) {
       printPage(shownPage);
       return;
     }
+    if (ctrl && !input.alt && !input.shift && key === "s") {
+      event.preventDefault();
+      savePageAs(shownPage);
+      return;
+    }
     if (key === "escape" && findBar.open && wc === shownPage) {
       findBar.close(true);
       return;
@@ -1090,6 +1126,12 @@ function urlsFromArgv(argv) {
 
 const CHROME_CSS = `
 #win-drag { -webkit-app-region: drag; cursor: grab; }
+/* The top bar's empty space moves the window too (like a title bar);
+   everything clickable in it, and the menus that hang from it, stay clicks. */
+header.chrome { -webkit-app-region: drag; }
+header.chrome * { -webkit-app-region: no-drag; }
+header.chrome #win-drag, header.chrome #bookmarks { -webkit-app-region: drag; }
+header.chrome #bookmarks * { -webkit-app-region: no-drag; }
 #winctl, #winctl button { -webkit-app-region: no-drag; }
 .resize-frame { display: none !important; }
 `;
@@ -1473,6 +1515,96 @@ function printPage(wc) {
   });
 }
 
+// ---------------------------------------------------------------- sign-in popups
+
+function popupWindowOptions(decision) {
+  return {
+    parent: win || undefined,
+    width: decision.width,
+    height: decision.height,
+    minWidth: 320,
+    minHeight: 240,
+    autoHideMenuBar: true,
+    backgroundColor: "#ffffff",
+    title: "Sign-in window",
+    webPreferences: {
+      // The opener's session and partition are kept by Electron; these
+      // only make sure the popup is locked down like a tab.
+      preload: path.join(__dirname, "page-preload.js"),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      safeDialogs: true,
+      navigateOnDragDrop: false,
+      nodeIntegrationInSubFrames: true,
+    },
+  };
+}
+
+/** A popup window (OAuth sign-in): no menus, the site's address in the title,
+ *  same navigation rules as tabs, popups of its own become tabs. */
+function preparePopupWindow(child, opener) {
+  child.setMenuBarVisibility(false);
+  const wc = child.webContents;
+  const showTitle = () => {
+    if (child.isDestroyed()) return;
+    let host = "";
+    try {
+      host = new URL(wc.getURL()).host;
+    } catch {
+      host = "";
+    }
+    const title = wc.getTitle();
+    child.setTitle(host ? `${host}${title && title !== wc.getURL() ? ` — ${title}` : ""}` : "Sign-in window");
+  };
+  wc.on("page-title-updated", (event) => {
+    event.preventDefault();
+    showTitle();
+  });
+  wc.on("did-navigate", showTitle);
+  const guardNav = (event, url) => {
+    if (policy.pageAllowed(url, ports()) || policy.inPageNavigation(url)) return;
+    event.preventDefault();
+  };
+  wc.on("will-navigate", (event) => guardNav(event, event.url));
+  wc.on("will-redirect", (event) => event.isMainFrame && guardNav(event, event.url));
+  wc.setWindowOpenHandler(({ url }) => {
+    if (policy.pageAllowed(url, ports()) && pages && pages.recentGesture(wc.id)) pages.tell({ event: "popup", url, isolated: opener.isolated });
+    return { action: "deny" };
+  });
+  wc.on("context-menu", (_event, params) => showContextMenu(wc, params, true));
+  wc.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && (input.control || input.meta) && String(input.key).toLowerCase() === "w") {
+      event.preventDefault();
+      child.close();
+    }
+  });
+}
+
+/** Ctrl+S / "Save page as…": a save dialog in Downloads, then Chromium's own
+ *  page saver (HTML with a _files folder, HTML only, or one .mhtml file). */
+async function savePageAs(wc) {
+  if (!win || wc.isDestroyed()) return;
+  const title = (wc.getTitle() || "page").replace(/[\\/:*?"<>|\n\r]+/g, " ").trim().slice(0, 80) || "page";
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: "Save page as",
+    defaultPath: path.join(app.getPath("downloads"), `${title}.html`),
+    filters: [
+      { name: "Web page, complete", extensions: ["html", "htm"] },
+      { name: "Web page, single file", extensions: ["mhtml"] },
+    ],
+  });
+  if (canceled || !filePath || !safePath(filePath)) return;
+  const type = /\.mhtml?$/i.test(filePath) ? "MHTML" : "HTMLComplete";
+  try {
+    await wc.savePage(filePath, type);
+    pages.downloads.notifySaved(filePath);
+  } catch (error) {
+    log(`Hog preview: saving the page failed (${error.message}).`);
+  }
+}
+
 function showContextMenu(wc, params, page) {
   const actions = {
     canBack: page && wc.navigationHistory.canGoBack(),
@@ -1488,6 +1620,7 @@ function showContextMenu(wc, params, page) {
     forward: () => wc.navigationHistory.canGoForward() && wc.navigationHistory.goForward(),
     reload: () => wc.reload(),
     print: () => printPage(wc),
+    savePage: () => savePageAs(wc),
     inspect: (x, y) => wc.inspectElement(x, y),
   };
   const template = contextMenu.buildTemplate(params, actions, {
@@ -1560,7 +1693,11 @@ function createWindow() {
 // ---------------------------------------------------------------- preview settings card
 
 const defaultBrowser = new DefaultBrowser(PREVIEW_DATA);
-const preview = { busy: false, importStatus: "", importError: "", updateStatus: "", updateError: "", updateUrl: "", updateTimer: null };
+const preview = { busy: false, importStatus: "", importError: "", updateStatus: "", updateError: "", updateUrl: "", updateTimer: null, updateFound: null, updateBusy: false, updateInstalled: false };
+
+function updateInstallable() {
+  return previewUpdate.canInstallDeb({ isPackaged: app.isPackaged, execPath: process.execPath });
+}
 
 function webkitStorageFile() {
   return webkitImport.localStorageFile(HOG_DATA);
@@ -1576,9 +1713,14 @@ function previewState() {
     blockThirdPartyCookies: previewSettings.get("blockThirdPartyCookies"),
     permissions: sitePermissions.count(),
     previewUpdateChecks: previewSettings.get("previewUpdateChecks"),
+    locationProvider: previewSettings.get("locationProvider"),
     updateStatus: preview.updateStatus,
     updateError: preview.updateError,
     updateUrl: preview.updateUrl,
+    updateCanInstall: Boolean(preview.updateFound && preview.updateFound.debUrl && updateInstallable().ok && !preview.updateInstalled),
+    updateInstallNote: preview.updateFound ? updateInstallable().why : "",
+    updateBusy: preview.updateBusy,
+    updateInstalled: preview.updateInstalled,
   };
 }
 
@@ -1661,12 +1803,57 @@ async function runUpdateCheck() {
   try {
     const found = await previewUpdate.checkPreviewUpdate(app.getVersion());
     preview.updateUrl = found ? found.url : "";
+    preview.updateFound = found;
     preview.updateStatus = found ? `Preview ${found.version} is available (${found.deb}).` : `No newer preview build is published. This is ${app.getVersion()}.`;
   } catch (error) {
     preview.updateStatus = "";
     preview.updateError = `Could not check for preview builds (${error.message}).`;
   }
   sendPreviewState();
+}
+
+async function runUpdateInstall() {
+  const found = preview.updateFound;
+  if (!found || preview.updateBusy || preview.updateInstalled) return;
+  const can = updateInstallable();
+  if (!can.ok) {
+    preview.updateError = can.why;
+    return sendPreviewState();
+  }
+  preview.updateBusy = true;
+  preview.updateError = "";
+  preview.updateStatus = `Downloading ${found.deb}…`;
+  sendPreviewState();
+  let dir = "";
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "hog-preview-update-"));
+    fs.chmodSync(dir, 0o755); // apt's _apt user reads the file
+    let lastPct = -1;
+    const file = await previewUpdate.downloadVerified(found, dir, {
+      onProgress: (got, total) => {
+        const pct = total ? Math.floor((got / total) * 100) : -1;
+        if (pct !== lastPct && pct % 5 === 0) {
+          lastPct = pct;
+          preview.updateStatus = `Downloading ${found.deb}… ${pct}%`;
+          sendPreviewState();
+        }
+      },
+    });
+    await previewUpdate.checkDebFields(file, found.version);
+    preview.updateStatus = "Checked against SHA256SUMS. Enter your password in the system prompt to install…";
+    sendPreviewState();
+    const result = await previewUpdate.installDeb(file);
+    if (!result.ok) throw new Error(result.error);
+    preview.updateInstalled = true;
+    preview.updateStatus = `Preview ${found.version} is installed. Restart the preview to use it.`;
+  } catch (error) {
+    preview.updateStatus = "";
+    preview.updateError = `Update failed: ${error.message}`;
+  } finally {
+    preview.updateBusy = false;
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    sendPreviewState();
+  }
 }
 
 function scheduleUpdateChecks() {
@@ -1698,10 +1885,17 @@ function onPreviewMessage(message) {
   const action = message && typeof message.action === "string" ? message.action : "";
   if (action === "cookies") previewSettings.set("blockThirdPartyCookies", Boolean(message.value));
   else if (action === "forget-permissions") sitePermissions.forgetAll();
+  else if (action === "location") {
+    if (geolocation.validProvider(message.value)) previewSettings.set("locationProvider", message.value);
+  }
   else if (action === "update-auto") {
     previewSettings.set("previewUpdateChecks", Boolean(message.value));
     scheduleUpdateChecks();
   } else if (action === "update-check") return void runUpdateCheck();
+  else if (action === "update-install") return void runUpdateInstall();
+  else if (action === "update-restart") {
+    if (preview.updateInstalled) relaunchSoon();
+  }
   else if (action === "update-open") {
     if (preview.updateUrl && pages) pages.tell({ event: "popup", url: preview.updateUrl, isolated: false });
   } else if (action === "import") return void guarded("import", runImport);
@@ -1744,8 +1938,31 @@ ipcMain.on("hog:overlay", (event, message) => {
   if (findBar && event.sender === findBar.view.webContents) return findBar.onMessage(message);
   if (overlays) overlays.onMessage(event.sender, message);
 });
+// frame-preload.js: should this subframe's script cookies be blocked?
+ipcMain.on("hog:frame-cookies", (event, info) => {
+  if (process.env.HOG_PREVIEW_DEBUG) log(`frame-cookies ${JSON.stringify(info)}`);
+  const frame = info && typeof info.frame === "string" ? info.frame : "";
+  const top = info && typeof info.top === "string" ? info.top : "";
+  event.returnValue = Boolean(previewSettings.get("blockThirdPartyCookies") && top && cookies.isThirdParty(frame, top, "subFrame"));
+});
+const locator = new geolocation.Locator({ helper: path.join(ROOT, "geoclue-locate.py") });
+ipcMain.handle("hog:geo", async (event, request) => {
+  if (process.env.HOG_PREVIEW_DEBUG) log(`geo from ${event.senderFrame && event.senderFrame.url}`);
+  const wc = event.sender;
+  const frame = event.senderFrame;
+  if (!frame || frame !== wc.mainFrame) return { ok: false, code: 2, error: "Position unavailable" };
+  const origin = policy.pageOrigin(frame.url, ports());
+  if (!origin || !(pages && (pages.tabFor(wc) !== undefined || BrowserWindow.fromWebContents(wc)))) return { ok: false, code: 2, error: "Position unavailable" };
+  const ses = wc.session;
+  const allowed = await askPermission(permissionStore(ses), "geolocation", origin, [], ses.isPersistent());
+  if (!allowed) return { ok: false, code: 1, error: "User denied Geolocation" };
+  const provider = previewSettings.get("locationProvider");
+  const answer = await locator.locate(provider, { high: Boolean(request && request.high) });
+  if (!answer.ok) log(`Hog preview: location for ${origin} failed (${answer.error}).`);
+  return answer.ok ? { ok: true, fix: answer.fix } : { ok: false, code: 2, error: answer.error };
+});
 ipcMain.on("hog:page-scripts", (event, href) => {
-  const scripts = [];
+  const scripts = [geolocation.GEO_SHIM];
   if (DAPP_PROVIDER_SCRIPT && policy.dappProviderAllowed(href)) scripts.push(DAPP_PROVIDER_SCRIPT);
   event.returnValue = scripts;
 });

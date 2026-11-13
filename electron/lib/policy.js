@@ -219,7 +219,32 @@ function dappProviderAllowed(raw) {
   return true;
 }
 
+/** window.open / target=_blank from a page.
+ *  details: Electron's HandlerDetails (url, disposition, features).
+ *  -> { kind: "deny" } | { kind: "tab" } | { kind: "window", width, height }
+ *  Only after a click (gesture). A popup with a size or popup=1 (sign-in
+ *  windows, "new-window" disposition) gets a real window that keeps
+ *  window.opener; everything else opens as a Hog tab. */
+function popupDecision(details, { allowed, gesture }) {
+  const d = details || {};
+  if (!allowed || !gesture || !d.url) return { kind: "deny" };
+  const features = String(d.features || "");
+  const asked = {};
+  for (const part of features.split(",")) {
+    const [k, v] = part.split("=").map((x) => String(x || "").trim().toLowerCase());
+    if (k) asked[k] = v === undefined ? "1" : v;
+  }
+  const popupish = d.disposition === "new-window" || "width" in asked || "height" in asked || (asked.popup && asked.popup !== "0" && asked.popup !== "no");
+  if (!popupish) return { kind: "tab" };
+  const clamp = (n, lo, hi, dflt) => {
+    const v = Number.parseInt(n, 10);
+    return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : dflt;
+  };
+  return { kind: "window", width: clamp(asked.width, 320, 1400, 520), height: clamp(asked.height, 240, 1000, 680) };
+}
+
 module.exports = {
+  popupDecision,
   allowedBrowserOpenUrl,
   allowedTailscaleOpenUrl,
   chromeUserAgent,

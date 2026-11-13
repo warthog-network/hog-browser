@@ -7,6 +7,7 @@ const path = require("node:path");
 const DEFAULTS = Object.freeze({
   blockThirdPartyCookies: true, // WebKit Hog's default (no third-party cookies)
   previewUpdateChecks: false, // needs published preview pre-releases; off until there are some
+  locationProvider: "system", // lib/geolocation.js: system (GeoClue) | beacondb | off
 });
 
 function readJson(file, fallback) {
