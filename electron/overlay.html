@@ -29,6 +29,15 @@
   button.pill-label.wallet { border-radius: 999px 0 0 999px; }
   .dots { width: 9px; height: 9px; display: grid; grid-template-columns: 3px 3px; gap: 3px; }
   .dots i { width: 3px; height: 3px; border-radius: 50%; background: #2a1d05; display: block; }
+  .find-bar { position: absolute; inset: 0; box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px 6px 12px; background: #17181b; border: 1px solid rgba(253,185,19,.55); border-radius: 12px;
+    box-shadow: 0 10px 24px #0008; font: 13px/1 Montserrat, Inter, Ubuntu, 'Segoe UI', sans-serif; color: #f4f4f5; }
+  .find-bar input { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: inherit; font: inherit; }
+  .find-bar.none input { color: #f19a86; }
+  .find-count { color: #a1a1aa; font-size: 12px; min-width: 52px; text-align: right; }
+  .find-bar button { all: unset; cursor: pointer; width: 26px; height: 26px; border-radius: 8px; text-align: center;
+    line-height: 26px; color: #f4f4f5; font-size: 15px; }
+  .find-bar button:hover { background: #2a2b30; color: #fdb913; }
 </style>
 </head>
 <body>

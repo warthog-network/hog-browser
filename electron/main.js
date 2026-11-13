@@ -12,6 +12,7 @@ const {
   BrowserWindow,
   WebContentsView,
   Menu,
+  clipboard,
   dialog,
   ipcMain,
   nativeImage,
@@ -27,6 +28,7 @@ const policy = require("./lib/policy");
 const { HogServer } = require("./lib/server");
 const { GuardBridge } = require("./lib/guard");
 const geometry = require("./lib/overlay-geometry");
+const contextMenu = require("./lib/context-menu");
 
 const APP_NAME = "Hog (Chromium preview)";
 const HOG_DATA = process.env.HOG_DATA || path.join(os.homedir(), ".local", "share", "hog-browser");
@@ -75,6 +77,7 @@ let guard = null;
 let win = null;
 let pages = null;
 let overlays = null;
+let findBar = null;
 let chromeReady = false;
 const pendingUrls = [];
 
@@ -172,12 +175,29 @@ class PageDownloads {
     });
   }
 
+  /** A file Hog wrote itself (print to PDF): same toast, "Show in folder" works. */
+  async saveFile(name, data) {
+    const id = String(this.nextId++);
+    const entry = { item: null, name, path: "", done: true, shown: 1 };
+    this.items.set(id, entry);
+    try {
+      const folder = downloadsFolder();
+      fs.mkdirSync(folder, { recursive: true });
+      entry.path = policy.uniqueDownloadPath(folder, policy.downloadName(name), this.takenPaths());
+      entry.name = path.basename(entry.path);
+      await fsp.writeFile(entry.path, data, { flag: "wx" });
+      this.emit(id, "done", { progress: 1, received: data.length });
+    } catch (error) {
+      this.emit(id, "failed", { error: `Could not save it: ${error.message}` });
+    }
+  }
+
   command(command) {
     const parts = command.split(":");
     if (parts.length !== 3 || !/^\d+$/.test(parts[2])) return;
     const entry = this.items.get(parts[2]);
     if (!entry) return;
-    if (parts[1] === "cancel" && !entry.done) entry.item.cancel();
+    if (parts[1] === "cancel" && !entry.done && entry.item) entry.item.cancel();
     else if (parts[1] === "show" && entry.done && entry.path && fs.existsSync(entry.path)) shell.showItemInFolder(entry.path);
   }
 }
@@ -463,6 +483,7 @@ class PageHost {
       this.emitState(tabId, "fail", { url: wc.getURL(), error: crashMessage(details.reason), loading: false });
     });
     wc.on("before-input-event", (event, input) => onShortcutInput(event, input, wc));
+    wc.on("context-menu", (_event, params) => showContextMenu(wc, params, true));
     wc.on("enter-html-full-screen", () => this.fullscreen(tabId, true));
     wc.on("leave-html-full-screen", () => this.fullscreen(tabId, false));
     return view;
@@ -716,6 +737,29 @@ function onShortcutInput(event, input, wc) {
     event.preventDefault();
     wc.toggleDevTools();
     return;
+  }
+  // Find in page and print act on the shown page from anywhere in the window.
+  const shownPage = pages && pages.activeContents();
+  if (shownPage && !pages.fullTab) {
+    if (ctrl && !input.alt && key === "f") {
+      event.preventDefault();
+      findBar.show(shownPage);
+      return;
+    }
+    if ((key === "f3" || (ctrl && key === "g")) && findBar.open) {
+      event.preventDefault();
+      findBar.find(findBar.text, !input.shift, true);
+      return;
+    }
+    if (ctrl && !input.alt && !input.shift && key === "p") {
+      event.preventDefault();
+      printPage(shownPage);
+      return;
+    }
+    if (key === "escape" && findBar.open && wc === shownPage) {
+      findBar.close(true);
+      return;
+    }
   }
   if (!pages || wc === win.webContents) {
     // The Hog UI gets its own keys; only add reload of the page view.
@@ -1096,7 +1140,7 @@ class Overlays {
   /** Keep the overlays above every page view (addChildView re-orders). */
   raise() {
     for (const view of this.views()) win.contentView.addChildView(view);
-    if (typeof findBar !== "undefined" && findBar) findBar.raise();
+    if (findBar) findBar.raise();
   }
 
   setSurface(raw) {
@@ -1131,6 +1175,7 @@ class Overlays {
 
   sync() {
     if (!win || win.isDestroyed() || !pages) return;
+    if (findBar) findBar.sync();
     const page = pages.pageBounds();
     const live = Boolean(pages.shown) && !pages.fullTab && page.width > 0 && page.height > 0;
     const cover = live && this.surface.cover;
@@ -1267,6 +1312,133 @@ class Overlays {
   }
 }
 
+// ---------------------------------------------------------------- find in page, print, right-click
+
+class FindBar {
+  constructor() {
+    this.view = overlays.make("find");
+    this.target = null; // page webContents being searched
+    this.text = "";
+    this.state = { matches: null, active: 0 };
+    this.onFound = (_event, result) => {
+      if (!result || !this.target) return;
+      this.state = { matches: result.matches, active: result.activeMatchOrdinal };
+      this.push(false);
+    };
+  }
+
+  raise() {
+    win.contentView.addChildView(this.view);
+  }
+
+  get open() {
+    return Boolean(this.target);
+  }
+
+  push(focus) {
+    overlays.sent.delete(this.view);
+    overlays.send(this.view, { ...this.state, focus, text: focus ? this.text : undefined, n: Date.now() });
+  }
+
+  place() {
+    if (!this.target) return;
+    const page = pages.pageBounds();
+    const width = Math.min(380, Math.max(220, page.width - 24));
+    this.view.setBounds({ x: page.x + page.width - width - 12, y: page.y + 8, width, height: 46 });
+  }
+
+  show(wc) {
+    if (!wc || wc.isDestroyed()) return;
+    if (this.target !== wc) {
+      this.close(false);
+      this.target = wc;
+      wc.on("found-in-page", this.onFound);
+    }
+    this.place();
+    this.raise();
+    this.view.setVisible(true);
+    this.view.webContents.focus();
+    this.push(true);
+  }
+
+  find(text, forward = true, findNext = false) {
+    if (!this.target || this.target.isDestroyed()) return;
+    this.text = text;
+    if (!text) {
+      this.target.stopFindInPage("clearSelection");
+      this.state = { matches: null, active: 0 };
+      this.push(false);
+      return;
+    }
+    this.target.findInPage(text, { forward, findNext });
+  }
+
+  close(focusPage = true) {
+    const wc = this.target;
+    this.target = null;
+    this.view.setVisible(false);
+    this.state = { matches: null, active: 0 };
+    if (!wc || wc.isDestroyed()) return;
+    wc.removeListener("found-in-page", this.onFound);
+    wc.stopFindInPage("keepSelection");
+    if (focusPage) wc.focus();
+  }
+
+  /** Called on layout or tab changes. */
+  sync() {
+    if (!this.target) return;
+    const shown = pages.activeContents();
+    if (!shown || shown !== this.target || pages.fullTab) return this.close(false);
+    this.place();
+  }
+
+  onMessage(message) {
+    if (typeof message !== "string" || !this.target) return;
+    if (message.startsWith("find:")) return this.find(message.slice(5), true, false);
+    if (message === "next") return this.find(this.text, true, true);
+    if (message === "prev") return this.find(this.text, false, true);
+    if (message === "close") return this.close(true);
+  }
+}
+
+function printPage(wc) {
+  if (!wc || wc.isDestroyed()) return;
+  wc.print({ silent: false, printBackground: true }, (ok, reason) => {
+    if (ok || !reason || /cancel/i.test(reason)) return;
+    log(`Hog preview: print failed (${reason}); saving a PDF instead.`);
+    // No printer set up (or no CUPS): save the page as a PDF in Downloads.
+    const title = (wc.getTitle() || "page").replace(/[\\/:*?"<>|\n\r]+/g, " ").trim().slice(0, 80) || "page";
+    wc.printToPDF({ printBackground: true })
+      .then((data) => pages.downloads.saveFile(`${title}.pdf`, data))
+      .catch((error) => log(`Hog preview: PDF failed (${error.message}).`));
+  });
+}
+
+function showContextMenu(wc, params, page) {
+  const actions = {
+    canBack: page && wc.navigationHistory.canGoBack(),
+    canForward: page && wc.navigationHistory.canGoForward(),
+    openTab: (url, isolated) => pages.tell({ event: "popup", url, isolated: Boolean(isolated) }),
+    copy: (text) => clipboard.writeText(String(text)),
+    download: (url) => wc.downloadURL(url),
+    copyImage: (x, y) => wc.copyImageAt(x, y),
+    search: (text) => pages.tell({ event: "popup", url: contextMenu.searchUrl(text), isolated: false }),
+    replaceMisspelling: (word) => wc.replaceMisspelling(word),
+    addWord: (word) => wc.session.addWordToSpellCheckerDictionary(word),
+    back: () => wc.navigationHistory.canGoBack() && wc.navigationHistory.goBack(),
+    forward: () => wc.navigationHistory.canGoForward() && wc.navigationHistory.goForward(),
+    reload: () => wc.reload(),
+    print: () => printPage(wc),
+    inspect: (x, y) => wc.inspectElement(x, y),
+  };
+  const template = contextMenu.buildTemplate(params, actions, {
+    page,
+    allowed: (u) => (policy.pageAllowed(u, ports()) ? policy.allowedBrowserOpenUrl(u) : ""),
+  });
+  if (!template.length) return;
+  Menu.buildFromTemplate(template).popup({ window: win, frame: params.frame || undefined });
+}
+
 function createWindow() {
   const chromeSession = session.fromPartition(CHROME_PARTITION);
   prepareChromeSession(chromeSession);
@@ -1293,7 +1465,9 @@ function createWindow() {
   });
   pages = new PageHost();
   overlays = new Overlays();
+  findBar = new FindBar();
   const wc = win.webContents;
+  wc.on("context-menu", (_event, params) => showContextMenu(wc, params, false));
   wc.setWindowOpenHandler(({ url }) => {
     const target = policy.allowedBrowserOpenUrl(url);
     if (target && !isOwnUrl(target)) pages.tell({ event: "popup", url: target, isolated: false });
@@ -1350,6 +1524,7 @@ ipcMain.on("hog:chrome-surface", (event, surface) => {
   overlays.setSurface(surface);
 });
 ipcMain.on("hog:overlay", (event, message) => {
+  if (findBar && event.sender === findBar.view.webContents) return findBar.onMessage(message);
   if (overlays) overlays.onMessage(event.sender, message);
 });
 ipcMain.on("hog:page-scripts", (event, href) => {

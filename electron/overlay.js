@@ -111,6 +111,43 @@
     return;
   }
 
+  if (mode === "find") {
+    // Find in page (Ctrl+F): the page's webContents.findInPage does the work.
+    root.innerHTML =
+      '<form class="find-bar"><input type="search" placeholder="Find in page" aria-label="Find in page" spellcheck="false">' +
+      '<span class="find-count" role="status"></span>' +
+      '<button type="button" data-act="prev" title="Previous (Shift+Enter)" aria-label="Previous">‹</button>' +
+      '<button type="button" data-act="next" title="Next (Enter)" aria-label="Next">›</button>' +
+      '<button type="button" data-act="close" title="Close (Esc)" aria-label="Close">✕</button></form>';
+    const form = root.querySelector("form");
+    const input = root.querySelector("input");
+    const count = root.querySelector(".find-count");
+    window.__hogOverlay = (state) => {
+      if (state.focus) {
+        if (typeof state.text === "string") input.value = state.text;
+        input.focus();
+        input.select();
+      }
+      count.textContent = state.matches == null ? "" : state.matches ? `${state.active}/${state.matches}` : "No results";
+      form.classList.toggle("none", state.matches === 0 && Boolean(input.value));
+    };
+    input.addEventListener("input", () => post(`find:${input.value.slice(0, 500)}`));
+    form.addEventListener("submit", (event) => event.preventDefault());
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        post(event.shiftKey ? "prev" : "next");
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        post("close");
+      }
+    });
+    root.querySelectorAll("button").forEach((button) =>
+      button.addEventListener("click", () => post(button.dataset.act)),
+    );
+    return;
+  }
+
   if (mode === "menu") {
     window.__hogOverlay = renderMenus;
     document.addEventListener(
