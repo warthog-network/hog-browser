@@ -52,5 +52,7 @@ if [ ! -d "${OUT}/node_modules/ws" ]; then
   echo "hog-app/node_modules/ws missing after npm ci --omit=dev" >&2
   exit 1
 fi
+# npm ci can leave optional esbuild/@esbuild stubs; the WebKit .deb drops them too.
+rm -rf "${OUT}/node_modules/esbuild" "${OUT}/node_modules/@esbuild"
 find "${OUT}" -type d -name '__pycache__' -prune -exec rm -rf {} +
 echo "staged $(du -sh "${OUT}" | cut -f1) into ${OUT}"

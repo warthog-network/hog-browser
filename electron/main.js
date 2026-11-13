@@ -501,7 +501,7 @@ class PageHost {
         nodeIntegrationInSubFrames: true,
       },
     });
-    view.setBackgroundColor("#ffffff");
+    view.setBackgroundColor(PAGE_BG);
     view.setVisible(false);
     const wc = view.webContents;
     preparePageSession(wc.session);
@@ -1631,6 +1631,29 @@ function showContextMenu(wc, params, page) {
   Menu.buildFromTemplate(template).popup({ window: win, frame: params.frame || undefined });
 }
 
+
+// Theme --bg, .boot-flash, and wartlogorun.mp4's flattened background.
+// The 0.1.32 WebKit fix painted the GTK chrome view this color before the
+// page paints, so the running logo is not a square on a different black.
+// WebContentsView defaults to white, so the Chromium shell has to set it too.
+const CHROME_BG = "#0b0b0d";
+const PAGE_BG = "#ffffff";
+
+function paintChromeBackground(window = win, color = CHROME_BG) {
+  if (!window || window.isDestroyed()) return;
+  window.setBackgroundColor(color);
+  const root = window.contentView;
+  if (root && typeof root.setBackgroundColor === "function") {
+    root.setBackgroundColor(color);
+  }
+  const children = (root && root.children) || [];
+  for (const child of children) {
+    if (child && child.webContents === window.webContents && typeof child.setBackgroundColor === "function") {
+      child.setBackgroundColor(color);
+    }
+  }
+}
+
 function createWindow() {
   const chromeSession = session.fromPartition(CHROME_PARTITION);
   prepareChromeSession(chromeSession);
@@ -1642,7 +1665,7 @@ function createWindow() {
     minWidth: 480,
     minHeight: 320,
     frame: false,
-    backgroundColor: "#0b0b0d",
+    backgroundColor: CHROME_BG,
     icon: icon ? nativeImage.createFromPath(icon) : undefined,
     show: false,
     webPreferences: {
@@ -1655,9 +1678,11 @@ function createWindow() {
       backgroundThrottling: false, // the node tab keeps syncing while hidden
     },
   });
+  paintChromeBackground(win);
   pages = new PageHost();
   overlays = new Overlays();
   findBar = new FindBar();
+  paintChromeBackground(win);
   const wc = win.webContents;
   wc.on("context-menu", (_event, params) => showContextMenu(wc, params, false));
   wc.setWindowOpenHandler(({ url }) => {
@@ -1683,7 +1708,10 @@ function createWindow() {
   win.on("resize", () => pages.layout());
   win.on("maximize", () => pages.layout());
   win.on("unmaximize", () => pages.layout());
-  win.once("ready-to-show", () => win.show());
+  win.once("ready-to-show", () => {
+    paintChromeBackground(win);
+    win.show();
+  });
   win.on("closed", () => {
     win = null;
   });
