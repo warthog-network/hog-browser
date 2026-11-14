@@ -25824,8 +25824,92 @@ async function sendNativeEvm({ privateKey, to, amount, chain, fetchImpl = global
   }
   return hash2;
 }
+async function sendEvmCall({ privateKey, to, data, value = 0n, chain = "ethereum", fetchImpl = globalThis.fetch }) {
+  const row = EVM[chain];
+  if (!row) throw new Error("That network is not available.");
+  if (!ethers_exports.isAddress(to)) throw new Error("That contract is not an Ethereum address.");
+  const callData = String(data || "");
+  if (!/^0x[0-9a-fA-F]*$/.test(callData)) throw new Error("That call is not valid.");
+  const wallet = new ethers_exports.Wallet(`0x${hexKey(privateKey)}`);
+  const from = wallet.address;
+  const pay = BigInt(value);
+  const nonce = Number(BigInt(await evmCall(row.rpc, "eth_getTransactionCount", [from, "pending"], fetchImpl)));
+  let gas;
+  try {
+    gas = BigInt(await evmCall(row.rpc, "eth_estimateGas", [{
+      from,
+      to: ethers_exports.getAddress(to),
+      data: callData,
+      value: ethers_exports.toBeHex(pay)
+    }], fetchImpl));
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : "The network would not accept that call.");
+  }
+  gas = gas * 12n / 10n;
+  if (gas < 21000n) gas = 21000n;
+  const fee = await evmTransferReserve(chain, fetchImpl) / 21000n;
+  const tx = {
+    type: 2,
+    chainId: row.chainId,
+    nonce,
+    gasLimit: gas,
+    maxFeePerGas: fee,
+    maxPriorityFeePerGas: fee > 1n ? fee / 2n : fee,
+    to: ethers_exports.getAddress(to),
+    value: pay,
+    data: callData
+  };
+  const raw = await wallet.signTransaction(tx);
+  const hash2 = await evmCall(row.rpc, "eth_sendRawTransaction", [raw], fetchImpl);
+  if (typeof hash2 !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash2)) {
+    throw new Error("The network did not return a transaction hash.");
+  }
+  return hash2;
+}
+async function waitEvmReceipt({
+  hash: hash2,
+  chain = "ethereum",
+  fetchImpl = globalThis.fetch,
+  attempts = 40,
+  pauseMs = 3e3,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+}) {
+  const row = EVM[chain];
+  if (!row) throw new Error("That network is not available.");
+  for (let i = 0; i < attempts; i += 1) {
+    const receipt = await evmCall(row.rpc, "eth_getTransactionReceipt", [hash2], fetchImpl);
+    if (receipt) {
+      if (receipt.status === "0x0" || receipt.status === "0x00") {
+        throw new Error("The transaction failed on the network.");
+      }
+      return receipt;
+    }
+    if (i + 1 < attempts) await sleep(pauseMs);
+  }
+  throw new Error("The transaction is still pending.");
+}
+function btcKeyFromPhrase(phrase) {
+  const node = ethers_exports.HDNodeWallet.fromPhrase(normalizePhrase(phrase), "", BTC_PATH);
+  return btcKeyFromPrivateKey(node.privateKey);
+}
+function btcKeyFromPrivateKey(privateKeyHex) {
+  const account = accountFromPrivateKey(privateKeyHex);
+  return {
+    privateKey: ethers_exports.getBytes(`0x${account.privateKey}`),
+    publicKey: ethers_exports.getBytes(`0x${account.publicKey}`),
+    address: btcAddressFromCompressed(account.publicKey)
+  };
+}
+function solKeyFromPhrase(phrase) {
+  const seed = ethers_exports.getBytes(ethers_exports.Mnemonic.fromPhrase(normalizePhrase(phrase)).computeSeed());
+  const key = slip10(seed, SOL_PATH);
+  seed.fill(0);
+  return { privateKey: key, address: base58Encode(ed25519.getPublicKey(key)) };
+}
 export {
   btcAddressFromCompressed,
+  btcKeyFromPhrase,
+  btcKeyFromPrivateKey,
   chainAccountsFromPhrase,
   chainAccountsFromPrivateKey,
   createPhraseAccount,
@@ -25833,5 +25917,8 @@ export {
   formatUnits2 as formatUnits,
   parseDecimal,
   readNativeBalance,
-  sendNativeEvm
+  sendEvmCall,
+  sendNativeEvm,
+  solKeyFromPhrase,
+  waitEvmReceipt
 };

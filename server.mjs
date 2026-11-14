@@ -2494,13 +2494,15 @@ async function handle(req, res, runtime) {
       return;
     }
     const extra = {};
-    if (requested === "/index.html") {
+    // index.html is require-corp. A dedicated worker is its own document, so
+    // Chromium blocks vault-worker.js unless this response repeats those headers.
+    if (requested === "/index.html" || requested === "/vault-worker.js") {
       Object.assign(extra, WALLET_ISOLATION);
-      if (hostName(req) === WALLET_HOST) {
-        extra["set-cookie"] = `hog_gate=${GATE}; HttpOnly; SameSite=Strict; Path=/`;
-        extra["x-frame-options"] = "DENY";
-        extra["content-security-policy"] = "frame-ancestors 'none'";
-      }
+    }
+    if (requested === "/index.html" && hostName(req) === WALLET_HOST) {
+      extra["set-cookie"] = `hog_gate=${GATE}; HttpOnly; SameSite=Strict; Path=/`;
+      extra["x-frame-options"] = "DENY";
+      extra["content-security-policy"] = "frame-ancestors 'none'";
     }
     send(res, 200, data, type, extra);
   } catch (error) {

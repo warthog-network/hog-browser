@@ -818,6 +818,7 @@
             <button type="button" id="copy-address" class="w-addr" title="Copy address">
               <span id="w-addr-short">Not unlocked</span>
             </button>
+            <span id="lock-left" hidden></span>
           </div>
           <div class="net" id="net-menu">
             <select id="network" hidden aria-hidden="true" tabindex="-1">
@@ -957,6 +958,16 @@
                 </label>
                 <button type="submit" class="primary">Save phrase wallet</button>
               </form>
+              <form id="file-form" class="stack" hidden>
+                <label>warthog_wallet.txt
+                  <input id="wallet-file" type="file" accept=".txt,text/plain">
+                </label>
+                <label>File password
+                  <input id="file-pass" type="password" autocomplete="current-password">
+                </label>
+                <p class="note">This password also locks the wallet in Hog. The file is read here and is not uploaded.</p>
+                <button type="submit" class="primary">Import file</button>
+              </form>
               <form id="import-form" class="stack" hidden>
                 <input type="text" name="username" autocomplete="username" value="hog" hidden>
                 <label>Private key
@@ -974,6 +985,7 @@
                   <input id="unlock-pass" type="password" autocomplete="current-password">
                 </label>
                 <button type="submit" class="primary">Unlock</button>
+                <button type="button" id="unlock-passkey" hidden>Unlock with passkey</button>
                 <button type="button" id="forget" class="danger">Forget this wallet</button>
               </form>
             </div>
@@ -1142,29 +1154,93 @@
             <div id="wpage-safetrade" hidden>
               <button type="button" class="w-back" data-back="trade">Trade</button>
               <h3>SafeTrade</h3>
-              <p class="note">SafeTrade is the centralized exchange from the extension. It needs a SafeTrade account and API key, and it does not spend this Warthog key.</p>
-              <p class="note">Open SafeTrade in a tab, then come back here to send or receive WART.</p>
-              <button type="button" id="open-safetrade" class="primary">Open safetrade.com</button>
+              <p class="note">Spot balances and limit orders on safe.trade. The API secret stays in memory until this wallet locks. Hog does not send the Warthog key.</p>
+              <form id="safe-key-form" class="stack">
+                <label>API key
+                  <input id="safe-key" autocomplete="off" spellcheck="false">
+                </label>
+                <label>API secret
+                  <input id="safe-secret" type="password" autocomplete="off">
+                </label>
+                <div class="row">
+                  <button type="submit" class="primary">Use key</button>
+                  <button type="button" id="safe-clear">Clear key</button>
+                </div>
+              </form>
+              <div id="safe-balances"></div>
+              <form id="safe-order-form" class="stack">
+                <label>Market
+                  <select id="safe-market"></select>
+                </label>
+                <p id="safe-ticker" class="note"></p>
+                <label>Side
+                  <select id="safe-side">
+                    <option value="buy">Buy</option>
+                    <option value="sell">Sell</option>
+                  </select>
+                </label>
+                <label>Amount
+                  <span class="amount-line">
+                    <input id="safe-amount" inputmode="decimal" placeholder="0.00">
+                    <button type="button" id="safe-max" class="tiny">Max</button>
+                  </span>
+                </label>
+                <p id="safe-free" class="note"></p>
+                <label>Price
+                  <input id="safe-price" inputmode="decimal" placeholder="0.00">
+                </label>
+                <p id="safe-error" class="error" role="status"></p>
+                <button type="submit" class="primary" id="safe-order">Place limit order</button>
+              </form>
+              <p class="w-k">Open orders</p>
+              <ul id="safe-orders" class="activity"></ul>
+              <p id="safe-orders-empty" class="note">No open orders.</p>
+              <button type="button" id="open-safetrade">Open safetrade.com</button>
             </div>
 
             <div id="wpage-aave" hidden>
               <button type="button" class="w-back" data-back="trade">Trade</button>
               <h3>Aave</h3>
-              <p class="note">Open the Aave site in a tab and choose Hog. This screen does not supply or borrow by itself.</p>
-              <button type="button" id="open-aave" class="primary">Open app.aave.com</button>
+              <p class="note">Supply, borrow, repay, and withdraw on Ethereum. Hog blocks a borrow or withdrawal that would leave the health factor under 1.5. The key stays in the signing worker.</p>
+              <p id="aave-health" class="note">Open this page to load the market.</p>
+              <p id="aave-error" class="error" role="status"></p>
+              <form id="aave-form" class="stack">
+                <label>Reserve
+                  <select id="aave-reserve"></select>
+                </label>
+                <label>Amount
+                  <span class="amount-line">
+                    <input id="aave-amount" inputmode="decimal" placeholder="0.00">
+                    <button type="button" id="aave-max" class="tiny">Max</button>
+                  </span>
+                </label>
+                <label class="check" id="aave-eth-row"><input id="aave-from-eth" type="checkbox"> Use ETH, leaving gas in the wallet</label>
+                <label class="check" id="aave-unwrap-row"><input id="aave-unwrap" type="checkbox"> Unwrap WETH to ETH</label>
+                <label class="check" id="aave-full-row"><input id="aave-full" type="checkbox"> Use the full position</label>
+                <p id="aave-status" class="note"></p>
+                <div class="row">
+                  <button type="button" id="aave-supply">Supply</button>
+                  <button type="button" id="aave-borrow">Borrow</button>
+                  <button type="button" id="aave-repay">Repay</button>
+                  <button type="button" id="aave-withdraw">Withdraw</button>
+                </div>
+              </form>
+              <button type="button" id="open-aave">Open app.aave.com</button>
             </div>
 
             <div id="wpage-activity" hidden>
               <p class="w-k">Activity</p>
               <ul id="activity" class="activity"></ul>
               <p id="activity-empty" class="note">No WART transfers on this page of history.</p>
-              <p class="w-k">Pending</p>
-              <ul id="pending" class="activity"></ul>
-              <p id="pending-empty" class="note">No pending transactions.</p>
-              <p class="w-k">Open orders</p>
-              <ul id="orders" class="activity"></ul>
-              <p id="orders-empty" class="note">No open limit orders.</p>
-              <p id="orders-error" class="error" role="status"></p>
+              <div id="wart-activity-extra">
+                <p class="w-k">Pending</p>
+                <ul id="pending" class="activity"></ul>
+                <p id="pending-empty" class="note">No pending transactions.</p>
+                <p class="w-k">Open orders</p>
+                <ul id="orders" class="activity"></ul>
+                <p id="orders-empty" class="note">No open limit orders.</p>
+                <p id="orders-error" class="error" role="status"></p>
+              </div>
             </div>
 
             <div id="wpage-settings" hidden>
@@ -1197,7 +1273,12 @@
                 <button type="submit" class="primary">Save name</button>
               </form>
               <p id="address-line" class="mono address"></p>
-              <p class="note">Passkeys and authenticator 2FA stay in the extension. This window unlocks with the password.</p>
+              <p class="note" id="passkey-note">A passkey on this computer can unlock the same wallet. An extension passkey does not work here. The password still works.</p>
+              <div class="row">
+                <button type="button" id="passkey-add">Add passkey</button>
+                <button type="button" id="passkey-remove" class="danger" hidden>Remove passkey</button>
+              </div>
+              <p id="passkey-error" class="error" role="status"></p>
             </div>
 
             <div id="wpage-accounts" hidden>

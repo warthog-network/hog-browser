@@ -513,6 +513,11 @@ test("posted search is served on a localhost site port", async () => {
     assert.match(homeText, /id="node-frame"/);
     assert.equal(home.headers.get("cross-origin-embedder-policy"), "require-corp");
     assert.equal(home.headers.get("cross-origin-opener-policy"), "same-origin");
+    const workerScript = await fetch(`${base}/vault-worker.js`);
+    assert.equal(workerScript.status, 200);
+    assert.match(workerScript.headers.get("content-type") || "", /javascript/);
+    assert.equal(workerScript.headers.get("cross-origin-embedder-policy"), "require-corp");
+    assert.equal(workerScript.headers.get("cross-origin-opener-policy"), "same-origin");
     const opened = await fetch(`${base}/api/browse`, {
       method: "POST",
       headers,

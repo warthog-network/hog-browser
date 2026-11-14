@@ -11,6 +11,7 @@ await esbuild.build({
     "dapp-bundle": "src/dapp.js",
     "chains-bundle": "src/chains.js",
     "vault-worker": "src/vault-worker.js",
+    "extra-bundle": "src/extra.js",
     "xterm-bundle": "src/terminal.js",
   },
   bundle: true,

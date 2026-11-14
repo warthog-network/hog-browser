@@ -311,3 +311,98 @@ export async function sendNativeEvm({ privateKey, to, amount, chain, fetchImpl =
   }
   return hash;
 }
+
+/**
+ * Sign and broadcast a contract call. Returns only the transaction hash.
+ * Used for Aave steps. The private key is not included in the result.
+ */
+export async function sendEvmCall({ privateKey, to, data, value = 0n, chain = "ethereum", fetchImpl = globalThis.fetch }) {
+  const row = EVM[chain];
+  if (!row) throw new Error("That network is not available.");
+  if (!ethers.isAddress(to)) throw new Error("That contract is not an Ethereum address.");
+  const callData = String(data || "");
+  if (!/^0x[0-9a-fA-F]*$/.test(callData)) throw new Error("That call is not valid.");
+  const wallet = new ethers.Wallet(`0x${hexKey(privateKey)}`);
+  const from = wallet.address;
+  const pay = BigInt(value);
+  const nonce = Number(BigInt(await evmCall(row.rpc, "eth_getTransactionCount", [from, "pending"], fetchImpl)));
+  let gas;
+  try {
+    gas = BigInt(await evmCall(row.rpc, "eth_estimateGas", [{
+      from,
+      to: ethers.getAddress(to),
+      data: callData,
+      value: ethers.toBeHex(pay),
+    }], fetchImpl));
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : "The network would not accept that call.");
+  }
+  gas = gas * 12n / 10n;
+  if (gas < 21_000n) gas = 21_000n;
+  const fee = (await evmTransferReserve(chain, fetchImpl)) / 21_000n;
+  const tx = {
+    type: 2,
+    chainId: row.chainId,
+    nonce,
+    gasLimit: gas,
+    maxFeePerGas: fee,
+    maxPriorityFeePerGas: fee > 1n ? fee / 2n : fee,
+    to: ethers.getAddress(to),
+    value: pay,
+    data: callData,
+  };
+  const raw = await wallet.signTransaction(tx);
+  const hash = await evmCall(row.rpc, "eth_sendRawTransaction", [raw], fetchImpl);
+  if (typeof hash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    throw new Error("The network did not return a transaction hash.");
+  }
+  return hash;
+}
+
+/** Wait until a transaction receipt lands, or the attempt limit runs out. */
+export async function waitEvmReceipt({
+  hash,
+  chain = "ethereum",
+  fetchImpl = globalThis.fetch,
+  attempts = 40,
+  pauseMs = 3000,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const row = EVM[chain];
+  if (!row) throw new Error("That network is not available.");
+  for (let i = 0; i < attempts; i += 1) {
+    const receipt = await evmCall(row.rpc, "eth_getTransactionReceipt", [hash], fetchImpl);
+    if (receipt) {
+      if (receipt.status === "0x0" || receipt.status === "0x00") {
+        throw new Error("The transaction failed on the network.");
+      }
+      return receipt;
+    }
+    if (i + 1 < attempts) await sleep(pauseMs);
+  }
+  throw new Error("The transaction is still pending.");
+}
+
+/** Compressed Bitcoin key for the phrase's native-segwit account. Caller wipes the bytes. */
+export function btcKeyFromPhrase(phrase) {
+  const node = ethers.HDNodeWallet.fromPhrase(normalizePhrase(phrase), "", BTC_PATH);
+  return btcKeyFromPrivateKey(node.privateKey);
+}
+
+/** Same key Hog already shows as the Bitcoin address, including a raw-key wallet. */
+export function btcKeyFromPrivateKey(privateKeyHex) {
+  const account = accountFromPrivateKey(privateKeyHex);
+  return {
+    privateKey: ethers.getBytes(`0x${account.privateKey}`),
+    publicKey: ethers.getBytes(`0x${account.publicKey}`),
+    address: btcAddressFromCompressed(account.publicKey),
+  };
+}
+
+/** Ed25519 key for the phrase's Solana account. Caller wipes privateKey. */
+export function solKeyFromPhrase(phrase) {
+  const seed = ethers.getBytes(ethers.Mnemonic.fromPhrase(normalizePhrase(phrase)).computeSeed());
+  const key = slip10(seed, SOL_PATH);
+  seed.fill(0);
+  return { privateKey: key, address: base58Encode(ed25519.getPublicKey(key)) };
+}

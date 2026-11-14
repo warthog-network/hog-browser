@@ -4,7 +4,37 @@ import {
   createPhraseAccount,
   evmTransferReserve,
   readNativeBalance,
+  waitEvmReceipt,
 } from "./chains-bundle.js";
+import {
+  SAFE_MARKETS,
+  assertBtcAddress,
+  assertSolAddress,
+  base64UrlToBytes,
+  bytesToBase64Url,
+  decryptWalletFile,
+  fetchBtcFeeRate,
+  fetchBtcUtxos,
+  formatHealth,
+  loadAaveMarket,
+  maxSafeWithdraw,
+  maxSendableBtc,
+  maxSendableSol,
+  maxWrappableEth,
+  openWithPrf,
+  parseAaveAmount,
+  planBorrow,
+  planRepay,
+  planSupply,
+  planWithdraw,
+  readChainActivity,
+  safeBalances,
+  safeCancelOrder,
+  safeLimitOrder,
+  safeOpenOrders,
+  safeTicker,
+  sealWithPrf,
+} from "./extra-bundle.js";
 import { answerDappRequest, CHAINS, DappError } from "./dapp-bundle.js";
 import { FitAddon, Terminal } from "./xterm-bundle.js";
 import { smbLinks } from "./files-core.js";
@@ -37,6 +67,7 @@ import {
 } from "./bookmarks-store.js";
 
 const STORE = "hog-wallet-v1";
+const PASSKEY_KEY = "hog-passkey";
 const LAST_URL = "hog-last-url";
 const HISTORY_KEY = "hog-history";
 const WALLET_OPEN_KEY = "hog-wallet-open";
@@ -128,6 +159,10 @@ let tabSeq = 1;
 let viewSeq = 0;
 let session = null;
 let lockTimer = 0;
+let lockDeadline = 0;
+let safeCreds = null;
+let safeRows = [];
+let aaveMarket = null;
 let vaultWorker = null;
 let vaultSeq = 0;
 const vaultPending = new Map();
@@ -197,9 +232,17 @@ function lockMinutes() {
 
 function dropSession() {
   clearTimeout(lockTimer);
+  lockDeadline = 0;
+  safeCreds = null;
+  safeRows = [];
+  const safeKey = $("safe-key");
+  const safeSecret = $("safe-secret");
+  if (safeKey) safeKey.value = "";
+  if (safeSecret) safeSecret.value = "";
   vaultCall("lock", {}).catch(() => {});
   session = null;
   balance = null;
+  paintLockLeft();
 }
 
 function signHeld(kind, args) {
@@ -2669,18 +2712,25 @@ function paintChain() {
   $("receive-note").textContent = address
     ? `Send ${spec.symbol} to this address on ${spec.label}.`
     : "Restore a 12 or 24 word phrase to open a Solana account.";
-  const spend = isWartChain(chain) || chain === "ethereum" || chain === "hemi";
+  const solReady = chain === "solana" && Boolean(address);
+  const spend = isWartChain(chain) || chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || solReady;
   $("send-to-label").hidden = !spend;
   $("send-amount-label").hidden = !spend;
   $("send-fee-label").hidden = !isWartChain(chain);
   $("send-button").hidden = !spend;
-  $("send-to").placeholder = isWartChain(chain) ? "48 hex characters" : "0x address";
-  $("send-chain-note").hidden = spend;
+  $("send-to").placeholder = isWartChain(chain)
+    ? "48 hex characters"
+    : chain === "bitcoin"
+      ? "bc1 address"
+      : chain === "solana"
+        ? "Solana address"
+        : "0x address";
+  $("send-chain-note").hidden = chain !== "bitcoin" && chain !== "solana";
   if (chain === "bitcoin") {
-    $("send-chain-note").textContent = "You can receive Bitcoin at this address. Sending Bitcoin from this window is not ready yet.";
+    $("send-chain-note").textContent = "The miner fee comes out of the Bitcoin balance. Max leaves that fee and the dust limit. Coins that are still confirming stay out of Max.";
   } else if (chain === "solana") {
     $("send-chain-note").textContent = address
-      ? "You can receive SOL at this address. Sending Solana from this window is not ready yet."
+      ? "Max leaves the network fee and the rent-exempt minimum in the account."
       : "This key has no Solana account. Restore a 12 or 24 word phrase to open one.";
   }
   if ($("phrase-note") && session) {
@@ -3009,6 +3059,9 @@ function showWalletPage(name) {
   if (page === "account") $("account-name").value = localStorage.getItem(NAME_KEY) || "";
   if (page === "accounts") renderAccounts();
   if (page === "sites") renderSites();
+  if (page === "account") paintPasskey();
+  if (page === "aave") void loadAavePage();
+  if (page === "safetrade") void paintSafePage();
   if (page !== "phrase" && $("revealed-phrase")) {
     $("revealed-phrase").value = "";
     $("revealed-phrase").hidden = true;
@@ -4807,11 +4860,32 @@ function renderDisplayPicks() {
   });
 }
 
+function paintLockLeft() {
+  const el = $("lock-left");
+  if (!el) return;
+  const minutes = lockMinutes();
+  if (!session || !minutes || !lockDeadline) {
+    el.hidden = true;
+    return;
+  }
+  const total = Math.max(0, Math.ceil((lockDeadline - Date.now()) / 1000));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  el.hidden = false;
+  el.textContent = `Locks in ${mins}:${String(secs).padStart(2, "0")}`;
+}
+
 function scheduleLock() {
   clearTimeout(lockTimer);
   const minutes = lockMinutes();
-  if (!session || !minutes) return;
+  if (!session || !minutes) {
+    lockDeadline = 0;
+    paintLockLeft();
+    return;
+  }
+  lockDeadline = Date.now() + minutes * 60_000;
   lockTimer = setTimeout(() => lockWallet(), minutes * 60_000);
+  paintLockLeft();
 }
 
 function lockWallet() {
@@ -4824,7 +4898,7 @@ const SIDE_COPY = "The toolbar icon opens a panel docked on the side of the brow
 const DROP_COPY = "The toolbar icon opens the small menu. Hog keeps the wallet in this side panel.";
 
 function hideSetupForms() {
-  for (const id of ["create-name-form", "create-form", "import-form", "phrase-form", "unlock-form", "restore-menu"]) {
+  for (const id of ["create-name-form", "create-form", "import-form", "phrase-form", "file-form", "unlock-form", "restore-menu"]) {
     $(id).hidden = true;
   }
   $("restore-limit").hidden = true;
@@ -4839,8 +4913,10 @@ function showHub() {
   const locked = Boolean(savedRecord());
   $("hub-title").textContent = locked ? "Welcome back" : "Get started";
   $("hub-hint").textContent = locked
-    ? "Unlock with passkey or password, or start another path."
-    : "Create a wallet with a 12-word phrase, locked by a password in this window. A passkey stays in the extension.";
+    ? "Unlock with a passkey or the password."
+    : "Create a wallet with a 12-word phrase, locked by a password in this window. You can add a passkey after it is open.";
+  const meta = $("hub-unlock-meta");
+  if (meta) meta.textContent = passkeyRecord() ? "Password or passkey" : "Password in this window";
   $("hub-unlock").hidden = !locked;
   $("hub-unlock").classList.toggle("is-primary", locked);
   $("create").classList.toggle("is-primary", !locked);
@@ -4858,7 +4934,8 @@ function showStep(which) {
     restore: ["Restore wallet", "How do you want to restore access?"],
     import: ["Private key", "Paste the 64-character private key."],
     phrase: ["Recovery phrase", "12 or 24 words. This matches the extension account, including Ethereum, Bitcoin, Hemi, and Solana."],
-    unlock: ["Unlock wallet", "This window unlocks with the password. A passkey stays in the extension."],
+    file: ["Encrypted file", "Choose a warthog_wallet.txt file and enter its password. That password also locks the wallet here."],
+    unlock: ["Unlock wallet", "Use the password, or a passkey saved in this window."],
   };
   $("step-title").textContent = copy[which][0];
   $("step-hint").textContent = copy[which][1];
@@ -4867,7 +4944,11 @@ function showStep(which) {
   if (which === "restore") $("restore-menu").hidden = false;
   if (which === "import") $("import-form").hidden = false;
   if (which === "phrase") $("phrase-form").hidden = false;
-  if (which === "unlock") $("unlock-form").hidden = false;
+  if (which === "file") $("file-form").hidden = false;
+  if (which === "unlock") {
+    $("unlock-form").hidden = false;
+    paintPasskey();
+  }
   setSetupError("");
 }
 
@@ -5075,6 +5156,32 @@ function renderActivity(items) {
   }
 }
 
+function renderChainActivity(items) {
+  const list = $("activity");
+  list.replaceChildren();
+  $("activity-empty").hidden = items.length > 0;
+  for (const item of items) {
+    const li = document.createElement("li");
+    if (item.url) li.setAttribute("role", "link");
+    const dir = document.createElement("div");
+    dir.className = item.failed ? "out" : item.incoming ? "in" : "out";
+    dir.textContent = item.title;
+    const meta = document.createElement("div");
+    meta.className = "sub";
+    meta.textContent = item.amount;
+    li.append(dir, meta);
+    if (item.url) {
+      const open = () => openUrl(item.url);
+      li.addEventListener("click", open);
+      li.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") open();
+      });
+      li.tabIndex = 0;
+    }
+    list.append(li);
+  }
+}
+
 function transfersFrom(data, address) {
   const items = [];
   for (const block of data?.perBlock || []) {
@@ -5226,13 +5333,28 @@ async function refreshWallet() {
       $("chain-line").textContent = error.message;
     }
     renderBalance();
-    renderActivity([]);
-    $("activity-empty").hidden = false;
-    $("activity-empty").textContent = `${spec.label} transfers are not listed in this window.`;
-    await refreshOrders();
-    await refreshPending();
+    const extra = $("wart-activity-extra");
+    if (extra) extra.hidden = true;
+    try {
+      const rows = activeAddress() ? await readChainActivity(chain, activeAddress()) : [];
+      if (gen !== refreshGen) return;
+      renderChainActivity(rows);
+      if (!rows.length) {
+        $("activity-empty").hidden = false;
+        $("activity-empty").textContent = activeAddress()
+          ? `No ${spec.label} transfers on this page.`
+          : `${spec.label} needs an address before activity can load.`;
+      }
+    } catch (error) {
+      if (gen !== refreshGen) return;
+      renderChainActivity([]);
+      $("activity-empty").hidden = false;
+      $("activity-empty").textContent = error.message;
+    }
     return;
   }
+  const extra = $("wart-activity-extra");
+  if (extra) extra.hidden = false;
   $("activity-empty").textContent = "No WART transfers on this page of history.";
   $("chain-line").textContent = "Reading the chain…";
   try {
@@ -5957,9 +6079,132 @@ async function reviewOrSendEvm(event, chain) {
   }
 }
 
+async function reviewOrSendBtc(event) {
+  event.preventDefault();
+  if (!session || !session.btcAddress) return;
+  setSendError("");
+  let to;
+  try {
+    to = assertBtcAddress($("send-to").value);
+  } catch (error) {
+    setSendError(error.message);
+    clearReview();
+    return;
+  }
+  const amount = parseUnits($("send-amount").value, 8);
+  if (amount == null || amount <= 0n) {
+    setSendError("Enter an amount greater than 0, with at most 8 decimals.");
+    clearReview();
+    return;
+  }
+  let utxos;
+  let rate;
+  try {
+    [utxos, rate] = await Promise.all([fetchBtcUtxos(session.btcAddress), fetchBtcFeeRate()]);
+  } catch (error) {
+    setSendError(error.message);
+    clearReview();
+    return;
+  }
+  const confirmed = utxos.filter((row) => row.confirmed !== false);
+  const max = maxSendableBtc(confirmed, rate);
+  const pending = utxos
+    .filter((row) => row.confirmed === false)
+    .reduce((sum, row) => sum + BigInt(row.value), 0n);
+  if (amount > max) {
+    $("send-amount").value = formatUnits(max, 8);
+    const pendingNote = pending > 0n ? ` ${formatUnits(pending, 8)} BTC is still confirming.` : "";
+    setSendError(`Only ${formatUnits(max, 8)} BTC can be sent after the network fee.${pendingNote}`);
+    clearReview();
+    return;
+  }
+  if (!reviewing) {
+    reviewing = true;
+    $("send-review").hidden = false;
+    $("send-review").textContent = `Send ${formatUnits(amount, 8)} BTC to ${to}. Miner fee is about ${rate} sat/vB and comes out of the balance.`;
+    $("send-button").textContent = "Send BTC";
+    return;
+  }
+  try {
+    const txid = await vaultCall("sendBtc", { to, amount });
+    $("send-review").hidden = false;
+    $("send-review").textContent = `Submitted ${txid}`;
+    $("send-to").value = "";
+    $("send-amount").value = "";
+    reviewing = false;
+    $("send-button").textContent = "Review send";
+    await refreshWallet();
+  } catch (error) {
+    setSendError(error.message);
+    clearReview();
+  }
+}
+
+async function reviewOrSendSol(event) {
+  event.preventDefault();
+  if (!session) return;
+  setSendError("");
+  if (!session.hasPhrase || !session.solAddress) {
+    setSendError("Solana needs a recovery phrase.");
+    clearReview();
+    return;
+  }
+  let to = "";
+  try {
+    assertSolAddress($("send-to").value);
+    to = $("send-to").value.trim();
+  } catch (error) {
+    setSendError(error.message);
+    clearReview();
+    return;
+  }
+  const amount = parseUnits($("send-amount").value, 9);
+  if (amount == null || amount <= 0n) {
+    setSendError("Enter an amount greater than 0.");
+    clearReview();
+    return;
+  }
+  let max;
+  try {
+    max = await maxSendableSol(session.solAddress);
+  } catch (error) {
+    setSendError(error.message);
+    clearReview();
+    return;
+  }
+  if (amount > max) {
+    $("send-amount").value = formatUnits(max, 9);
+    setSendError(`Only ${formatUnits(max, 9)} SOL can be sent after the network fee and the rent reserve.`);
+    clearReview();
+    return;
+  }
+  if (!reviewing) {
+    reviewing = true;
+    $("send-review").hidden = false;
+    $("send-review").textContent = `Send ${formatUnits(amount, 9)} SOL to ${to}. The fee and rent reserve stay in the account.`;
+    $("send-button").textContent = "Send SOL";
+    return;
+  }
+  try {
+    const signature = await vaultCall("sendSol", { to, amount });
+    $("send-review").hidden = false;
+    $("send-review").textContent = `Submitted ${signature}`;
+    $("send-to").value = "";
+    $("send-amount").value = "";
+    reviewing = false;
+    $("send-button").textContent = "Review send";
+    await refreshWallet();
+  } catch (error) {
+    setSendError(error.message);
+    clearReview();
+  }
+}
+
 async function reviewOrSend(event) {
   const chain = selectedChain();
   if (chain === "ethereum" || chain === "hemi") return reviewOrSendEvm(event, chain);
+  if (chain === "bitcoin") return reviewOrSendBtc(event);
+  if (chain === "solana") return reviewOrSendSol(event);
   event.preventDefault();
   if (!session || !isWartChain(chain)) return;
   setSendError("");
@@ -6057,6 +6302,20 @@ async function fillMax() {
       clearReview();
       return;
     }
+    if (chain === "bitcoin") {
+      const [utxos, rate] = await Promise.all([fetchBtcUtxos(session.btcAddress), fetchBtcFeeRate()]);
+      const max = maxSendableBtc(utxos.filter((row) => row.confirmed !== false), rate);
+      $("send-amount").value = formatUnits(max, 8);
+      clearReview();
+      return;
+    }
+    if (chain === "solana") {
+      if (!session.solAddress) throw new Error("Solana needs a recovery phrase.");
+      const max = await maxSendableSol(session.solAddress);
+      $("send-amount").value = formatUnits(max, 9);
+      clearReview();
+      return;
+    }
     if (!isWartChain(chain)) return;
     if (!balance) await refreshWallet();
     const fee = await roundedFeeE8($("send-fee").value || "0.001");
@@ -6073,6 +6332,7 @@ async function saveAccount(account, password) {
   const record = { ...sealed, address: account.address };
   if (account.phrase) record.phrase = await sealKey(account.phrase, password);
   localStorage.setItem(STORE, JSON.stringify(record));
+  localStorage.removeItem(PASSKEY_KEY);
   if (account.phrase) resetAccountBook(account);
   else clearAccountBook();
   const opened = await vaultCall("unlock", {
@@ -6100,6 +6360,7 @@ function forgetWallet() {
   }
   localStorage.removeItem(SITES_KEY);
   localStorage.removeItem(STORE);
+  localStorage.removeItem(PASSKEY_KEY);
   clearAccountBook();
   dropSession();
   finishDapp(false);
@@ -7305,6 +7566,7 @@ function bind() {
   });
   document.addEventListener("pointerdown", scheduleLock);
   document.addEventListener("keydown", scheduleLock);
+  setInterval(paintLockLeft, 1000);
   bindDesktop();
 
   $("create").addEventListener("click", () => showStep("create"));
@@ -7315,8 +7577,9 @@ function bind() {
   $("mode-dropdown").addEventListener("click", () => setWindowCopy(false));
   $("restore-key").addEventListener("click", () => showStep("import"));
   $("restore-seed").addEventListener("click", () => showStep("phrase"));
-  $("restore-file").addEventListener("click", () => {
-    showLimit("An encrypted warthog_wallet.txt file stays in the extension. Paste the private key here if you have it.");
+  $("restore-file").addEventListener("click", () => showStep("file"));
+  $("file-form").addEventListener("submit", (event) => {
+    importWalletFile(event);
   });
   $("restore-ledger").addEventListener("click", () => {
     showLimit("A Ledger Nano stays in the extension. This window cannot see the device.");
@@ -7404,46 +7667,37 @@ function bind() {
     try {
       let privateKey = await openKey(record, $("unlock-pass").value);
       let phrase = "";
-      const derived = [];
       try {
-        let account = chainAccountsFromPrivateKey(privateKey);
-        derived.push(account);
-        if (record.phrase) {
-          phrase = await openKey(record.phrase, $("unlock-pass").value);
-          const root = chainAccountsFromPhrase(phrase, 0);
-          derived.push(root);
-          if (root.address !== record.address) throw new Error("The saved wallet did not decrypt to its address");
-          if (!readAccountBook().length) resetAccountBook(root);
-          let index = savedAccountIndex();
-          const book = readAccountBook();
-          const picked = chainAccountsFromPhrase(phrase, index);
-          derived.push(picked);
-          if (!book[index] || book[index].address !== picked.address) index = 0;
-          localStorage.setItem(ACCOUNT_INDEX_KEY, String(index));
-          account = index === 0 ? root : picked;
-        } else if (account.address !== record.address) {
-          throw new Error("The saved wallet did not decrypt to its address");
-        }
-        const opened = await vaultCall("unlock", {
-          privateKey: account.privateKey,
-          phrase,
-          accountIndex: account.accountIndex || 0,
-        });
-        startSession(opened);
+        if (record.phrase) phrase = await openKey(record.phrase, $("unlock-pass").value);
+        await enterWallet(privateKey, phrase);
       } finally {
         privateKey = "";
         phrase = "";
-        for (const row of derived) {
-          row.privateKey = "";
-          row.evmKey = "";
-          row.phrase = "";
-        }
       }
       $("unlock-pass").value = "";
       showOpen();
       await refreshWallet();
     } catch {
       setSetupError("Wrong password.");
+    }
+  });
+  $("unlock-passkey").addEventListener("click", async () => {
+    setSetupError("");
+    const record = passkeyRecord();
+    if (!record) return;
+    try {
+      const secret = await assertHogPasskey(record);
+      const opened = await openWithPrf(secret, record);
+      try {
+        await enterWallet(opened.privateKey, opened.phrase);
+      } finally {
+        opened.privateKey = "";
+        opened.phrase = "";
+      }
+      showOpen();
+      await refreshWallet();
+    } catch (error) {
+      setSetupError(passkeyMessage(error));
     }
   });
   $("forget").addEventListener("click", forgetWallet);
@@ -7465,6 +7719,57 @@ function bind() {
       if (reviewing) clearReview();
     });
   }
+  $("passkey-add").addEventListener("click", () => {
+    addPasskey().catch((error) => {
+      const note = $("passkey-error");
+      if (note) note.textContent = passkeyMessage(error);
+    });
+  });
+  $("passkey-remove").addEventListener("click", () => {
+    localStorage.removeItem(PASSKEY_KEY);
+    paintPasskey();
+    const note = $("passkey-note");
+    if (note) note.textContent = "Passkey removed. The password still unlocks this wallet.";
+  });
+  $("aave-reserve").addEventListener("change", () => paintAave());
+  $("aave-from-eth").addEventListener("change", () => paintAave());
+  $("aave-max").addEventListener("click", () => fillAaveMax());
+  $("aave-supply").addEventListener("click", () => runAave("supply"));
+  $("aave-borrow").addEventListener("click", () => runAave("borrow"));
+  $("aave-repay").addEventListener("click", () => runAave("repay"));
+  $("aave-withdraw").addEventListener("click", () => runAave("withdraw"));
+  $("safe-key-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const apiKey = $("safe-key").value.trim();
+    const secret = $("safe-secret").value.trim();
+    if (!apiKey || !secret) {
+      $("safe-error").textContent = "Enter both the API key and the secret.";
+      return;
+    }
+    safeCreds = { apiKey, secret };
+    $("safe-secret").value = "";
+    paintSafePage();
+  });
+  $("safe-clear").addEventListener("click", () => {
+    safeCreds = null;
+    safeRows = [];
+    $("safe-key").value = "";
+    $("safe-secret").value = "";
+    paintSafePage();
+  });
+  $("safe-market").addEventListener("change", () => paintSafePage());
+  $("safe-side").addEventListener("change", () => paintSafeFree());
+  $("safe-max").addEventListener("click", () => fillSafeMax());
+  $("safe-order-form").addEventListener("submit", (event) => submitSafeOrder(event));
+  $("safe-orders").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-safe-cancel]");
+    if (!button || !safeCreds) return;
+    safeCancelOrder(safeCreds, button.dataset.safeCancel)
+      .then(() => paintSafePage())
+      .catch((error) => {
+        $("safe-error").textContent = error.message;
+      });
+  });
   $("dapp-reject").addEventListener("click", () => finishDapp(false));
   $("dapp-ok").addEventListener("click", () => finishDapp(true));
   $("dapp-sure").addEventListener("change", () => {
@@ -7475,6 +7780,465 @@ function bind() {
     if (!button) return;
     disconnectSite(button.dataset.origin);
   });
+}
+
+function passkeyRecord() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PASSKEY_KEY) || "");
+    if (!parsed || !parsed.credentialId || !parsed.ciphertext || !parsed.iv || !parsed.prfSalt) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function paintPasskey() {
+  const has = Boolean(passkeyRecord());
+  const unlock = $("unlock-passkey");
+  if (unlock) unlock.hidden = !has;
+  const remove = $("passkey-remove");
+  if (remove) remove.hidden = !has;
+}
+
+function passkeyMessage(error) {
+  if (error && error.name === "NotAllowedError") return "Passkey was canceled.";
+  return error instanceof Error ? error.message : "Passkey failed.";
+}
+
+function prfBytes(credential) {
+  const first = credential?.getClientExtensionResults?.()?.prf?.results?.first;
+  if (!first) return null;
+  return new Uint8Array(first);
+}
+
+async function assertHogPasskey(record) {
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    throw new Error("This window has no passkey support.");
+  }
+  const allow = { type: "public-key", id: base64UrlToBytes(record.credentialId) };
+  if (Array.isArray(record.transports) && record.transports.length) allow.transports = record.transports;
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: location.hostname,
+      userVerification: "required",
+      allowCredentials: [allow],
+      extensions: { prf: { eval: { first: base64UrlToBytes(record.prfSalt) } } },
+      timeout: 60000,
+    },
+  });
+  const secret = prfBytes(assertion);
+  if (!secret) throw new Error("This passkey has no PRF secret. Use the password.");
+  return secret;
+}
+
+async function addPasskey() {
+  const error = $("passkey-error");
+  if (error) error.textContent = "";
+  if (!session) return;
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    throw new Error("This window has no passkey support.");
+  }
+  const salt = crypto.getRandomValues(new Uint8Array(32));
+  const created = await navigator.credentials.create({
+    publicKey: {
+      rp: { name: "Hog", id: location.hostname },
+      user: {
+        id: crypto.getRandomValues(new Uint8Array(16)),
+        name: "hog-wallet",
+        displayName: localStorage.getItem(NAME_KEY) || "Hog wallet",
+      },
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "required" },
+      timeout: 60000,
+    },
+  });
+  const transports = created.response.getTransports?.() || [];
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: location.hostname,
+      userVerification: "required",
+      allowCredentials: [{ type: "public-key", id: created.rawId, transports }],
+      extensions: { prf: { eval: { first: salt } } },
+      timeout: 60000,
+    },
+  });
+  const secret = prfBytes(assertion);
+  if (!secret) throw new Error("This passkey has no PRF secret. Use the password.");
+  const exported = session.hasPhrase
+    ? { phrase: (await vaultCall("exportPhrase", {})).phrase, privateKey: "" }
+    : { phrase: "", privateKey: (await vaultCall("exportKey", {})).privateKey };
+  try {
+    const sealed = await sealWithPrf(secret, exported);
+    localStorage.setItem(PASSKEY_KEY, JSON.stringify({
+      credentialId: bytesToBase64Url(new Uint8Array(created.rawId)),
+      rpId: location.hostname,
+      iv: sealed.iv,
+      ciphertext: sealed.ciphertext,
+      prfSalt: bytesToBase64Url(salt),
+      transports,
+    }));
+  } finally {
+    exported.phrase = "";
+    exported.privateKey = "";
+  }
+  paintPasskey();
+  const note = $("passkey-note");
+  if (note) note.textContent = "Passkey saved. The password still unlocks this wallet.";
+}
+
+async function enterWallet(privateKeyIn, phraseIn) {
+  const record = savedRecord();
+  if (!record) throw new Error("No wallet is saved in this window.");
+  let privateKey = privateKeyIn || "";
+  let phrase = phraseIn || "";
+  const derived = [];
+  try {
+    let account = null;
+    if (privateKey) {
+      account = chainAccountsFromPrivateKey(privateKey);
+      derived.push(account);
+    }
+    if (phrase) {
+      const root = chainAccountsFromPhrase(phrase, 0);
+      derived.push(root);
+      if (root.address !== record.address) throw new Error("The saved wallet did not decrypt to its address");
+      if (!readAccountBook().length) resetAccountBook(root);
+      let index = savedAccountIndex();
+      const book = readAccountBook();
+      const picked = chainAccountsFromPhrase(phrase, index);
+      derived.push(picked);
+      if (!book[index] || book[index].address !== picked.address) index = 0;
+      localStorage.setItem(ACCOUNT_INDEX_KEY, String(index));
+      account = index === 0 ? root : picked;
+    } else if (!account || account.address !== record.address) {
+      throw new Error("The saved wallet did not decrypt to its address");
+    }
+    const opened = await vaultCall("unlock", {
+      privateKey: account.privateKey,
+      phrase,
+      accountIndex: account.accountIndex || 0,
+    });
+    startSession(opened);
+  } finally {
+    privateKey = "";
+    phrase = "";
+    for (const row of derived) {
+      row.privateKey = "";
+      row.evmKey = "";
+      row.phrase = "";
+    }
+  }
+}
+
+function selectedAaveReserve() {
+  if (!aaveMarket) return null;
+  const id = Number($("aave-reserve").value);
+  return aaveMarket.reserves.find((row) => row.id === id) || null;
+}
+
+function paintAave() {
+  const select = $("aave-reserve");
+  if (!select || !aaveMarket) return;
+  const current = select.value;
+  select.replaceChildren();
+  for (const reserve of aaveMarket.reserves) {
+    const option = document.createElement("option");
+    option.value = String(reserve.id);
+    option.textContent = `${reserve.symbol} · wallet ${formatUnits(reserve.walletBalance, reserve.decimals)} · supplied ${formatUnits(reserve.supplied, reserve.decimals)} · debt ${formatUnits(reserve.debt, reserve.decimals)}`;
+    select.append(option);
+  }
+  if (current && [...select.options].some((option) => option.value === current)) select.value = current;
+  $("aave-health").textContent = `Health factor ${formatHealth(aaveMarket.account.healthFactorWad)}. Borrows and withdrawals stop at 1.5.`;
+  const reserve = selectedAaveReserve();
+  const weth = Boolean(reserve && reserve.id === 0);
+  $("aave-eth-row").hidden = !weth;
+  $("aave-unwrap-row").hidden = !weth;
+  if (!weth) {
+    $("aave-from-eth").checked = false;
+    $("aave-unwrap").checked = false;
+  }
+}
+
+async function loadAavePage() {
+  const error = $("aave-error");
+  if (error) error.textContent = "";
+  if (!session || !session.evmAddress) {
+    $("aave-health").textContent = "Unlock a wallet to load Aave.";
+    return;
+  }
+  $("aave-health").textContent = "Loading Aave…";
+  try {
+    aaveMarket = await loadAaveMarket(session.evmAddress);
+    paintAave();
+    const skipped = aaveMarket.skipped.length ? `Skipped ${aaveMarket.skipped.join(", ")} because the Spoke reserve did not match.` : "";
+    $("aave-status").textContent = skipped;
+  } catch (error) {
+    aaveMarket = null;
+    if (error) $("aave-error").textContent = error.message;
+    $("aave-health").textContent = "Aave did not load.";
+  }
+}
+
+function fillAaveMax() {
+  const reserve = selectedAaveReserve();
+  if (!aaveMarket || !reserve) return;
+  const fromEth = $("aave-from-eth").checked && reserve.id === 0;
+  let amount = fromEth ? maxWrappableEth(aaveMarket) : reserve.walletBalance;
+  let why = fromEth ? "ETH you can wrap after gas" : "wallet balance you can supply";
+  if (!fromEth && reserve.supplyRoom < amount) amount = reserve.supplyRoom;
+  if (!fromEth && amount <= 0n && reserve.debt > 0n) {
+    amount = reserve.debt;
+    why = "debt you can repay";
+  } else if (!fromEth && amount <= 0n) {
+    amount = maxSafeWithdraw(aaveMarket, reserve);
+    why = "amount you can withdraw while health stays at 1.5";
+  }
+  $("aave-amount").value = formatUnits(amount, reserve.decimals);
+  $("aave-status").textContent = `Max is the ${why}.`;
+}
+
+async function runAave(kind) {
+  const error = $("aave-error");
+  if (error) error.textContent = "";
+  const reserve = selectedAaveReserve();
+  if (!session || !aaveMarket || !reserve) {
+    if (error) error.textContent = aaveMarket ? "Pick a reserve." : "Load Aave first.";
+    return;
+  }
+  const full = $("aave-full").checked && (kind === "repay" || kind === "withdraw");
+  try {
+    let amount = 0n;
+    if (!full) {
+      amount = parseAaveAmount($("aave-amount").value, reserve.decimals);
+      if (amount <= 0n) throw new Error("Enter an amount greater than 0.");
+    }
+    const owner = session.evmAddress;
+    let steps;
+    if (kind === "supply") steps = await planSupply(owner, aaveMarket, reserve, amount, $("aave-from-eth").checked);
+    else if (kind === "borrow") steps = planBorrow(owner, aaveMarket, reserve, amount, $("aave-unwrap").checked);
+    else if (kind === "repay") steps = await planRepay(owner, aaveMarket, reserve, amount, full);
+    else steps = planWithdraw(owner, aaveMarket, reserve, amount, full, $("aave-unwrap").checked);
+    let last = "";
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i];
+      $("aave-status").textContent = `${step.label} (${i + 1} of ${steps.length})`;
+      const hash = await vaultCall("sendEvmCall", {
+        to: step.to,
+        data: step.data,
+        value: step.value || 0n,
+        chain: "ethereum",
+      });
+      await waitEvmReceipt({ hash, chain: "ethereum" });
+      last = hash;
+    }
+    $("aave-status").textContent = last ? `Submitted ${last}` : "Done.";
+    $("aave-amount").value = "";
+    await loadAavePage();
+    await refreshWallet();
+  } catch (err) {
+    if (error) error.textContent = err.message;
+  }
+}
+
+function paintSafeMarkets() {
+  const select = $("safe-market");
+  if (!select || select.options.length) return;
+  for (const market of SAFE_MARKETS) {
+    const option = document.createElement("option");
+    option.value = market.id;
+    option.textContent = `${market.base}/${market.quote}`;
+    select.append(option);
+  }
+}
+
+function currentSafeMarket() {
+  return SAFE_MARKETS.find((row) => row.id === $("safe-market").value) || SAFE_MARKETS[0];
+}
+
+function safeBalance(asset) {
+  return safeRows.find((row) => row.asset === String(asset || "").toUpperCase()) || { asset, available: 0, locked: 0 };
+}
+
+function paintSafeFree() {
+  const line = $("safe-free");
+  if (!line) return;
+  if (!safeCreds) {
+    line.textContent = "";
+    return;
+  }
+  const market = currentSafeMarket();
+  const side = $("safe-side").value;
+  const asset = side === "sell" ? market.base : market.quote;
+  const row = safeBalance(asset);
+  line.textContent = `${asset}: ${row.available} free; ${row.locked} locked in open orders.`;
+}
+
+function paintSafeBalances() {
+  const host = $("safe-balances");
+  if (!host) return;
+  host.replaceChildren();
+  if (!safeCreds) {
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "Enter the API key to see free and locked balances.";
+    host.append(note);
+    paintSafeFree();
+    return;
+  }
+  const rows = safeRows.filter((row) => row.available > 0 || row.locked > 0);
+  if (!rows.length) {
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "No spot balance on SafeTrade.";
+    host.append(note);
+  }
+  for (const row of rows) {
+    const line = document.createElement("p");
+    line.className = "note";
+    line.textContent = `${row.asset}: ${row.available} free; ${row.locked} locked in open orders.`;
+    host.append(line);
+  }
+  paintSafeFree();
+}
+
+async function paintSafeOrders() {
+  const list = $("safe-orders");
+  if (!list) return;
+  list.replaceChildren();
+  if (!safeCreds) {
+    $("safe-orders-empty").hidden = false;
+    return;
+  }
+  const rows = await safeOpenOrders(safeCreds, currentSafeMarket().id);
+  $("safe-orders-empty").hidden = rows.length > 0;
+  for (const row of rows) {
+    const li = document.createElement("li");
+    const dir = document.createElement("div");
+    dir.textContent = `${row.side} ${row.amount} @ ${row.price}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tiny";
+    button.textContent = "Cancel";
+    button.dataset.safeCancel = row.id;
+    li.append(dir, button);
+    list.append(li);
+  }
+}
+
+async function paintSafePage() {
+  paintSafeMarkets();
+  const error = $("safe-error");
+  if (error) error.textContent = "";
+  try {
+    const ticker = await safeTicker(currentSafeMarket().id);
+    $("safe-ticker").textContent = `${ticker.market} last ${ticker.last}${ticker.change ? ` (${ticker.change}%)` : ""}`;
+  } catch (err) {
+    $("safe-ticker").textContent = err.message;
+  }
+  if (!safeCreds) {
+    safeRows = [];
+    paintSafeBalances();
+    $("safe-orders").replaceChildren();
+    $("safe-orders-empty").hidden = false;
+    return;
+  }
+  try {
+    safeRows = await safeBalances(safeCreds);
+    paintSafeBalances();
+    await paintSafeOrders();
+  } catch (err) {
+    if (error) error.textContent = err.message;
+  }
+}
+
+function fillSafeMax() {
+  const error = $("safe-error");
+  if (error) error.textContent = "";
+  const market = currentSafeMarket();
+  const side = $("safe-side").value;
+  const price = Number($("safe-price").value);
+  if (side === "sell") {
+    $("safe-amount").value = String(safeBalance(market.base).available);
+    return;
+  }
+  const quote = safeBalance(market.quote);
+  if (!(price > 0)) {
+    if (error) error.textContent = "Enter a price to fill the buy amount from the free balance.";
+    return;
+  }
+  const amount = Math.floor((quote.available / price) * 10 ** market.amountPlaces) / 10 ** market.amountPlaces;
+  $("safe-amount").value = String(amount > 0 ? amount : 0);
+}
+
+async function submitSafeOrder(event) {
+  event.preventDefault();
+  const error = $("safe-error");
+  if (error) error.textContent = "";
+  if (!safeCreds) {
+    if (error) error.textContent = "Enter the API key first.";
+    return;
+  }
+  const market = currentSafeMarket();
+  const side = $("safe-side").value;
+  const amount = Number($("safe-amount").value);
+  const price = Number($("safe-price").value);
+  try {
+    safeRows = await safeBalances(safeCreds);
+    paintSafeBalances();
+    const spend = side === "sell" ? safeBalance(market.base) : safeBalance(market.quote);
+    const need = side === "sell" ? amount : amount * price;
+    if (!(amount > 0) || !(price > 0)) throw new Error("Enter an amount and a price.");
+    if (need > spend.available + 1e-12) {
+      if (side === "sell") $("safe-amount").value = String(spend.available);
+      else if (price > 0) $("safe-amount").value = String(spend.available / price);
+      throw new Error(`Only ${spend.available} ${spend.asset} free; ${spend.locked} locked in open orders.`);
+    }
+    const order = await safeLimitOrder(safeCreds, { market, side, amount, price });
+    $("safe-amount").value = "";
+    await paintSafePage();
+    $("safe-ticker").textContent = `Order ${order.id || "sent"} is ${order.state || "open"}. ${$("safe-ticker").textContent}`;
+  } catch (err) {
+    if (error) error.textContent = err.message;
+  }
+}
+
+async function importWalletFile(event) {
+  event.preventDefault();
+  setSetupError("");
+  const password = $("file-pass").value;
+  const file = $("wallet-file").files && $("wallet-file").files[0];
+  if (!file) {
+    setSetupError("Choose a warthog_wallet.txt file.");
+    return;
+  }
+  if (!password) {
+    setSetupError("Enter the file password.");
+    return;
+  }
+  if (savedRecord() && !window.confirm("Replace the wallet saved in this window with this file?")) return;
+  let wallet = null;
+  try {
+    wallet = await decryptWalletFile(await file.text(), password);
+    const account = wallet.mnemonic
+      ? chainAccountsFromPhrase(wallet.mnemonic)
+      : chainAccountsFromPrivateKey(wallet.privateKey);
+    if (wallet.address && account.address.toLowerCase() !== String(wallet.address).toLowerCase()) {
+      throw new Error("That file did not match its address.");
+    }
+    await saveAccount(account, password);
+    $("file-pass").value = "";
+    $("wallet-file").value = "";
+  } catch (error) {
+    setSetupError(error.message);
+  } finally {
+    if (wallet) {
+      wallet.privateKey = "";
+      wallet.mnemonic = "";
+    }
+  }
 }
 
 let brandReady = false;

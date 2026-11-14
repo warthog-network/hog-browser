@@ -12,6 +12,7 @@
   "dependencies": {
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
+    "@scure/btc-signer": "^2.4.1",
     "ethers": "^6.16.0",
     "warthog-js": "github:warthog-network/warthog-js#199dca19d6675014b19051e6dba2ad1f3a4d2cd8",
     "ws": "^8.21.0",

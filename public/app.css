@@ -1375,6 +1375,9 @@ h3 { margin: 8px 0; font-size: 18px; }
 #identicon { width: 22px; height: 22px; border-radius: 50%; background: #27272a; flex: none; }
 .w-id { min-width: 0; flex: 1; }
 .w-id strong { display: block; font-size: 13px; }
+#lock-left { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+#lock-left[hidden] { display: none; }
+#activity li[role="link"] { cursor: pointer; }
 .w-addr {
   border: 0;
   background: transparent;

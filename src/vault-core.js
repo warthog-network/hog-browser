@@ -1,5 +1,15 @@
 import { ethers } from "ethers";
-import { chainAccountsFromPhrase, chainAccountsFromPrivateKey, sendNativeEvm } from "./chains.js";
+import {
+  btcKeyFromPhrase,
+  btcKeyFromPrivateKey,
+  chainAccountsFromPhrase,
+  chainAccountsFromPrivateKey,
+  sendEvmCall,
+  sendNativeEvm,
+  solKeyFromPhrase,
+} from "./chains.js";
+import { sendBtc } from "./btc-send.js";
+import { sendSol } from "./sol-send.js";
 import {
   signAssetCreation,
   signCancel,
@@ -103,6 +113,50 @@ export function createVault() {
         to: payload.to,
         amount: payload.amount,
         chain: payload.chain,
+        fetchImpl: payload.fetchImpl,
+      });
+    },
+    async sendBtc(payload = {}) {
+      if (!material) throw new Error("Wallet is locked");
+      const spent = material.phrase
+        ? btcKeyFromPhrase(material.phrase)
+        : btcKeyFromPrivateKey(material.privateKey);
+      try {
+        return await sendBtc({
+          privateKey: spent.privateKey,
+          publicKey: spent.publicKey,
+          to: payload.to,
+          amount: payload.amount,
+          fetchImpl: payload.fetchImpl,
+        });
+      } finally {
+        spent.privateKey.fill(0);
+        spent.publicKey.fill(0);
+      }
+    },
+    async sendSol(payload = {}) {
+      if (!material) throw new Error("Wallet is locked");
+      if (!material.phrase) throw new Error("Solana needs a recovery phrase.");
+      const spent = solKeyFromPhrase(material.phrase);
+      try {
+        return await sendSol({
+          privateKey: spent.privateKey,
+          fromAddress: spent.address,
+          to: payload.to,
+          amount: payload.amount,
+          fetchImpl: payload.fetchImpl,
+        });
+      } finally {
+        spent.privateKey.fill(0);
+      }
+    },
+    sendEvmCall(payload = {}) {
+      return sendEvmCall({
+        privateKey: evmHex(account()),
+        to: payload.to,
+        data: payload.data,
+        value: payload.value || 0n,
+        chain: payload.chain || "ethereum",
         fetchImpl: payload.fetchImpl,
       });
     },
