@@ -57,9 +57,10 @@ async function firstFree(from, to) {
 }
 
 class HogServer {
-  constructor({ root, log = console.log, execPath = process.execPath, env = process.env, spawnImpl = spawn } = {}) {
+  constructor({ root, log = console.log, logs = null, execPath = process.execPath, env = process.env, spawnImpl = spawn } = {}) {
     this.root = root;
     this.log = log;
+    this.logs = logs; // optional LogBuffer for the preview's Hog log tab
     this.execPath = execPath;
     this.env = env;
     this.spawnImpl = spawnImpl;
@@ -118,6 +119,7 @@ class HogServer {
       const text = String(chunk);
       output += text;
       if (output.length > 8000) output = output.slice(-4000);
+      if (this.logs && typeof this.logs.append === "function") this.logs.append(text);
       try {
         process.stderr.write(text);
       } catch {

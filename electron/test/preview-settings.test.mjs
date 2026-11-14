@@ -15,10 +15,16 @@ test("preview settings default to WebKit Hog's behaviour and persist", () => {
   const s = new PreviewSettings(dir);
   assert.equal(s.get("blockThirdPartyCookies"), true);
   assert.equal(s.get("previewUpdateChecks"), false);
+  assert.equal(s.get("terminalPanel"), false);
+  assert.equal(s.get("terminalHeight"), 240);
   assert.equal(s.set("blockThirdPartyCookies", false), true);
+  assert.equal(s.set("terminalPanel", true), true);
+  assert.equal(s.set("terminalHeight", 320), true);
   assert.equal(s.set("blockThirdPartyCookies", "no"), false);
   assert.equal(s.set("bogus", true), false);
   assert.equal(new PreviewSettings(dir).get("blockThirdPartyCookies"), false);
+  assert.equal(new PreviewSettings(dir).get("terminalPanel"), true);
+  assert.equal(new PreviewSettings(dir).get("terminalHeight"), 320);
   assert.equal(fs.statSync(path.join(dir, "preview-settings.json")).mode & 0o777, 0o600);
 });
 

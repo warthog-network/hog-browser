@@ -37,6 +37,9 @@ jobs:
           npm test
           python3 -m unittest discover -s test -p '*_test.py'
 
+      - name: Build tools for node-pty
+        run: sudo apt-get update && sudo apt-get install -y python3 make g++
+
       - name: Electron shell dependencies
         working-directory: electron
         run: npm ci

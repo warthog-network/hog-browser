@@ -8,6 +8,8 @@ const DEFAULTS = Object.freeze({
   blockThirdPartyCookies: true, // WebKit Hog's default (no third-party cookies)
   previewUpdateChecks: false, // needs published preview pre-releases; off until there are some
   locationProvider: "system", // lib/geolocation.js: system (GeoClue) | beacondb | off
+  terminalPanel: false, // bottom terminal; off until the user turns it on in Settings
+  terminalHeight: 240, // last drag-resized height of the terminal panel
 });
 
 function readJson(file, fallback) {

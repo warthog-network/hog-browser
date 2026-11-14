@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file:; img-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hog terminal</title>
+  <link rel="stylesheet" href="terminal.css">
+</head>
+<body>
+  <div id="grip" title="Drag to resize"></div>
+  <header id="bar">
+    <div id="tabs" role="tablist" aria-label="Terminal tabs"></div>
+    <div id="actions">
+      <button type="button" id="new" aria-haspopup="menu" aria-expanded="false" title="New terminal">+</button>
+      <button type="button" id="close-panel" title="Hide terminal" aria-label="Hide terminal">×</button>
+    </div>
+  </header>
+  <div id="menu" hidden role="menu" aria-label="New terminal"></div>
+  <div id="panes"></div>
+  <script src="terminal.js" type="module"></script>
+</body>
+</html>

@@ -195,6 +195,7 @@ function buildPreviewCard() {
   card.append(previewRow("Third-party cookies", "preview-cookies-status", [["preview-cookies", "Allow"]]));
   card.append(previewRow("Location for sites", "preview-location-status", [["preview-location-system", "System (GeoClue)"], ["preview-location-beacondb", "BeaconDB"], ["preview-location-off", "Off"]]));
   card.append(previewRow("Site permissions", "preview-perms-status", [["preview-perms-forget", "Forget all"]]));
+  card.append(previewRow("Terminal panel", "preview-terminal-status", [["preview-terminal", "Turn on"]]));
   card.append(previewRow("Preview updates", "preview-update-status", [["preview-update-check", "Check now"], ["preview-update-auto", "Check on start"], ["preview-update-install", "Install update"], ["preview-update-restart", "Restart now"], ["preview-update-open", "Open release"]]));
   card.addEventListener("click", (event) => {
     const button = event.target.closest && event.target.closest("button");
@@ -206,6 +207,7 @@ function buildPreviewCard() {
     else if (id === "preview-cookies") send("cookies", !(previewState && previewState.blockThirdPartyCookies));
     else if (id === "preview-perms-forget") send("forget-permissions");
     else if (id.startsWith("preview-location-")) send("location", id.slice("preview-location-".length));
+    else if (id === "preview-terminal") send("terminal", !(previewState && previewState.terminalPanel));
     else if (id === "preview-update-check") send("update-check");
     else if (id === "preview-update-auto") send("update-auto", !(previewState && previewState.previewUpdateChecks));
     else if (id === "preview-update-open") send("update-open");
@@ -252,6 +254,16 @@ function renderPreviewCard() {
   setText("preview-perms-status", s.permissions ? `${s.permissions} remembered answer${s.permissions === 1 ? "" : "s"} for notifications, location, camera or microphone.` : "No remembered answers. Sites ask before notifications, location, camera or microphone.");
   const forget = document.getElementById("preview-perms-forget");
   if (forget) forget.disabled = !s.permissions;
+  const termOn = Boolean(s.terminalPanel);
+  setText("preview-terminal-status", termOn
+    ? "On: Ctrl+` or View → Toggle Terminal shows a panel at the bottom (host shell, running containers, Hog log). Drag the top edge to resize."
+    : "Off (the default). Turn it on to get a bottom terminal panel. Then use Ctrl+` or View → Toggle Terminal. The host shell is only reachable from this window.");
+  setText("preview-terminal", termOn ? "Turn off" : "Turn on");
+  const termBtn = document.getElementById("preview-terminal");
+  if (termBtn) {
+    termBtn.classList.toggle("is-on", termOn);
+    termBtn.setAttribute("aria-pressed", String(termOn));
+  }
   setText("preview-update-status", s.updateStatus || `This is the Chromium preview ${s.version}.`);
   setText("preview-update-status-error", s.updateError);
   setText("preview-update-auto", s.previewUpdateChecks ? "Stop checking on start" : "Check on start");

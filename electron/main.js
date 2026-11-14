@@ -35,6 +35,9 @@ const webkitImport = require("./lib/webkit-import");
 const previewUpdate = require("./lib/preview-update");
 const { DefaultBrowser } = require("./lib/default-browser");
 const geolocation = require("./lib/geolocation");
+const { LogBuffer } = require("./lib/log-buffer");
+const { createTerminalPanel } = require("./lib/terminal-panel");
+const layout = require("./lib/terminal-layout");
 
 const APP_NAME = "Hog (Chromium preview)";
 const HOG_DATA = process.env.HOG_DATA || path.join(os.homedir(), ".local", "share", "hog-browser");
@@ -76,11 +79,14 @@ function iconPath() {
   return undefined;
 }
 
+const appLogs = new LogBuffer();
+
 function log(text) {
   process.stderr.write(`${text}\n`);
+  appLogs.append(text);
 }
 
-const server = new HogServer({ root: ROOT, log });
+const server = new HogServer({ root: ROOT, log, logs: appLogs });
 let guard = null;
 let win = null;
 let pages = null;
@@ -88,6 +94,8 @@ let overlays = null;
 const previewSettings = new PreviewSettings(PREVIEW_DATA);
 const sitePermissions = new SitePermissions(PREVIEW_DATA);
 let findBar = null;
+let termPanel = null;
+let lastTermToggle = 0;
 let chromeReady = false;
 const pendingUrls = [];
 
@@ -509,6 +517,7 @@ class PageHost {
     this.views.set(tabId, entry);
     this.byContents.set(wc.id, tabId);
     win.contentView.addChildView(view);
+    if (termPanel) termPanel.raise();
     if (overlays) overlays.raise();
 
     wc.setWindowOpenHandler((details) => {
@@ -605,7 +614,7 @@ class PageHost {
   layout() {
     if (!win || win.isDestroyed()) return;
     const [width, height] = win.getContentSize();
-    const bounds = policy.edgeInset(policy.viewBounds(this.place, width, height), this.gripPaint);
+    const bounds = policy.edgeInset(this.pageBounds(), this.gripPaint);
     for (const [tabId, entry] of this.views) {
       if (this.fullTab === tabId) {
         entry.view.setBounds({ x: 0, y: 0, width, height });
@@ -613,6 +622,9 @@ class PageHost {
         entry.view.setBounds(bounds);
       }
     }
+    if (termPanel && this.fullTab) termPanel.view && termPanel.view.setVisible(false);
+    else if (termPanel) termPanel.layout();
+    if (overlays) overlays.raise();
     this.repaint();
   }
 
@@ -667,7 +679,8 @@ class PageHost {
   pageBounds() {
     if (!win || win.isDestroyed()) return { x: 0, y: 0, width: 0, height: 0 };
     const [width, height] = win.getContentSize();
-    return policy.viewBounds(this.place, width, height);
+    const reserved = this.fullTab ? 0 : (termPanel ? termPanel.reservedHeight() : 0);
+    return layout.panelInset(policy.viewBounds(this.place, width, height), reserved);
   }
 
   /** Show or hide the live page under a still picture while a Hog panel
@@ -815,10 +828,47 @@ function parseObject(raw) {
 const FORWARD_KEYS = new Set(["t", "w", "l", "d", "o", "h", "tab", "+", "=", "-", "_", "0"]);
 const FOCUS_CHROME_KEYS = new Set(["t", "l", "o", "h"]);
 
+function toggleTerminalPanel() {
+  const now = Date.now();
+  if (now - lastTermToggle < 200) return;
+  lastTermToggle = now;
+  if (termPanel) termPanel.toggleFromUser();
+  if (pages) pages.layout();
+}
+
+function installAppMenu() {
+  const template = [
+    {
+      label: "View",
+      submenu: [
+        { label: "Toggle Terminal", accelerator: "Ctrl+`", click: () => toggleTerminalPanel() },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  if (win && !win.isDestroyed()) {
+    win.setMenuBarVisibility(false);
+    win.setAutoHideMenuBar(true);
+  }
+}
+
 function onShortcutInput(event, input, wc) {
   if (input.type !== "keyDown") return;
   const key = String(input.key || "").toLowerCase();
   const ctrl = input.control || input.meta;
+  const backquote = input.code === "Backquote" || key === "`" || key === "backquote";
+  if (ctrl && !input.alt && !input.shift && backquote) {
+    event.preventDefault();
+    toggleTerminalPanel();
+    return;
+  }
+  if (termPanel && termPanel.isContents(wc)) {
+    if (key === "f12" || (ctrl && input.shift && key === "i")) {
+      event.preventDefault();
+      wc.toggleDevTools();
+    }
+    return;
+  }
   if (key === "f12" || (ctrl && input.shift && key === "i")) {
     event.preventDefault();
     wc.toggleDevTools();
@@ -1673,9 +1723,20 @@ function createWindow() {
   });
   paintChromeBackground(win);
   pages = new PageHost();
+  termPanel = createTerminalPanel({
+    win,
+    settings: previewSettings,
+    guard,
+    logs: appLogs,
+    root: ROOT,
+    dirname: __dirname,
+    log,
+  });
+  termPanel.onLayout = () => pages && pages.layout();
   overlays = new Overlays();
   findBar = new FindBar();
   paintChromeBackground(win);
+  installAppMenu();
   const wc = win.webContents;
   wc.on("context-menu", (_event, params) => showContextMenu(wc, params, false));
   wc.setWindowOpenHandler(({ url }) => {
@@ -1735,6 +1796,7 @@ function previewState() {
     permissions: sitePermissions.count(),
     previewUpdateChecks: previewSettings.get("previewUpdateChecks"),
     locationProvider: previewSettings.get("locationProvider"),
+    terminalPanel: previewSettings.get("terminalPanel"),
     updateStatus: preview.updateStatus,
     updateError: preview.updateError,
     updateUrl: preview.updateUrl,
@@ -1937,6 +1999,11 @@ function onPreviewMessage(message) {
   else if (action === "location") {
     if (geolocation.validProvider(message.value)) previewSettings.set("locationProvider", message.value);
   }
+  else if (action === "terminal") {
+    if (termPanel) termPanel.setEnabled(Boolean(message.value));
+    else previewSettings.set("terminalPanel", Boolean(message.value));
+    if (pages) pages.layout();
+  }
   else if (action === "update-auto") {
     previewSettings.set("previewUpdateChecks", Boolean(message.value));
     scheduleUpdateChecks();
@@ -2051,7 +2118,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
-    Menu.setApplicationMenu(null);
+    Menu.setApplicationMenu(null); // replaced with a hidden View menu in createWindow
     try {
       await server.ensure();
     } catch (error) {
@@ -2089,6 +2156,7 @@ if (!app.requestSingleInstanceLock()) {
       server.child.unref();
       server.child = null;
     }
+    if (termPanel) termPanel.dispose();
     server.stop();
     if (guard) guard.stop();
   });
