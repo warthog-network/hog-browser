@@ -887,7 +887,7 @@
                 </button>
                 <button type="button" id="create" class="hub-card is-primary">
                   <strong>Create new wallet</strong>
-                  <small>Name, then a new private key</small>
+                  <small>Name, then a 12-word phrase</small>
                 </button>
                 <button type="button" id="show-import" class="hub-card">
                   <strong id="hub-restore-label">I already have a wallet</strong>
@@ -911,16 +911,16 @@
                 <label>Wallet name
                   <input id="create-name" maxlength="32" autocomplete="off" placeholder="e.g. main">
                 </label>
-                <button type="submit" class="primary">Create with a new key</button>
+                <button type="submit" class="primary">Create recovery phrase</button>
               </form>
               <form id="create-form" class="stack" hidden>
                 <input type="text" name="username" autocomplete="username" value="hog" hidden>
-                <label>New private key
+                <label>Recovery phrase
                   <textarea id="new-key" readonly rows="3"></textarea>
                 </label>
-                <p class="warn">Write this key down. Hog cannot show it again after you set a password.</p>
-                <p class="note">Personal hot wallet. Not the bridge pool. The key is encrypted in this window and is not sent to the node.</p>
-                <label class="check"><input id="saved-key" type="checkbox"> I saved this private key</label>
+                <p class="warn">Write these 12 words down. You can show them again later with the password.</p>
+                <p class="note">Personal hot wallet. Not the bridge pool. The phrase is encrypted in this window and is not sent to the node.</p>
+                <label class="check"><input id="saved-key" type="checkbox"> I saved this recovery phrase</label>
                 <label>Password
                   <input id="create-pass" type="password" autocomplete="new-password" minlength="8">
                 </label>
@@ -1151,6 +1151,7 @@
               <button type="button" class="w-back" data-back="trade">Trade</button>
               <h3>Aave</h3>
               <p class="note">Open the Aave site in a tab and choose Hog. This screen does not supply or borrow by itself.</p>
+              <button type="button" id="open-aave" class="primary">Open app.aave.com</button>
             </div>
 
             <div id="wpage-activity" hidden>
@@ -1202,7 +1203,9 @@
             <div id="wpage-accounts" hidden>
               <button type="button" class="w-back" data-back="settings">Settings</button>
               <h3>Manage accounts</h3>
-              <p class="note">The network menu switches Warthog, Ethereum, Bitcoin, Hemi, and Solana. A private key has Ethereum, Hemi, and Bitcoin. Solana is there when this wallet was restored from a recovery phrase.</p>
+              <p class="note" id="account-limit">The network menu switches Warthog, Ethereum, Bitcoin, Hemi, and Solana.</p>
+              <ul id="account-list" class="activity"></ul>
+              <button type="button" id="account-add" class="primary">Add next account</button>
             </div>
 
             <div id="wpage-key" hidden>
@@ -1222,18 +1225,28 @@
             <div id="wpage-phrase" hidden>
               <button type="button" class="w-back" data-back="settings">Settings</button>
               <h3>Recovery phrase</h3>
-              <p class="note" id="phrase-note">This wallet was imported or created as a private key, so there is no recovery phrase. The key above is the backup.</p>
+              <form id="phrase-reveal-form" class="stack" hidden>
+                <input type="text" name="username" autocomplete="username" value="hog" hidden>
+                <label>Password
+                  <input id="phrase-pass-reveal" type="password" autocomplete="current-password">
+                </label>
+                <button type="submit" class="primary">Show phrase</button>
+              </form>
+              <textarea id="revealed-phrase" readonly rows="3" hidden></textarea>
+              <p id="phrase-error" class="error" role="status"></p>
+              <p class="note" id="phrase-note">This wallet was imported or created as a private key, so there is no recovery phrase. The private key is the backup.</p>
             </div>
 
             <div id="wpage-autolock" hidden>
               <button type="button" class="w-back" data-back="settings">Settings</button>
               <h3>Auto-lock</h3>
+              <p class="note">The signing worker drops the key when this lock runs. 15 minutes is the default.</p>
               <label>After inactivity
                 <select id="autolock">
                   <option value="0">Stay unlocked</option>
                   <option value="1">1 minute</option>
                   <option value="5">5 minutes</option>
-                  <option value="15">15 minutes</option>
+                  <option value="15" selected>15 minutes</option>
                   <option value="30">30 minutes</option>
                   <option value="60">60 minutes</option>
                 </select>

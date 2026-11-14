@@ -30,8 +30,11 @@ import {
   validateAddress,
 } from "../src/wallet-core.js";
 import {
+  applyRelayMode,
   assertFetchAllowed,
   assertNodeRequest,
+  classifyFetchHost,
+  pinnedFetch,
   applyOpfs,
   attachNodeBridge,
   isNodeGlue,
@@ -177,6 +180,41 @@ test("browse url and node allowlist", async () => {
   assert.throws(() => parseBrowseUrl("file:///etc/passwd"), /http/);
   assert.throws(() => parseBrowseUrl("http://user:pass@example.com"), /password/);
   await assert.rejects(() => assertFetchAllowed("169.254.169.254"), /blocked/i);
+  assert.equal(classifyFetchHost("example.com", [{ address: "127.0.0.1", family: 4 }]).ok, false);
+  assert.equal(classifyFetchHost("example.com", [{ address: "8.8.8.8", family: 4 }]).ok, true);
+  assert.equal(classifyFetchHost("192.168.1.20", [{ address: "192.168.1.20", family: 4 }]).ok, true);
+  assert.equal(classifyFetchHost("printer.local", [{ address: "10.0.0.8", family: 4 }]).ok, true);
+  assert.equal(classifyFetchHost("localhost", [{ address: "127.0.0.1", family: 4 }]).addresses[0].address, "127.0.0.1");
+  const pinServer = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    if (req.url.startsWith("/big")) {
+      res.end("x".repeat(64));
+      return;
+    }
+    res.end(req.headers.host || "");
+  });
+  await new Promise((resolve) => pinServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const pinPort = pinServer.address().port;
+    const pinned = await pinnedFetch(new URL(`http://127.0.0.1:${pinPort}/hi`), {
+      pin: { address: "127.0.0.1", family: 4 },
+    });
+    assert.equal(pinned.status, 200);
+    assert.match(await pinned.text(), new RegExp(`127\\.0\\.0\\.1:${pinPort}`));
+    const named = await pinnedFetch(new URL(`http://example.com:${pinPort}/hi`), {
+      pin: { address: "127.0.0.1", family: 4 },
+    });
+    assert.match(await named.text(), new RegExp(`example\\.com:${pinPort}`));
+    await assert.rejects(
+      () => pinnedFetch(new URL(`http://127.0.0.1:${pinPort}/big`), {
+        pin: { address: "127.0.0.1", family: 4 },
+        maxBytes: 8,
+      }).then((response) => response.text()),
+      /too large/i,
+    );
+  } finally {
+    await new Promise((resolve) => pinServer.close(resolve));
+  }
   const ok = assertNodeRequest(
     "https://warthog-defitestnet.duckdns.org",
     "chain/head",

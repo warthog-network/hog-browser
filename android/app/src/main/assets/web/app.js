@@ -140,6 +140,10 @@ function applyScan(text) {
     scannedIp = url.searchParams.get("ip") || "";
     $("pair-port").value = url.searchParams.get("port") || "4189";
     $("pair-code").value = url.searchParams.get("code") || "";
+    if (config().paired) {
+      $("pair-error").textContent = "This phone is already paired. Tap Pair to replace it.";
+      return;
+    }
     submitPair();
   } catch {
     $("pair-error").textContent = "That QR code is not a hog pairing code.";

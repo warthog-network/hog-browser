@@ -205,7 +205,138 @@ function rewriteMessageHandler(source) {
   return String(source || "").replace(/window\.webkit\.messageHandlers\.hogedge\.postMessage\(/g, "window.__hogEdgePost(");
 }
 
-/** dapp-provider.js stays off Tailscale login/admin pages, like hog. */
+function bareHost(hostname) {
+  return String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function ipv4Parts(host) {
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) return null;
+  const parts = host.split(".").map((part) => Number(part));
+  if (parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return parts;
+}
+
+function ipv6Hextet(host) {
+  const head = host.split(":")[0];
+  if (!/^[0-9a-f]{1,4}$/.test(head)) return null;
+  return Number.parseInt(head, 16);
+}
+
+/** Link-local: 169.254.0.0/16 and fe80::/10, including IPv4-mapped forms. */
+function isLinkLocalAddress(ip) {
+  const host = bareHost(ip);
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+  const v4 = mapped ? mapped[1] : host;
+  const parts = ipv4Parts(v4);
+  if (parts) return parts[0] === 169 && parts[1] === 254;
+  const hextet = ipv6Hextet(host);
+  return hextet != null && hextet >= 0xfe80 && hextet <= 0xfebf;
+}
+
+/** Loopback, RFC1918, link-local, CGNAT/Tailscale, and IPv6 ULA. */
+function isNonPublicAddress(ip) {
+  const host = bareHost(ip);
+  if (!host) return false;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+  const v4 = mapped ? mapped[1] : host;
+  const parts = ipv4Parts(v4);
+  if (parts) {
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 255) return true;
+    return false;
+  }
+  if (host.includes(":")) {
+    if (host === "::" || host === "::1") return true;
+    const hextet = ipv6Hextet(host);
+    if (hextet == null) return false;
+    if (hextet >= 0xfe80 && hextet <= 0xfebf) return true;
+    if (hextet >= 0xfc00 && hextet <= 0xfdff) return true;
+    return false;
+  }
+  return false;
+}
+
+function isLocalName(hostname) {
+  const host = bareHost(hostname);
+  return host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local");
+}
+
+function isMetadataHost(hostname) {
+  const host = bareHost(hostname);
+  return host === "metadata.google.internal" || host === "metadata.google.internal." || host === "169.254.169.254";
+}
+
+function isNonPublicHost(hostname) {
+  const host = bareHost(hostname);
+  if (!host) return false;
+  if (isLocalName(host) || isMetadataHost(host)) return true;
+  return isNonPublicAddress(host);
+}
+
+function isNonPublicUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw || ""));
+  } catch {
+    return false;
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) return false;
+  return isNonPublicHost(url.hostname);
+}
+
+function isMetadataUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw || ""));
+  } catch {
+    return false;
+  }
+  return isMetadataHost(url.hostname);
+}
+
+/**
+ * A public page must not reach a private or link-local target.
+ * A top-level load the user typed (no initiator) stays open, and a private
+ * page may load its own private subresources. Cloud metadata is always blocked.
+ * @param {{ url?: string, resourceType?: string, initiator?: string, topUrl?: string, ip?: string }} details
+ */
+function shouldBlockPrivateRequest(details) {
+  const d = details || {};
+  const url = String(d.url || "");
+  if (isMetadataUrl(url)) return true;
+  const urlPrivate = isNonPublicUrl(url);
+  const ipPrivate = d.ip ? isNonPublicAddress(d.ip) : false;
+  if (!urlPrivate && !ipPrivate) return false;
+  const type = String(d.resourceType || "");
+  const top = String(d.topUrl || "");
+  const initiator = String(d.initiator || "");
+  if (type === "mainFrame") {
+    if (!initiator) return false;
+    let initUrl;
+    try {
+      initUrl = new URL(initiator);
+    } catch {
+      return false;
+    }
+    if (initUrl.protocol !== "http:" && initUrl.protocol !== "https:") return false;
+    if (isNonPublicUrl(initiator)) return false;
+    return true;
+  }
+  if (top && isNonPublicUrl(top)) return false;
+  return true;
+}
+
+function loopbackHost(hostname) {
+  const host = bareHost(hostname);
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+/** The wallet provider is for https sites and loopback dapps, never Tailscale or plain http. */
 function dappProviderAllowed(raw) {
   let url;
   try {
@@ -213,10 +344,11 @@ function dappProviderAllowed(raw) {
   } catch {
     return false;
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return false;
-  const host = url.hostname.toLowerCase();
-  if (url.protocol === "https:" && (host === "tailscale.com" || host.endsWith(".tailscale.com"))) return false;
-  return true;
+  const host = bareHost(url.hostname);
+  if (host === "tailscale.com" || host.endsWith(".tailscale.com")) return false;
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:") return loopbackHost(host);
+  return false;
 }
 
 /** window.open / target=_blank from a page.
@@ -250,6 +382,10 @@ module.exports = {
   chromeUserAgent,
   dappProviderAllowed,
   downloadName,
+  isLinkLocalAddress,
+  isNonPublicAddress,
+  isNonPublicUrl,
+  shouldBlockPrivateRequest,
   extractEdgeGripScript,
   filesDownloadUri,
   inPageNavigation,

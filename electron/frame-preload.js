@@ -17,11 +17,11 @@ function topOrigin() {
 }
 
 if (window !== window.top) {
-  let block = false;
+  let block = true;
   try {
     block = ipcRenderer.sendSync("hog:frame-cookies", { frame: String(location.href), top: topOrigin() }) === true;
   } catch {
-    block = false;
+    block = true;
   }
   if (block) {
     contextBridge.executeInMainWorld({

@@ -51,6 +51,7 @@ echo "==> npm ci + build (bundles) + prune production deps"
   npm ci
   npm run build
   test -f public/wallet-bundle.js
+  test -f public/vault-worker.js
   npm prune --omit=dev
   # npm prune can leave optional @esbuild/* platform stubs; drop them.
   rm -rf node_modules/esbuild node_modules/@esbuild

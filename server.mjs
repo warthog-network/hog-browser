@@ -1,14 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
-import { BlockList, isIP } from "node:net";
+import { isIP } from "node:net";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
+import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayPageScript, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
 import { createStratumBridge, headHeights, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
 import { createFilesService, handleFilesRequest } from "./files.mjs";
@@ -449,9 +450,6 @@ const NODE_BRIDGES = [
   ["/ws-defi", "wss://warthog-defitestnet.duckdns.org/ws"],
   ["/ws-bridge", "wss://warthognode.duckdns.org/ws"],
 ];
-
-const LINK_LOCAL = new BlockList();
-LINK_LOCAL.addSubnet("169.254.0.0", 16, "ipv4");
 
 const BLOCKED_HOSTS = new Set([
   "metadata.google.internal",
@@ -937,7 +935,7 @@ export function rewriteHtml(html, finalUrl) {
     origin = "";
   }
   const storage = origin === NODE_ORIGIN
-    ? `<script>${GLUE_PREFIX.toString("utf8").replace(/<\/script/gi, "<\\/script")}</script><script>${nodeSyncScript()}</script><script>${nodeRecoveryScript()}</script><script>${pageRelayScript(MINING.token)}</script>`
+    ? `<script>${GLUE_PREFIX.toString("utf8").replace(/<\/script/gi, "<\\/script")}</script><script>${nodeSyncScript()}</script><script>${nodeRecoveryScript()}</script><script data-hog-relay>${pageRelayScript(MINING.token).replace(/<\/script/gi, "<\\/script")}</script>`
     : "";
   const inject = storage + navScript(origin);
   if (/<head[^>]*>/i.test(body)) {
@@ -946,23 +944,227 @@ export function rewriteHtml(html, finalUrl) {
   return `<!doctype html><html><head>${inject}</head><body>${body}</body></html>`;
 }
 
+function normalizeHost(hostname) {
+  return String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function ipv4Parts(host) {
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) return null;
+  const parts = host.split(".").map((part) => Number(part));
+  if (parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return parts;
+}
+
+function ipv6Hextet(host) {
+  const head = host.split(":")[0];
+  if (!/^[0-9a-f]{1,4}$/.test(head)) return null;
+  return Number.parseInt(head, 16);
+}
+
+/** Same ranges as electron/lib/policy.js. Link-local is always refused. */
+function isLinkLocalAddress(ip) {
+  const host = normalizeHost(ip);
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+  const v4 = mapped ? mapped[1] : host;
+  const parts = ipv4Parts(v4);
+  if (parts) return parts[0] === 169 && parts[1] === 254;
+  const hextet = ipv6Hextet(host);
+  return hextet != null && hextet >= 0xfe80 && hextet <= 0xfebf;
+}
+
+function isNonPublicAddress(ip) {
+  const host = normalizeHost(ip);
+  if (!host) return false;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+  const v4 = mapped ? mapped[1] : host;
+  const parts = ipv4Parts(v4);
+  if (parts) {
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 255) return true;
+    return false;
+  }
+  if (host.includes(":")) {
+    if (host === "::" || host === "::1") return true;
+    const hextet = ipv6Hextet(host);
+    if (hextet == null) return false;
+    if (hextet >= 0xfe80 && hextet <= 0xfebf) return true;
+    if (hextet >= 0xfc00 && hextet <= 0xfdff) return true;
+  }
+  return false;
+}
+
+function isExplicitPrivateName(host) {
+  return host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local");
+}
+
+function pinRecord(address, family) {
+  const ip = normalizeHost(address);
+  const parsed = isIP(ip);
+  return { address: ip, family: family === 6 || parsed === 6 ? 6 : 4 };
+}
+
+/**
+ * Decide whether a browse, asset, or favicon fetch may run, and which
+ * addresses it may connect to. A public name that resolves to a loopback,
+ * private, or link-local address is rejected. An address the user typed
+ * (including LAN and loopback) is allowed, except link-local metadata space.
+ * @param {string} hostname
+ * @param {Array<{ address?: string, family?: number }>} records
+ */
+export function classifyFetchHost(hostname, records) {
+  const host = normalizeHost(hostname);
+  if (!host) return { ok: false, error: "Missing host" };
+  if (BLOCKED_HOSTS.has(host)) return { ok: false, error: "That host is blocked" };
+  const list = (Array.isArray(records) ? records : [])
+    .map((record) => pinRecord(record && record.address, record && record.family))
+    .filter((record) => record.address);
+  if (!list.length) return { ok: false, error: "That host did not resolve" };
+  const explicit = isIP(host) !== 0 || isExplicitPrivateName(host);
+  if (explicit) {
+    if (list.some((record) => isLinkLocalAddress(record.address))) {
+      return { ok: false, error: "Link-local addresses are blocked" };
+    }
+    return { ok: true, addresses: list };
+  }
+  if (list.some((record) => isLinkLocalAddress(record.address) || isNonPublicAddress(record.address))) {
+    return { ok: false, error: "That host resolves to a blocked address" };
+  }
+  return { ok: true, addresses: list };
+}
+
 /**
  * @param {string} hostname
+ * @returns {Promise<Array<{ address: string, family: number }>>}
  */
 export async function assertFetchAllowed(hostname) {
-  const host = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase();
+  const host = normalizeHost(hostname);
   if (!host) throw new Error("Missing host");
   if (BLOCKED_HOSTS.has(host)) throw new Error("That host is blocked");
+  let records;
   if (isIP(host)) {
-    if (LINK_LOCAL.check(host)) throw new Error("Link-local addresses are blocked");
-    return;
+    records = [{ address: host, family: isIP(host) === 6 ? 6 : 4 }];
+  } else if (host === "localhost" || host.endsWith(".localhost")) {
+    records = [{ address: "127.0.0.1", family: 4 }];
+  } else {
+    records = await lookup(host, { all: true });
   }
-  const records = await lookup(host, { all: true });
-  for (const record of records) {
-    if (LINK_LOCAL.check(record.address)) {
-      throw new Error("That host resolves to a blocked address");
-    }
+  const decision = classifyFetchHost(host, records);
+  if (!decision.ok) throw new Error(decision.error);
+  return decision.addresses;
+}
+
+/**
+ * Fetch `target` but connect only to `pin`, the address already checked.
+ * A later DNS answer cannot move the connection onto a private host.
+ * @param {URL} target
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string, signal?: AbortSignal, pin: { address: string, family: number } }} options
+ */
+export function pinnedFetch(target, options) {
+  const pin = options.pin;
+  const address = pin.address;
+  const family = pin.family === 6 ? 6 : 4;
+  const request = target.protocol === "https:" ? httpsRequest : httpRequest;
+  const port = target.port ? Number(target.port) : target.protocol === "https:" ? 443 : 80;
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 0;
+  return new Promise((resolve, reject) => {
+    const req = request({
+      host: address,
+      servername: target.hostname,
+      port,
+      method: options.method || "GET",
+      path: `${target.pathname}${target.search}`,
+      headers: { ...(options.headers || {}), host: target.host },
+      lookup: (_hostname, lookupOptions, callback) => {
+        if (lookupOptions && lookupOptions.all) callback(null, [{ address, family }]);
+        else callback(null, address, family);
+      },
+      signal: options.signal,
+    }, (res) => {
+      const headerMap = res.headers || {};
+      let reading = null;
+      const take = () => {
+        if (reading) return reading;
+        reading = new Promise((done, failRead) => {
+          const declared = Number(headerMap["content-length"] || 0);
+          if (maxBytes && declared > maxBytes) {
+            res.on("error", () => {});
+            res.destroy();
+            failRead(new Error("That file is too large"));
+            return;
+          }
+          const chunks = [];
+          let received = 0;
+          res.on("data", (chunk) => {
+            received += chunk.length;
+            if (maxBytes && received > maxBytes) {
+              res.destroy();
+              failRead(new Error("That file is too large"));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          res.on("end", () => done(Buffer.concat(chunks)));
+          res.on("error", (error) => failRead(error instanceof Error ? error : new Error("The site did not answer")));
+        });
+        return reading;
+      };
+      resolve({
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        status: res.statusCode || 0,
+        url: target.href,
+        headers: {
+          get(name) {
+            const value = headerMap[String(name || "").toLowerCase()];
+            if (Array.isArray(value)) return value.join(", ");
+            return value == null ? null : String(value);
+          },
+        },
+        text: async () => (await take()).toString("utf8"),
+        arrayBuffer: async () => {
+          const buf = await take();
+          return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        },
+        body: {
+          cancel: async () => {
+            if (reading) return;
+            reading = Promise.resolve(Buffer.alloc(0));
+            res.on("error", () => {});
+            res.destroy();
+          },
+        },
+      });
+    });
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
+async function checkedFetch(target, options = {}) {
+  const addresses = await assertFetchAllowed(target.hostname);
+  return pinnedFetch(target, { ...options, pin: addresses[0] });
+}
+
+/**
+ * Chromium asks for the node page with ?hog_relay=preload. That copy has the
+ * queue only. The token stays out of the page and is fetched by the preload.
+ * WebKit omits the marker and keeps the connecting script.
+ * @param {string} html
+ * @param {string} mode
+ */
+export function applyRelayMode(html, mode) {
+  if (mode !== "preload") return String(html);
+  const safe = pageRelayPageScript().replace(/<\/script/gi, "<\\/script");
+  const next = String(html).replace(/<script data-hog-relay>[\s\S]*?<\/script>/i, `<script data-hog-relay>${safe}</script>`);
+  if (next.includes(MINING.token) || next.includes('type: "hello"') || next.includes("var TOKEN")) {
+    throw new Error("Mining token stayed in the page");
   }
+  return next;
 }
 
 /**
@@ -1113,11 +1315,9 @@ async function fetchPage(start, options = {}, runtime) {
   let current = start;
   let verb = String(options.method || "GET").toUpperCase() === "POST" ? "POST" : "GET";
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertFetchAllowed(current.hostname);
     const posting = verb === "POST";
-    const response = await fetch(current, {
+    const response = await checkedFetch(current, {
       method: verb,
-      redirect: "manual",
       headers: {
         accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "user-agent": BROWSER_UA,
@@ -1125,8 +1325,10 @@ async function fetchPage(start, options = {}, runtime) {
       },
       body: posting ? formBody(options.fields) : undefined,
       signal: AbortSignal.timeout(12000),
+      maxBytes: 8_000_000,
     });
     if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch {}
       const location = response.headers.get("location");
       if (!location) throw new Error("Redirect had no location");
       const next = new URL(location, current);
@@ -1138,6 +1340,7 @@ async function fetchPage(start, options = {}, runtime) {
       continue;
     }
     if (!response.ok) {
+      try { await response.body?.cancel(); } catch {}
       throw new Error(`The site returned ${response.status}`);
     }
     const type = (response.headers.get("content-type") || "").toLowerCase();
@@ -1150,6 +1353,7 @@ async function fetchPage(start, options = {}, runtime) {
       return publish(runtime, current.href, html, "File download", "text/html");
     }
     if (type.startsWith("image/")) {
+      try { await response.body?.cancel(); } catch {}
       const shown = new URL(finalUrl);
       const html = `<!doctype html><title>${escapeAttr(finalUrl)}</title><body style="margin:0;background:#111"><img alt="" src="${escapeAttr(shown.pathname + shown.search)}" style="max-width:100%"></body>`;
       return publish(runtime, finalUrl, html, finalUrl, type);
@@ -1179,13 +1383,13 @@ function safeType(type) {
 async function fetchAsset(start) {
   let current = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertFetchAllowed(current.hostname);
-    const response = await fetch(current, {
-      redirect: "manual",
+    const response = await checkedFetch(current, {
       headers: { accept: "*/*", "user-agent": BROWSER_UA },
       signal: AbortSignal.timeout(60000),
+      maxBytes: MAX_ASSET,
     });
     if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch {}
       const location = response.headers.get("location");
       if (!location) throw new Error("Redirect had no location");
       current = new URL(location, current);
@@ -1194,9 +1398,15 @@ async function fetchAsset(start) {
       }
       continue;
     }
-    if (!response.ok) throw new Error(`The site returned ${response.status}`);
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch {}
+      throw new Error(`The site returned ${response.status}`);
+    }
     const length = Number(response.headers.get("content-length") || 0);
-    if (length > MAX_ASSET) throw new Error("That file is too large");
+    if (length > MAX_ASSET) {
+      try { await response.body?.cancel(); } catch {}
+      throw new Error("That file is too large");
+    }
     const body = Buffer.from(await response.arrayBuffer());
     if (body.length > MAX_ASSET) throw new Error("That file is too large");
     return { body, type: safeType(response.headers.get("content-type")) };
@@ -1256,23 +1466,36 @@ export function iconHrefFromHtml(html, base) {
 async function fetchSmall(start, limit, accept) {
   let current = new URL(start);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertFetchAllowed(current.hostname);
-    const response = await fetch(current, {
-      redirect: "manual",
+    const response = await checkedFetch(current, {
       headers: { accept, "user-agent": BROWSER_UA },
       signal: AbortSignal.timeout(6000),
+      maxBytes: limit,
     });
     if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch {}
       const location = response.headers.get("location");
       if (!location) return null;
       current = new URL(location, current);
       if (current.protocol !== "http:" && current.protocol !== "https:") return null;
       continue;
     }
-    if (!response.ok) return null;
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch {}
+      return null;
+    }
     const length = Number(response.headers.get("content-length") || 0);
-    if (length > limit) return null;
-    const body = Buffer.from(await response.arrayBuffer());
+    if (length > limit) {
+      try { await response.body?.cancel(); } catch {}
+      return null;
+    }
+    let raw;
+    try {
+      raw = await response.arrayBuffer();
+    } catch (error) {
+      if (error instanceof Error && /too large/i.test(error.message)) return null;
+      throw error;
+    }
+    const body = Buffer.from(raw);
     if (body.length > limit) return null;
     return { body, url: current };
   }
@@ -2005,7 +2228,10 @@ async function handleSite(runtime, site, req, res) {
     send(res, 405, "Method not allowed", "text/plain; charset=utf-8");
     return;
   }
-  const key = `${url.pathname}${url.search}`;
+  const preloadRelay = site.origin === NODE_ORIGIN && url.searchParams.get("hog_relay") === "preload";
+  const lookupUrl = new URL(url);
+  lookupUrl.searchParams.delete("hog_relay");
+  const key = `${lookupUrl.pathname}${lookupUrl.search}`;
   const dest = String(req.headers["sec-fetch-dest"] || "").toLowerCase();
   const accept = String(req.headers.accept || "");
   const navigation = dest === "document" || dest === "iframe" || (dest === "" && /text\/html/i.test(accept));
@@ -2014,6 +2240,14 @@ async function handleSite(runtime, site, req, res) {
     if (!html) {
       const page = await fetchPage(new URL(key, site.origin), {}, runtime);
       html = page.html;
+    }
+    if (preloadRelay) {
+      try {
+        html = applyRelayMode(html, "preload");
+      } catch {
+        send(res, 500, "The node page is not available", "text/plain; charset=utf-8");
+        return;
+      }
     }
     send(res, 200, req.method === "HEAD" ? "" : html, "text/html; charset=utf-8", SITE_HEADERS);
     return;
@@ -2066,6 +2300,18 @@ async function handle(req, res, runtime) {
 
     if (req.method === "GET" && url.pathname === "/__hog/version" && hostName(req) === WALLET_HOST) {
       send(res, 200, serverVersionInfo());
+      return;
+    }
+    // The Chromium mining preload asks the main process for this. Browsers
+    // always send Origin or Sec-Fetch-Site; Node's http.get does not.
+    if (req.method === "GET" && url.pathname === "/api/mining/token") {
+      const host = hostName(req);
+      const browserShaped = req.headers.origin || req.headers["sec-fetch-site"];
+      if (browserShaped || (host !== "127.0.0.1" && host !== "localhost")) {
+        send(res, 403, { ok: false, error: "Not available" });
+        return;
+      }
+      send(res, 200, { ok: true, token: MINING.token });
       return;
     }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;

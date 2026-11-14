@@ -5,6 +5,7 @@ import {
   btcAddressFromCompressed,
   chainAccountsFromPhrase,
   chainAccountsFromPrivateKey,
+  createPhraseAccount,
   parseDecimal,
   readNativeBalance,
   sendNativeEvm,
@@ -28,6 +29,20 @@ describe("chain accounts", () => {
     assert.equal(account.solAddress, "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk");
     assert.notEqual(account.evmKey, account.privateKey);
     assert.equal(account.address.length, 48);
+    assert.equal(account.accountIndex, 0);
+  });
+
+  test("the next Warthog account is the next address index", () => {
+    const first = chainAccountsFromPhrase(PHRASE, 0);
+    const second = chainAccountsFromPhrase(PHRASE, 1);
+    assert.notEqual(first.address, second.address);
+    assert.equal(first.evmAddress, second.evmAddress);
+    assert.equal(first.solAddress, second.solAddress);
+    assert.equal(second.accountIndex, 1);
+    const created = createPhraseAccount();
+    assert.equal(created.phrase.trim().split(/\s+/).length, 12);
+    assert.equal(created.accountIndex, 0);
+    assert.equal(created.address.length, 48);
   });
 
   test("bitcoin balance includes confirmed and mempool coins", async () => {

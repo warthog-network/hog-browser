@@ -4,11 +4,22 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { ethers } from "ethers";
 import { accountFromPrivateKey } from "./wallet-core.js";
 
-/** Same paths as the extension. Hemi uses the Ethereum account. */
-const WART_PATH = "m/44'/2070'/0'/0/0";
+/** Same paths as the extension. Hemi uses the Ethereum account.
+ *  Extra Warthog accounts use the next address index. Ethereum, Bitcoin,
+ *  and Solana stay on account 0, matching the extension's chain keys. */
 const ETH_PATH = "m/44'/60'/0'/0/0";
 const BTC_PATH = "m/84'/0'/0'/0/0";
 const SOL_PATH = "m/44'/501'/0'/0'";
+
+function wartPath(index) {
+  return `m/44'/2070'/0'/0/${index}`;
+}
+
+function accountIndex(index) {
+  const n = Number(index ?? 0);
+  if (!Number.isInteger(n) || n < 0 || n > 50) throw new Error("That account number is not available.");
+  return n;
+}
 
 const EVM = {
   ethereum: { chainId: 1, rpc: "https://ethereum.publicnode.com" },
@@ -144,10 +155,11 @@ export function chainAccountsFromPrivateKey(privateKeyHex) {
   };
 }
 
-/** Extension account 0. Warthog, Ethereum, Bitcoin, and Solana from one phrase. */
-export function chainAccountsFromPhrase(mnemonic) {
+/** Extension account. Index 0 is the first Warthog address. */
+export function chainAccountsFromPhrase(mnemonic, index = 0) {
+  const n = accountIndex(index);
   const phrase = normalizePhrase(mnemonic);
-  const wart = accountFromPrivateKey(ethers.HDNodeWallet.fromPhrase(phrase, "", WART_PATH).privateKey);
+  const wart = accountFromPrivateKey(ethers.HDNodeWallet.fromPhrase(phrase, "", wartPath(n)).privateKey);
   const eth = accountFromPrivateKey(ethers.HDNodeWallet.fromPhrase(phrase, "", ETH_PATH).privateKey);
   const btc = accountFromPrivateKey(ethers.HDNodeWallet.fromPhrase(phrase, "", BTC_PATH).privateKey);
   const seed = ethers.getBytes(ethers.Mnemonic.fromPhrase(phrase).computeSeed());
@@ -164,7 +176,16 @@ export function chainAccountsFromPhrase(mnemonic) {
     btcAddress: btcAddressFromCompressed(btc.publicKey),
     solAddress,
     phrase,
+    accountIndex: n,
   };
+}
+
+/** A new 12-word wallet. Same phrase shape the extension creates. */
+export function createPhraseAccount() {
+  const wallet = ethers.Wallet.createRandom();
+  const phrase = wallet.mnemonic && wallet.mnemonic.phrase;
+  if (!phrase) throw new Error("Could not create a recovery phrase.");
+  return chainAccountsFromPhrase(phrase, 0);
 }
 
 export function parseDecimal(input, decimals) {

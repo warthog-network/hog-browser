@@ -23517,6 +23517,34 @@ function siteHost(origin) {
     return "This site";
   }
 }
+function providerOriginAllowed(origin) {
+  let url;
+  try {
+    url = new URL(String(origin || ""));
+  } catch {
+    return false;
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "tailscale.com" || host.endsWith(".tailscale.com")) return false;
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:") return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return false;
+}
+function typedDomainWarning(domainName, origin) {
+  const name = String(domainName || "");
+  let host = "";
+  try {
+    host = new URL(String(origin || "")).hostname.toLowerCase();
+  } catch {
+    host = "";
+  }
+  const shown2 = name.toLowerCase();
+  const looksLikeHost = shown2.includes(".");
+  const mismatch = Boolean(
+    looksLikeHost && host && shown2 !== host && !host.endsWith(`.${shown2}`) && !shown2.endsWith(`.${host}`)
+  );
+  return { host, mismatch };
+}
 async function evmRpc(chain, method, params) {
   const row = CHAINS[chain];
   if (!row) throw new DappError(-32603, "That network is not available.");
@@ -23538,6 +23566,9 @@ async function evmRpc(chain, method, params) {
   return body ? body.result ?? null : null;
 }
 async function answerDappRequest(input) {
+  if (!providerOriginAllowed(input.origin)) {
+    throw new DappError(4100, "Hog does not connect to this site.");
+  }
   const method = String(input.method || "");
   const params = asParams(input.params);
   const chain = CHAINS[input.chain] ? input.chain : "0x1";
@@ -23599,17 +23630,18 @@ async function answerDappRequest(input) {
       sure: true
     });
     if (!ok) throw new DappError(4001, "You rejected the request.");
-    const wallet = new ethers_exports.Wallet(normalizeKey(input.privateKey));
-    return { result: await wallet.signMessage(messageBytes(parts.raw)) };
+    return { result: await signingWallet(input).signMessage(messageBytes(parts.raw)) };
   }
   if (method === "eth_signTypedData_v4" || method === "eth_signTypedData_v3") {
     const typed = parseTyped(params, CHAINS[chain].id);
     sameAddress(typed.address, address);
+    const domain = typedDomainWarning(typed.domainName, input.origin);
     const ok = await input.ask({
       title: "Sign",
-      body: `${host} wants a typed signature. This does not send a transaction.`,
+      body: domain.mismatch ? `${host} wants a typed signature. The name in the signature does not match this site.` : `${host} wants a typed signature. This does not send a transaction.`,
       lines: [
-        { label: "Site name", value: typed.domainName },
+        { label: "Site", value: host },
+        { label: "Name in signature", value: typed.domainName },
         { label: "Type", value: typed.primary },
         { label: "Message", value: typed.summary }
       ],
@@ -23617,8 +23649,7 @@ async function answerDappRequest(input) {
       sure: true
     });
     if (!ok) throw new DappError(4001, "You rejected the request.");
-    const wallet = new ethers_exports.Wallet(normalizeKey(input.privateKey));
-    return { result: await wallet.signTypedData(typed.domain, typed.types, typed.message) };
+    return { result: await signingWallet(input).signTypedData(typed.domain, typed.types, typed.message) };
   }
   if (method === "eth_sign" || method === "eth_signTypedData") {
     throw new DappError(-32601, "This site uses an old signature format. It needs personal_sign or typed data v4.");
@@ -23639,7 +23670,7 @@ async function answerDappRequest(input) {
       sure: true
     });
     if (!ok) throw new DappError(4001, "You rejected the request.");
-    return { result: await broadcast(prepared, address, input.privateKey, chain, rpc) };
+    return { result: await broadcast(prepared, address, signingWallet(input), chain, rpc) };
   }
   throw new DappError(-32601, "Hog does not support that request.");
 }
@@ -23668,6 +23699,11 @@ function chainNumber(value) {
     return id2;
   }
   return null;
+}
+function signingWallet(input) {
+  if (input.signer) return input.signer;
+  if (!input.privateKey) throw new DappError(-32603, "The wallet key is not available.");
+  return new ethers_exports.Wallet(normalizeKey(input.privateKey));
 }
 function normalizeKey(hex2) {
   const clean = String(hex2 || "").trim().replace(/^0x/i, "");
@@ -23815,9 +23851,8 @@ async function networkFees(tx, chain, rpc) {
   if (typeof gasPrice !== "string") throw new DappError(-32603, "The network did not return a fee.");
   return { maxFeePerGas: null, maxPriorityFeePerGas: null, gasPrice: hexQuantity(gasPrice) };
 }
-async function broadcast(prepared, address, privateKey, chain, rpc) {
+async function broadcast(prepared, address, wallet, chain, rpc) {
   const nonce = prepared.nonce ?? safeNonce(hexQuantity(await rpc(chain, "eth_getTransactionCount", [address, "pending"])));
-  const wallet = new ethers_exports.Wallet(normalizeKey(privateKey));
   const shared = {
     chainId: CHAINS[chain].id,
     nonce,
@@ -23891,5 +23926,7 @@ export {
   answerDappRequest,
   chainKey,
   evmRpc,
-  siteHost
+  providerOriginAllowed,
+  siteHost,
+  typedDomainWarning
 };

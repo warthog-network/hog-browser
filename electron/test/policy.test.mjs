@@ -77,7 +77,59 @@ test("Chrome user agent hides Electron", () => {
   assert.ok(!/Electron/.test(ua));
 });
 
-test("dapp provider stays off Tailscale pages", () => {
+test("dapp provider stays off Tailscale pages and plain http", () => {
   assert.equal(policy.dappProviderAllowed("https://login.tailscale.com/admin"), false);
   assert.equal(policy.dappProviderAllowed("https://app.uniswap.org/"), true);
+  assert.equal(policy.dappProviderAllowed("http://evil.example/"), false);
+  assert.equal(policy.dappProviderAllowed("http://127.0.0.1:8080/"), true);
+  assert.equal(policy.dappProviderAllowed("http://localhost:3000/"), true);
+  assert.equal(policy.dappProviderAllowed("http://[::1]/"), true);
+});
+
+test("public pages cannot reach private targets", () => {
+  assert.equal(policy.isNonPublicAddress("127.0.0.1"), true);
+  assert.equal(policy.isNonPublicAddress("10.1.2.3"), true);
+  assert.equal(policy.isNonPublicAddress("192.168.1.9"), true);
+  assert.equal(policy.isNonPublicAddress("172.16.0.1"), true);
+  assert.equal(policy.isNonPublicAddress("100.64.0.1"), true);
+  assert.equal(policy.isNonPublicAddress("8.8.8.8"), false);
+  assert.equal(policy.isNonPublicAddress("::1"), true);
+  assert.equal(policy.isNonPublicAddress("fd00::1"), true);
+  assert.equal(policy.isLinkLocalAddress("169.254.169.254"), true);
+  assert.equal(policy.isLinkLocalAddress("fe80::1"), true);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "http://127.0.0.1:8096/",
+    resourceType: "image",
+    topUrl: "https://evil.example/",
+  }), true);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "http://192.168.1.20/",
+    resourceType: "mainFrame",
+  }), false);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "http://192.168.1.20/",
+    resourceType: "mainFrame",
+    initiator: "https://evil.example/",
+  }), true);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "http://192.168.1.20/a.png",
+    resourceType: "image",
+    topUrl: "http://192.168.1.20/",
+  }), false);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "http://169.254.169.254/latest",
+    resourceType: "mainFrame",
+  }), true);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "https://evil.example/",
+    resourceType: "script",
+    topUrl: "https://news.example/",
+    ip: "127.0.0.1",
+  }), true);
+  assert.equal(policy.shouldBlockPrivateRequest({
+    url: "https://cdn.example/a.js",
+    resourceType: "script",
+    topUrl: "https://news.example/",
+    ip: "1.1.1.1",
+  }), false);
 });

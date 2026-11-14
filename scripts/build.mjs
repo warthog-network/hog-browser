@@ -10,6 +10,7 @@ await esbuild.build({
     "wallet-bundle": "src/wallet-core.js",
     "dapp-bundle": "src/dapp.js",
     "chains-bundle": "src/chains.js",
+    "vault-worker": "src/vault-worker.js",
     "xterm-bundle": "src/terminal.js",
   },
   bundle: true,

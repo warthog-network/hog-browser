@@ -25553,10 +25553,17 @@ function accountFromPrivateKey(privateKeyHex) {
 }
 
 // src/chains.js
-var WART_PATH = "m/44'/2070'/0'/0/0";
 var ETH_PATH = "m/44'/60'/0'/0/0";
 var BTC_PATH = "m/84'/0'/0'/0/0";
 var SOL_PATH = "m/44'/501'/0'/0'";
+function wartPath(index) {
+  return `m/44'/2070'/0'/0/${index}`;
+}
+function accountIndex(index) {
+  const n2 = Number(index ?? 0);
+  if (!Number.isInteger(n2) || n2 < 0 || n2 > 50) throw new Error("That account number is not available.");
+  return n2;
+}
 var EVM = {
   ethereum: { chainId: 1, rpc: "https://ethereum.publicnode.com" },
   hemi: { chainId: 43111, rpc: "https://rpc.hemi.network/rpc" }
@@ -25675,9 +25682,10 @@ function chainAccountsFromPrivateKey(privateKeyHex) {
     phrase: ""
   };
 }
-function chainAccountsFromPhrase(mnemonic) {
+function chainAccountsFromPhrase(mnemonic, index = 0) {
+  const n2 = accountIndex(index);
   const phrase = normalizePhrase(mnemonic);
-  const wart = accountFromPrivateKey(ethers_exports.HDNodeWallet.fromPhrase(phrase, "", WART_PATH).privateKey);
+  const wart = accountFromPrivateKey(ethers_exports.HDNodeWallet.fromPhrase(phrase, "", wartPath(n2)).privateKey);
   const eth = accountFromPrivateKey(ethers_exports.HDNodeWallet.fromPhrase(phrase, "", ETH_PATH).privateKey);
   const btc = accountFromPrivateKey(ethers_exports.HDNodeWallet.fromPhrase(phrase, "", BTC_PATH).privateKey);
   const seed = ethers_exports.getBytes(ethers_exports.Mnemonic.fromPhrase(phrase).computeSeed());
@@ -25693,8 +25701,15 @@ function chainAccountsFromPhrase(mnemonic) {
     evmKey: eth.privateKey,
     btcAddress: btcAddressFromCompressed(btc.publicKey),
     solAddress,
-    phrase
+    phrase,
+    accountIndex: n2
   };
+}
+function createPhraseAccount() {
+  const wallet = ethers_exports.Wallet.createRandom();
+  const phrase = wallet.mnemonic && wallet.mnemonic.phrase;
+  if (!phrase) throw new Error("Could not create a recovery phrase.");
+  return chainAccountsFromPhrase(phrase, 0);
 }
 function parseDecimal(input, decimals) {
   const text = String(input ?? "").trim();
@@ -25813,6 +25828,7 @@ export {
   btcAddressFromCompressed,
   chainAccountsFromPhrase,
   chainAccountsFromPrivateKey,
+  createPhraseAccount,
   evmTransferReserve,
   formatUnits2 as formatUnits,
   parseDecimal,

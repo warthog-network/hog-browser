@@ -21,6 +21,7 @@ const {
 } = require("electron");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -57,6 +58,9 @@ app.userAgentFallback = policy.chromeUserAgent(process.versions.chrome);
 // X11 WM_CLASS / Wayland app_id, so the dock matches hog-chromium-preview.desktop
 // and never groups this window with the WebKit Hog ("hog").
 app.commandLine.appendSwitch("class", "hog-chromium-preview");
+// Partition third-party storage the way current Chrome does. Cookies are
+// stripped separately. This does not turn storage off for embeds.
+app.commandLine.appendSwitch("enable-features", "ThirdPartyStoragePartitioning");
 
 function hogRoot() {
   const candidates = app.isPackaged
@@ -323,13 +327,42 @@ function askPermission(store, permission, origin, mediaTypes, persistent) {
     .catch(() => false);
 }
 
+function referrerKey(headers) {
+  return Object.keys(headers || {}).find((key) => key.toLowerCase() === "referer") || "";
+}
+
+/** Cross-site requests keep an origin referrer. A same-site full URL stays. */
+function downgradeReferrer(headers, targetUrl) {
+  const key = referrerKey(headers);
+  if (!key) return headers;
+  let ref;
+  let target;
+  try {
+    ref = new URL(String(headers[key] || ""));
+    target = new URL(String(targetUrl || ""));
+  } catch {
+    return headers;
+  }
+  if (ref.protocol !== "http:" && ref.protocol !== "https:") return headers;
+  if ((ref.pathname === "/" || ref.pathname === "") && !ref.search) return headers;
+  const left = cookies.site(ref.href);
+  const right = cookies.site(target.href);
+  if (left && right && left === right && ref.protocol === target.protocol) return headers;
+  return { ...headers, [key]: `${ref.origin}/` };
+}
+
 function preparePageSession(ses) {
   if (preparedSessions.has(ses)) return;
   preparedSessions.add(ses);
   ses.setUserAgent(app.userAgentFallback);
   ses.setSpellCheckerEnabled(true);
+  // Keep host candidates off the LAN interface. Calls still work through the
+  // public interface or TURN. mDNS already hides most local IPs in this Chrome.
+  try { ses.setWebRTCIPHandlingPolicy("default_public_interface_only"); } catch { /* older electron */ }
   // Web pages may never reach Hog's own server or node ports (wallet API,
   // mining, files). The wallet UI is a different partition anyway.
+  // A public page also may not request loopback, LAN, or link-local targets.
+  // The user can still open those addresses from the address bar.
   ses.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
     let url;
     try {
@@ -338,17 +371,31 @@ function preparePageSession(ses) {
       return callback({});
     }
     if (policy.isHogLocal(url, ports())) return callback({ cancel: true });
+    if (policy.shouldBlockPrivateRequest({
+      url: details.url,
+      resourceType: details.resourceType,
+      initiator: details.initiator,
+      topUrl: topUrlOf(details),
+    })) return callback({ cancel: true });
     if (blocker) return blocker.onBeforeRequest(details, callback);
     return callback({});
   });
   // Global Privacy Control, like Brave (page-preload.js sets navigator.globalPrivacyControl).
   // Third-party cookies are blocked like WebKit Hog does (Settings -> General).
   ses.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
-    let headers = { ...details.requestHeaders, "Sec-GPC": "1" };
+    let headers = downgradeReferrer({ ...details.requestHeaders, "Sec-GPC": "1" }, details.url);
     if (thirdPartyRequest(details)) headers = cookies.stripHeader(headers, "Cookie").headers;
     callback({ requestHeaders: headers });
   });
   ses.webRequest.onHeadersReceived({ urls: ["<all_urls>"] }, (details, callback) => {
+    // A public name can still resolve to a private address. Drop that response.
+    if (policy.shouldBlockPrivateRequest({
+      url: details.url,
+      resourceType: details.resourceType,
+      initiator: details.initiator,
+      topUrl: topUrlOf(details),
+      ip: details.ip,
+    })) return callback({ cancel: true });
     let changed = null;
     if (details.responseHeaders && thirdPartyRequest(details)) {
       const { headers, removed } = cookies.stripHeader(details.responseHeaders, "Set-Cookie");
@@ -376,7 +423,7 @@ function preparePageSession(ses) {
   const persistent = ses.isPersistent();
   const isoAnswers = permissionStore(ses);
   ses.setPermissionRequestHandler((wc, permission, callback, details) => {
-    const always = ["fullscreen", "clipboard-sanitized-write", "pointerLock", "window-management"];
+    const always = ["fullscreen", "clipboard-sanitized-write", "pointerLock"];
     if (always.includes(permission)) return callback(true);
     if (!ASKED_PERMISSIONS[permission]) return callback(false);
     const origin = policy.pageOrigin(details.requestingUrl || wc.getURL(), ports());
@@ -399,8 +446,41 @@ function preparePageSession(ses) {
   });
 }
 
+function fetchMiningToken() {
+  return new Promise((resolve) => {
+    const port = server && server.port;
+    if (!port) return resolve("");
+    const req = http.get({
+      hostname: "127.0.0.1",
+      port,
+      path: "/api/mining/token",
+      headers: { host: `127.0.0.1:${port}` },
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          resolve(body && body.ok && typeof body.token === "string" ? body.token : "");
+        } catch {
+          resolve("");
+        }
+      });
+    });
+    req.on("error", () => resolve(""));
+    req.setTimeout(3000, () => { req.destroy(); resolve(""); });
+  });
+}
+
 function prepareChromeSession(ses) {
   ses.setUserAgent(app.userAgentFallback);
+  // Isolated world for the node iframe only. mining-preload.js ignores every
+  // other frame. Do not enable nodeIntegrationInSubFrames on this window.
+  try {
+    ses.registerPreloadScript({ type: "frame", filePath: path.join(__dirname, "mining-preload.js") });
+  } catch (error) {
+    log(`Hog preview: mining relay preload is off (${error.message}).`);
+  }
   ses.setPermissionRequestHandler((_wc, _permission, callback, details) => {
     callback(isOwnUrl(details.requestingUrl));
   });
@@ -2056,10 +2136,26 @@ ipcMain.on("hog:overlay", (event, message) => {
 });
 // frame-preload.js: should this subframe's script cookies be blocked?
 ipcMain.on("hog:frame-cookies", (event, info) => {
-  if (process.env.HOG_PREVIEW_DEBUG) log(`frame-cookies ${JSON.stringify(info)}`);
-  const frame = info && typeof info.frame === "string" ? info.frame : "";
-  const top = info && typeof info.top === "string" ? info.top : "";
-  event.returnValue = Boolean(previewSettings.get("blockThirdPartyCookies") && top && cookies.isThirdParty(frame, top, "subFrame"));
+  try {
+    if (process.env.HOG_PREVIEW_DEBUG) log(`frame-cookies ${JSON.stringify(info)}`);
+    const frame = info && typeof info.frame === "string" ? info.frame : "";
+    const top = info && typeof info.top === "string" ? info.top : "";
+    event.returnValue = Boolean(previewSettings.get("blockThirdPartyCookies") && top && cookies.isThirdParty(frame, top, "subFrame"));
+  } catch {
+    event.returnValue = true;
+  }
+});
+ipcMain.handle("hog:mining-token", async (event) => {
+  const frame = event.senderFrame;
+  if (!frame || !event.sender || frame === event.sender.mainFrame) return "";
+  let url;
+  try {
+    url = new URL(frame.url);
+  } catch {
+    return "";
+  }
+  if (url.protocol !== "http:" || url.hostname !== "localhost" || url.searchParams.get("hog_relay") !== "preload") return "";
+  return fetchMiningToken();
 });
 const locator = new geolocation.Locator({ helper: path.join(ROOT, "geoclue-locate.py") });
 ipcMain.handle("hog:geo", async (event, request) => {

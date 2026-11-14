@@ -102,6 +102,95 @@ test("personal_sign matches ethers and stays off until connected", async () => {
   assert.equal(JSON.stringify(signed).includes(KNOWN), false);
 });
 
+test("a signer answers personal_sign without a page private key", async () => {
+  let seen = null;
+  const signed = await answerDappRequest({
+    method: "personal_sign",
+    params: ["hello", account.evmAddress],
+    origin: "https://hemi.xyz",
+    address: account.evmAddress,
+    chain: "0xa867",
+    connected: true,
+    signer: {
+      async signMessage(message) {
+        seen = message;
+        return "0xsig";
+      },
+    },
+    ask: asker(true),
+  });
+  assert.equal(seen, "hello");
+  assert.equal(signed.result, "0xsig");
+  await assert.rejects(
+    () => answerDappRequest({
+      method: "personal_sign",
+      params: ["hello", account.evmAddress],
+      origin: "https://hemi.xyz",
+      address: account.evmAddress,
+      chain: "0xa867",
+      connected: true,
+      ask: asker(true),
+    }),
+    (error) => error instanceof DappError && error.code === -32603,
+  );
+});
+
+test("plain http cannot use the wallet, and a mismatched signature name is shown", async () => {
+  await assert.rejects(
+    () => answerDappRequest({
+      method: "eth_chainId",
+      params: [],
+      origin: "http://evil.example",
+      address: account.evmAddress,
+      privateKey: account.privateKey,
+      chain: "0x1",
+      connected: false,
+      ask: asker(true),
+    }),
+    (error) => error.code === 4100,
+  );
+  const local = await answerDappRequest({
+    method: "eth_chainId",
+    params: [],
+    origin: "http://127.0.0.1:8080",
+    address: account.evmAddress,
+    privateKey: account.privateKey,
+    chain: "0x1",
+    connected: false,
+    ask: asker(true),
+  });
+  assert.equal(local.result, "0x1");
+  let prompt = null;
+  await assert.rejects(
+    () => answerDappRequest({
+      method: "eth_signTypedData_v4",
+      params: [account.evmAddress, JSON.stringify({
+        types: {
+          EIP712Domain: [{ name: "name", type: "string" }, { name: "chainId", type: "uint256" }],
+          Mail: [{ name: "contents", type: "string" }],
+        },
+        primaryType: "Mail",
+        domain: { name: "app.uniswap.org", chainId: 1 },
+        message: { contents: "hi" },
+      })],
+      origin: "https://evil.example",
+      address: account.evmAddress,
+      privateKey: account.privateKey,
+      chain: "0x1",
+      connected: true,
+      ask: async (value) => {
+        prompt = value;
+        return false;
+      },
+    }),
+    (error) => error.code === 4001,
+  );
+  assert.match(prompt.body, /does not match/);
+  assert.equal(prompt.lines[0].label, "Site");
+  assert.equal(prompt.lines[0].value, "evil.example");
+  assert.equal(prompt.lines[1].value, "app.uniswap.org");
+});
+
 test("an unknown chain is refused and a known one can switch", async () => {
   await assert.rejects(
     () => answerDappRequest({

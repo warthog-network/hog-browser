@@ -10,6 +10,7 @@ import {
   isMiningAccount,
   miningPort,
   miningRoute,
+  pageRelayPageScript,
   pageRelayScript,
 } from "../mining.mjs";
 
@@ -86,6 +87,12 @@ test("mining helpers validate accounts, routes, and port", () => {
   assert.match(script, /virtual_post/);
   assert.match(script, new RegExp(TOKEN));
   assert.doesNotMatch(script, /<\/script/i);
+  const page = pageRelayPageScript();
+  assert.match(page, /__hogMiningRpc/);
+  assert.match(page, /virtual_post/);
+  assert.doesNotMatch(page, /TOKEN/);
+  assert.doesNotMatch(page, /WebSocket/);
+  assert.doesNotMatch(page, /<\/script/i);
 });
 
 test("mining port answers 503 when no node page is connected", async () => {
@@ -242,11 +249,16 @@ test("Hog bundles the DeFi node build that accepts mined blocks", async () => {
 });
 
 test("node page HTML carries the relay script, other sites do not", async () => {
-  const { rewriteHtml } = await import("../server.mjs");
+  const { rewriteHtml, applyRelayMode } = await import("../server.mjs");
   const nodeHtml = rewriteHtml("<html><head></head><body></body></html>", "https://browser-node.netlify.app/?network=defi");
   assert.match(nodeHtml, /__hogMiningRelay/);
+  assert.match(nodeHtml, /data-hog-relay/);
   const other = rewriteHtml("<html><head></head><body></body></html>", "https://example.com/");
   assert.doesNotMatch(other, /__hogMiningRelay/);
+  const stripped = applyRelayMode(nodeHtml, "preload");
+  assert.match(stripped, /__hogMiningRpc/);
+  assert.doesNotMatch(stripped, /var TOKEN/);
+  assert.doesNotMatch(stripped, /type: "hello"/);
 });
 
 test("a relay call that times out still hands a late answer to onLate", async () => {
@@ -319,6 +331,29 @@ function runPageScript() {
 }
 
 const settleAll = (promises, ms = 300) => Promise.all(promises.map((p) => Promise.race([p, new Promise((r) => setTimeout(() => r("never answered"), ms))])));
+
+test("chromium page relay queues node requests without a token", async () => {
+  const sandbox = {
+    performance: { getEntriesByType: () => [{ name: "http://localhost:43100/node/defi/wart-node.js" }] },
+    setTimeout,
+    clearTimeout,
+    clearInterval,
+  };
+  sandbox.window = sandbox;
+  const replies = [];
+  sandbox.__hogMiningReply = (out) => replies.push(out);
+  vm.runInNewContext(pageRelayPageScript(), sandbox);
+  const node = brokenWasmNode();
+  sandbox.wartNode = node;
+  const page = node.virtual_get("/chain/head");
+  const rpc = sandbox.__hogMiningRpc({ type: "rpc", id: 3, method: "GET", path: "/chain/mine/abc", network: "defi" });
+  assert.equal((await page).data, "/chain/head");
+  const result = await rpc;
+  assert.equal(result.ok, true);
+  assert.equal(result.result.data, "/chain/mine/abc");
+  assert.equal(replies[0].id, 3);
+  assert.equal(typeof result.result === "object" && JSON.stringify(result).includes("a".repeat(16)), false);
+});
 
 test("node page queues node requests so answers reach the right caller", async () => {
   // Without the queue the broken node loses all but the last of three answers.

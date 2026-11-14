@@ -277,6 +277,134 @@ export function pageRelayScript(token) {
 }
 
 /**
+ * The node page half of the relay, with no token and no socket.
+ * Chromium runs the socket in an isolated preload. WebKit still uses
+ * pageRelayScript, which keeps the token, because it has no isolated world.
+ */
+export function pageRelayPageScript() {
+  return `(function () {
+  if (window.__hogMiningRelay) return;
+  window.__hogMiningRelay = true;
+  function network() {
+    try {
+      var names = performance.getEntriesByType("resource").map(function (e) { return e.name; });
+      for (var i = names.length - 1; i >= 0; i--) {
+        if (/\\/node\\/defi\\/wart-node\\.js(\\?|$)/.test(names[i])) return "defi";
+        if (/\\/node\\/wart-node\\.js(\\?|$)/.test(names[i])) return "official1";
+      }
+    } catch (e) {}
+    return "";
+  }
+  var RPC_MS = 30000;
+  function serialize(mod) {
+    if (!mod || mod.__hogRpc || typeof mod.virtual_get !== "function" || typeof mod.virtual_post !== "function") return;
+    var vs = mod.VIRTUALSTATE;
+    if (!vs || typeof vs.resolvePromise !== "function" || typeof vs.getId !== "function") return;
+    if (typeof vs.postId !== "function") vs.postId = vs.getId;
+    var get = mod.virtual_get, post = mod.virtual_post, resolveById = vs.resolvePromise;
+    var queue = [], current = null, draining = null;
+    var stats = { requests: 0, rerouted: 0, timeouts: 0 };
+    function next() { setTimeout(pump, 0); }
+    function giveUp(c) {
+      if (current !== c) return;
+      current = null;
+      stats.timeouts += 1;
+      c.job.reject(new Error("The node did not answer " + c.job.method + " " + c.job.path));
+      draining = setTimeout(function () { draining = null; next(); }, RPC_MS);
+    }
+    function pump() {
+      if (current || draining || !queue.length) return;
+      var job = queue.shift();
+      var c = { id: vs.nextId, job: job };
+      current = c;
+      c.timer = setTimeout(function () { giveUp(c); }, RPC_MS);
+      stats.requests += 1;
+      var p;
+      try { p = job.method === "POST" ? post.call(mod, job.path, job.body) : get.call(mod, job.path); }
+      catch (e) { clearTimeout(c.timer); if (current === c) current = null; job.reject(e); next(); return; }
+      Promise.resolve(p).then(job.resolve, job.reject);
+    }
+    vs.resolvePromise = function (id, json) {
+      if (draining) {
+        clearTimeout(draining);
+        draining = null;
+        next();
+        return;
+      }
+      var c = current;
+      if (!c) return resolveById.call(vs, id, json);
+      clearTimeout(c.timer);
+      current = null;
+      if (id !== c.id) stats.rerouted += 1;
+      resolveById.call(vs, c.id, json);
+      next();
+    };
+    function enqueue(method, path, body, first) {
+      return new Promise(function (resolve, reject) {
+        var job = { method: method, path: String(path), body: body, first: !!first, resolve: resolve, reject: reject };
+        if (first) {
+          var i = 0;
+          while (i < queue.length && queue[i].first) i++;
+          queue.splice(i, 0, job);
+        } else queue.push(job);
+        pump();
+      });
+    }
+    mod.virtual_get = function (path) { return enqueue("GET", path); };
+    mod.virtual_post = function (path, body) { return enqueue("POST", path, body); };
+    mod.__hogRpc = enqueue;
+    mod.__hogRpcStats = stats;
+  }
+  try {
+    var held = window.wartNode;
+    Object.defineProperty(window, "wartNode", {
+      configurable: true,
+      enumerable: true,
+      get: function () { return held; },
+      set: function (value) { held = value; try { serialize(value); } catch (e) {} },
+    });
+    serialize(held);
+  } catch (e) {}
+  window.__hogMiningStatus = function () {
+    var mod = window.wartNode || window.Module;
+    var running = !!(mod && typeof mod.virtual_get === "function");
+    if (running) { try { serialize(mod); } catch (e) {} }
+    return { network: running ? network() : "" };
+  };
+  window.__hogMiningRpc = function (msg) {
+    function reply(out) {
+      out.type = "rpc-result";
+      out.id = msg && msg.id;
+      out.network = network();
+      if (typeof window.__hogMiningReply === "function") window.__hogMiningReply(out);
+      return out;
+    }
+    var mod = window.wartNode || window.Module;
+    var net = network();
+    if (!msg || msg.type !== "rpc") return reply({ ok: false, code: "not-running" });
+    if (msg.network && net && net !== msg.network) return reply({ ok: false, code: "wrong-network" });
+    if (!mod || typeof mod.virtual_get !== "function" || typeof mod.virtual_post !== "function") return reply({ ok: false, code: "not-running" });
+    if (msg.network && !net) return reply({ ok: false, code: "not-running" });
+    serialize(mod);
+    var p;
+    try {
+      var method = msg.method === "POST" ? "POST" : "GET";
+      p = mod.__hogRpc
+        ? mod.__hogRpc(method, msg.path, String(msg.body || ""), true)
+        : (method === "POST" ? mod.virtual_post(msg.path, String(msg.body || "")) : mod.virtual_get(msg.path));
+    } catch (e) {
+      return reply({ ok: false, code: "node-error", error: String(e && e.message || e) });
+    }
+    return Promise.resolve(p).then(function (result) {
+      return reply({ ok: true, result: result });
+    }, function (e) {
+      return reply({ ok: false, code: "node-error", error: String(e && e.message || e) });
+    });
+  };
+})();`;
+}
+
+/**
  * @param {{ token: string, pageOrigin: string, network?: string, timeoutMs?: number, host?: string, checkTemplate?: (result: any) => string | null }} options
  *   checkTemplate: the mining ready gate; a reason string withholds a
  *   /chain/mine template (node not caught up with the network tip yet).

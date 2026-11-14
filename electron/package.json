@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.40-preview.10",
+  "version": "0.1.40-preview.11",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",

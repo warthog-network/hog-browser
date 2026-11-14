@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 OUT="${HERE}/hog-app"
 
-if [ ! -f "${ROOT}/public/wallet-bundle.js" ]; then
+if [ ! -f "${ROOT}/public/wallet-bundle.js" ] || [ ! -f "${ROOT}/public/vault-worker.js" ]; then
   echo "public/*-bundle.js missing: run 'npm ci && npm run build' in the repo root first" >&2
   exit 1
 fi

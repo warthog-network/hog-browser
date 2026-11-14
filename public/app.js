@@ -1,9 +1,9 @@
 import {
   chainAccountsFromPhrase,
   chainAccountsFromPrivateKey,
+  createPhraseAccount,
   evmTransferReserve,
   readNativeBalance,
-  sendNativeEvm,
 } from "./chains-bundle.js";
 import { answerDappRequest, CHAINS, DappError } from "./dapp-bundle.js";
 import { FitAddon, Terminal } from "./xterm-bundle.js";
@@ -11,16 +11,7 @@ import { smbLinks } from "./files-core.js";
 import { createFilesView } from "./files-view.js";
 import { refreshPhoneApp, wirePhoneCard } from "./phone-settings.js";
 import { refreshJellyfinLan, wireJellyfinLan } from "./jellyfin-lan.js";
-import {
-  createAccount,
-  signAssetCreation,
-  signCancel,
-  signLimitSwap,
-  signLiquidityDeposit,
-  signLiquidityWithdraw,
-  signWartTransfer,
-  validateAddress,
-} from "./wallet-bundle.js";
+import { validateAddress } from "./wallet-bundle.js";
 import {
   ROOT_ID as BOOKMARK_ROOT,
   addBookmark as addBookmarkEntry,
@@ -52,6 +43,10 @@ const WALLET_OPEN_KEY = "hog-wallet-open";
 const TABS_OPEN_KEY = "hog-tabs-open";
 const NAME_KEY = "hog-account-name";
 const LOCK_KEY = "hog-autolock";
+const ACCOUNT_INDEX_KEY = "hog-account-index";
+const ACCOUNT_BOOK_KEY = "hog-account-book";
+const KDF_V1 = 150_000;
+const KDF_V2 = 600_000;
 const DISPLAY_KEY = "hog-display";
 const SITES_KEY = "hog-dapp-sites";
 const CHAIN_KEY = "hog-wallet-chain";
@@ -132,6 +127,97 @@ let activeId = 0;
 let tabSeq = 1;
 let viewSeq = 0;
 let session = null;
+let lockTimer = 0;
+let vaultWorker = null;
+let vaultSeq = 0;
+const vaultPending = new Map();
+
+function packValue(value) {
+  if (typeof value === "bigint") return { $bigint: value.toString() };
+  if (value instanceof Uint8Array) {
+    return { $bytes: `0x${[...value].map((byte) => byte.toString(16).padStart(2, "0")).join("")}` };
+  }
+  if (Array.isArray(value)) return value.map(packValue);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) out[key] = packValue(item);
+    return out;
+  }
+  return value;
+}
+
+function vaultCall(action, payload) {
+  if (!vaultWorker) {
+    const worker = new Worker(new URL("./vault-worker.js", import.meta.url), { type: "module" });
+    vaultWorker = worker;
+    worker.onmessage = (event) => {
+      const data = event.data || {};
+      const waiter = vaultPending.get(data.id);
+      if (!waiter) return;
+      vaultPending.delete(data.id);
+      if (data.ok) waiter.resolve(data.result);
+      else waiter.reject(new Error(data.error || "The signing worker rejected the request."));
+    };
+    worker.onerror = () => {
+      if (vaultWorker !== worker) return;
+      vaultWorker = null;
+      for (const waiter of vaultPending.values()) waiter.reject(new Error("The signing worker stopped."));
+      vaultPending.clear();
+    };
+  }
+  const id = ++vaultSeq;
+  return new Promise((resolve, reject) => {
+    vaultPending.set(id, { resolve, reject });
+    try {
+      vaultWorker.postMessage({ id, action, payload: packValue(payload || {}) });
+    } catch (error) {
+      vaultPending.delete(id);
+      reject(error);
+    }
+  });
+}
+
+function publicAccount(account) {
+  return {
+    address: account.address,
+    evmAddress: account.evmAddress || "",
+    btcAddress: account.btcAddress || "",
+    solAddress: account.solAddress || "",
+    accountIndex: Number.isInteger(account.accountIndex) ? account.accountIndex : 0,
+    hasPhrase: Boolean(account.hasPhrase || account.phrase),
+  };
+}
+
+function lockMinutes() {
+  const raw = localStorage.getItem(LOCK_KEY);
+  if (raw == null || raw === "") return 15;
+  const minutes = Number(raw);
+  return [0, 1, 5, 15, 30, 60].includes(minutes) ? minutes : 15;
+}
+
+function dropSession() {
+  clearTimeout(lockTimer);
+  vaultCall("lock", {}).catch(() => {});
+  session = null;
+  balance = null;
+}
+
+function signHeld(kind, args) {
+  return vaultCall("signWart", { kind, args });
+}
+
+const hogSigner = {
+  signMessage(message) {
+    if (message instanceof Uint8Array) return vaultCall("signMessage", { encoding: "hex", message });
+    return vaultCall("signMessage", { encoding: "string", message: String(message ?? "") });
+  },
+  signTypedData(domain, types, message) {
+    return vaultCall("signTypedData", { domain, types, message });
+  },
+  signTransaction(tx) {
+    return vaultCall("signTransaction", { tx });
+  },
+};
 let balance = null;
 let refreshGen = 0;
 let wartUsd = 0;
@@ -155,7 +241,15 @@ function b64ToBytes(value) {
   return bytes;
 }
 
-async function deriveKey(password, salt) {
+function kdfIterations(record) {
+  if (!record || record.v !== 2) return KDF_V1;
+  const n = Number(record.iterations);
+  if (!Number.isInteger(n) || n < KDF_V2) return KDF_V2;
+  if (n > 2_000_000) return 2_000_000;
+  return n;
+}
+
+async function deriveKey(password, salt, iterations) {
   const base = await crypto.subtle.importKey(
     "raw",
     encoder.encode(password),
@@ -164,7 +258,7 @@ async function deriveKey(password, salt) {
     ["deriveKey"],
   );
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 150_000, hash: "SHA-256" },
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
     base,
     { name: "AES-GCM", length: 256 },
     false,
@@ -175,15 +269,15 @@ async function deriveKey(password, salt) {
 async function sealKey(privateKey, password) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveKey(password, salt);
+  const key = await deriveKey(password, salt, KDF_V2);
   const ct = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(privateKey)),
   );
-  return { v: 1, salt: bytesToB64(salt), iv: bytesToB64(iv), ct: bytesToB64(ct) };
+  return { v: 2, iterations: KDF_V2, salt: bytesToB64(salt), iv: bytesToB64(iv), ct: bytesToB64(ct) };
 }
 
 async function openKey(record, password) {
-  const key = await deriveKey(password, b64ToBytes(record.salt));
+  const key = await deriveKey(password, b64ToBytes(record.salt), kdfIterations(record));
   const plain = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: b64ToBytes(record.iv) },
     key,
@@ -549,7 +643,18 @@ function showNode(frameUrl) {
   view.classList.remove("is-page");
   nodeFrame.classList.add("is-front");
   nodeFrame.inert = false;
-  const next = String(frameUrl || "");
+  let next = String(frameUrl || "");
+  // Chromium serves the node page without the mining token. The preload
+  // holds the socket. WebKit has no isolated world, so it keeps the token.
+  if (next && window.__hogChromium) {
+    try {
+      const url = new URL(next);
+      url.searchParams.set("hog_relay", "preload");
+      next = url.href;
+    } catch {
+      /* keep the address the server returned */
+    }
+  }
   if (next && nodeFrame.getAttribute("src") !== next) nodeFrame.src = next;
   reportView(false);
 }
@@ -2427,14 +2532,86 @@ function shortEvm(address) {
 }
 
 function startSession(account) {
-  session = {
-    privateKey: account.privateKey,
-    address: account.address,
-    evmAddress: account.evmAddress,
-    evmKey: account.evmKey || account.privateKey,
-    btcAddress: account.btcAddress || "",
-    solAddress: account.solAddress || "",
-  };
+  session = publicAccount(account);
+  scheduleLock();
+}
+
+function savedAccountIndex() {
+  const n = Number(localStorage.getItem(ACCOUNT_INDEX_KEY) || "0");
+  return Number.isInteger(n) && n >= 0 && n <= 50 ? n : 0;
+}
+
+function readAccountBook() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ACCOUNT_BOOK_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((row) => row && typeof row.address === "string").slice(0, 51);
+  } catch {
+    return [];
+  }
+}
+
+function writeAccountBook(book) {
+  localStorage.setItem(ACCOUNT_BOOK_KEY, JSON.stringify(book.slice(0, 51)));
+}
+
+function resetAccountBook(account) {
+  const name = localStorage.getItem(NAME_KEY) || "Account 1";
+  writeAccountBook([{ name, address: account.address }]);
+  localStorage.setItem(ACCOUNT_INDEX_KEY, "0");
+}
+
+function clearAccountBook() {
+  localStorage.removeItem(ACCOUNT_BOOK_KEY);
+  localStorage.removeItem(ACCOUNT_INDEX_KEY);
+}
+
+function renderAccounts() {
+  const list = $("account-list");
+  const note = $("account-limit");
+  const add = $("account-add");
+  if (!list || !note || !add) return;
+  list.replaceChildren();
+  const phrase = Boolean(session && session.hasPhrase);
+  if (!phrase) {
+    note.textContent = "This wallet is one private key. Create or restore a recovery phrase to add Warthog accounts the way the extension does.";
+    add.hidden = true;
+    return;
+  }
+  const book = readAccountBook();
+  add.hidden = false;
+  add.disabled = book.length >= 51;
+  note.textContent = "Each account is the next Warthog address from this phrase. Ethereum, Bitcoin, Hemi, and Solana stay on the first address.";
+  const current = savedAccountIndex();
+  book.forEach((row, index) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = `${row.name || `Account ${index + 1}`} · ${shortAddress(row.address)}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tiny";
+    button.dataset.accountIndex = String(index);
+    button.textContent = index === current ? "In use" : "Use";
+    button.disabled = index === current;
+    item.append(name, button);
+    list.append(item);
+  });
+}
+
+async function usePhraseAccount(index) {
+  if (!session || !session.hasPhrase) return;
+  const book = readAccountBook();
+  if (!book[index]) return;
+  const next = await vaultCall("activate", { index });
+  if (next.address !== book[index].address) throw new Error("That account does not match this phrase.");
+  localStorage.setItem(ACCOUNT_INDEX_KEY, String(index));
+  const name = book[index].name || `Account ${index + 1}`;
+  localStorage.setItem(NAME_KEY, name);
+  $("w-title").textContent = name;
+  $("account-label").textContent = name;
+  startSession(next);
+  await refreshWallet();
+  renderAccounts();
 }
 
 function paintNetMenu() {
@@ -2507,10 +2684,12 @@ function paintChain() {
       : "This key has no Solana account. Restore a 12 or 24 word phrase to open one.";
   }
   if ($("phrase-note") && session) {
-    $("phrase-note").textContent = session.solAddress
-      ? "This wallet was restored from a recovery phrase. Ethereum, Bitcoin, Hemi, and Solana come from that phrase. It is not shown again."
+    $("phrase-note").textContent = session.hasPhrase
+      ? "These 12 or 24 words back up every Warthog account from this phrase, plus Ethereum, Bitcoin, Hemi, and Solana. Enter the password to show them."
       : "This wallet is one private key. Ethereum and Hemi share its address, and Bitcoin uses the same key. Solana needs a recovery phrase.";
   }
+  const reveal = $("phrase-reveal-form");
+  if (reveal) reveal.hidden = !(session && session.hasPhrase);
 }
 
 function drawIdenticon(address) {
@@ -2826,9 +3005,14 @@ function showWalletPage(name) {
     button.classList.toggle("is-active", button.dataset.wpage === nav);
   });
   if (page === "display") renderDisplayPicks();
-  if (page === "autolock") $("autolock").value = localStorage.getItem(LOCK_KEY) || "0";
+  if (page === "autolock") $("autolock").value = String(lockMinutes());
   if (page === "account") $("account-name").value = localStorage.getItem(NAME_KEY) || "";
+  if (page === "accounts") renderAccounts();
   if (page === "sites") renderSites();
+  if (page !== "phrase" && $("revealed-phrase")) {
+    $("revealed-phrase").value = "";
+    $("revealed-phrase").hidden = true;
+  }
   syncNetworkActions();
 }
 
@@ -4623,16 +4807,17 @@ function renderDisplayPicks() {
   });
 }
 
-let lockTimer = 0;
 function scheduleLock() {
   clearTimeout(lockTimer);
-  const minutes = Number(localStorage.getItem(LOCK_KEY) || "0");
+  const minutes = lockMinutes();
   if (!session || !minutes) return;
-  lockTimer = setTimeout(() => {
-    session = null;
-    balance = null;
-    showSetup();
-  }, minutes * 60_000);
+  lockTimer = setTimeout(() => lockWallet(), minutes * 60_000);
+}
+
+function lockWallet() {
+  dropSession();
+  finishDapp(false);
+  showSetup();
 }
 
 const SIDE_COPY = "The toolbar icon opens a panel docked on the side of the browser. The Nano connects there.";
@@ -4655,7 +4840,7 @@ function showHub() {
   $("hub-title").textContent = locked ? "Welcome back" : "Get started";
   $("hub-hint").textContent = locked
     ? "Unlock with passkey or password, or start another path."
-    : "Create a wallet locked by a password in this window. A passkey stays in the extension.";
+    : "Create a wallet with a 12-word phrase, locked by a password in this window. A passkey stays in the extension.";
   $("hub-unlock").hidden = !locked;
   $("hub-unlock").classList.toggle("is-primary", locked);
   $("create").classList.toggle("is-primary", !locked);
@@ -4668,8 +4853,8 @@ function showStep(which) {
   $("setup-steps").hidden = false;
   hideSetupForms();
   const copy = {
-    create: ["Create wallet", "Name the wallet. This window creates a private key. A recovery phrase and a Ledger Nano stay in the extension."],
-    key: ["Create wallet", "Write this key down. Hog cannot show it again after you set a password."],
+    create: ["Create wallet", "Name the wallet. Hog makes a 12-word recovery phrase, the same kind the extension uses. It covers Warthog, Ethereum, Bitcoin, Hemi, and Solana."],
+    key: ["Save the phrase", "Write these 12 words down. You can show them again later with the password."],
     restore: ["Restore wallet", "How do you want to restore access?"],
     import: ["Private key", "Paste the 64-character private key."],
     phrase: ["Recovery phrase", "12 or 24 words. This matches the extension account, including Ethereum, Bitcoin, Hemi, and Solana."],
@@ -5211,8 +5396,7 @@ async function cancelOrder(item) {
     if (fee > live.available) throw new Error(insufficientMessage(live));
     const head = await nodeGet("chain/head");
     const chain = head.chainHead || head;
-    const tx = signCancel({
-      privateKey: session.privateKey,
+    const tx = await signHeld("cancel", {
       pinHash: chain.pinHash,
       pinHeight: chain.pinHeight,
       nonceId: crypto.getRandomValues(new Uint32Array(1))[0],
@@ -5263,7 +5447,7 @@ async function reviewMarket(event, spec) {
     const chain = head.chainHead || head;
     if (!chain.pinHash || chain.pinHeight == null) throw new Error("Chain head is missing a pin");
     if (built.guard) await built.guard();
-    const tx = built.sign({
+    const tx = await built.sign({
       pinHash: chain.pinHash,
       pinHeight: chain.pinHeight,
       nonceId: crypto.getRandomValues(new Uint32Array(1))[0],
@@ -5510,8 +5694,7 @@ function swapSpec() {
         const live = await assetBalance(asset.hash, decimals);
         if (amountRaw > live.available) throw new Error(tokenShort(live, live.name || asset.name));
       }
-      const signed = signLimitSwap({
-        privateKey: session.privateKey,
+      const signed = await signHeld("limitSwap", {
         ...DRY,
         assetHash: asset.hash,
         isBuy,
@@ -5533,8 +5716,7 @@ function swapSpec() {
             if (amountRaw > live.available) throw new Error(tokenShort(live, live.name || asset.name));
           },
         sign(ctx) {
-          return signLimitSwap({
-            privateKey: session.privateKey,
+          return signHeld("limitSwap", {
             ...ctx,
             assetHash: asset.hash,
             isBuy,
@@ -5570,8 +5752,7 @@ function depositSpec() {
       if (wart + parseWartToE8(feeText) > live.available) throw new Error(insufficientMessage(live));
       const tokens = await assetBalance(hash, decimals);
       if (assetRaw > tokens.available) throw new Error(tokenShort(tokens, tokens.name));
-      const signed = signLiquidityDeposit({
-        privateKey: session.privateKey,
+      const signed = await signHeld("liquidityDeposit", {
         ...DRY,
         assetHash: hash,
         assetAmount: assetText,
@@ -5588,8 +5769,7 @@ function depositSpec() {
           if (assetRaw > again.available) throw new Error(tokenShort(again, again.name));
         },
         sign(ctx) {
-          return signLiquidityDeposit({
-            privateKey: session.privateKey,
+          return signHeld("liquidityDeposit", {
             ...ctx,
             assetHash: hash,
             assetAmount: assetText,
@@ -5619,8 +5799,7 @@ function withdrawSpec() {
       const feeText = requireFee("liq-fee");
       const wartLive = await liveBalance();
       if (parseWartToE8(feeText) > wartLive.available) throw new Error(insufficientMessage(wartLive));
-      const signed = signLiquidityWithdraw({
-        privateKey: session.privateKey,
+      const signed = await signHeld("liquidityWithdraw", {
         ...DRY,
         assetHash: hash,
         shares,
@@ -5631,8 +5810,7 @@ function withdrawSpec() {
         feeText,
         wartSpend: 0n,
         sign(ctx) {
-          return signLiquidityWithdraw({
-            privateKey: session.privateKey,
+          return signHeld("liquidityWithdraw", {
             ...ctx,
             assetHash: hash,
             shares,
@@ -5662,8 +5840,7 @@ function mintSpec() {
       const feeText = requireFee("mint-fee");
       const wartLive = await liveBalance();
       if (parseWartToE8(feeText) > wartLive.available) throw new Error(insufficientMessage(wartLive));
-      const signed = signAssetCreation({
-        privateKey: session.privateKey,
+      const signed = await signHeld("assetCreation", {
         ...DRY,
         name,
         supply,
@@ -5675,8 +5852,7 @@ function mintSpec() {
         feeText,
         wartSpend: 0n,
         sign(ctx) {
-          return signAssetCreation({
-            privateKey: session.privateKey,
+          return signHeld("assetCreation", {
             ...ctx,
             name,
             supply,
@@ -5767,12 +5943,7 @@ async function reviewOrSendEvm(event, chain) {
     return;
   }
   try {
-    const hash = await sendNativeEvm({
-      privateKey: session.evmKey,
-      to,
-      amount,
-      chain,
-    });
+    const hash = await vaultCall("sendNativeEvm", { to, amount, chain });
     $("send-review").hidden = false;
     $("send-review").textContent = `Submitted ${hash}`;
     $("send-to").value = "";
@@ -5847,8 +6018,7 @@ async function reviewOrSend(event) {
       throw new Error("Chain head is missing a pin");
     }
     const nonce = crypto.getRandomValues(new Uint32Array(1))[0];
-    const tx = signWartTransfer({
-      privateKey: session.privateKey,
+    const tx = await signHeld("transfer", {
       pinHash: chain.pinHash,
       pinHeight: chain.pinHeight,
       nonceId: nonce,
@@ -5903,8 +6073,19 @@ async function saveAccount(account, password) {
   const record = { ...sealed, address: account.address };
   if (account.phrase) record.phrase = await sealKey(account.phrase, password);
   localStorage.setItem(STORE, JSON.stringify(record));
-  startSession(account);
+  if (account.phrase) resetAccountBook(account);
+  else clearAccountBook();
+  const opened = await vaultCall("unlock", {
+    privateKey: account.privateKey,
+    phrase: account.phrase || "",
+    accountIndex: account.accountIndex || 0,
+  });
+  account.privateKey = "";
+  account.evmKey = "";
+  account.phrase = "";
+  startSession(opened);
   pendingAccount = null;
+  $("new-key").value = "";
   showOpen();
   await refreshWallet();
 }
@@ -5919,9 +6100,9 @@ function forgetWallet() {
   }
   localStorage.removeItem(SITES_KEY);
   localStorage.removeItem(STORE);
+  clearAccountBook();
+  dropSession();
   finishDapp(false);
-  session = null;
-  balance = null;
   setSetupError("");
   showSetup();
 }
@@ -6282,7 +6463,7 @@ async function handleDapp(request) {
       params: request.params,
       origin: request.origin,
       address: session.evmAddress,
-      privateKey: session.evmKey || session.privateKey,
+      signer: hogSigner,
       chain: record.chain,
       connected: record.connected,
       ask: askDapp,
@@ -6974,6 +7155,8 @@ function bind() {
   $("trade-safe").addEventListener("click", () => showWalletPage("safetrade"));
   $("trade-aave").addEventListener("click", () => showWalletPage("aave"));
   $("open-safetrade").addEventListener("click", () => openUrl("https://safetrade.com"));
+  const openAave = $("open-aave");
+  if (openAave) openAave.addEventListener("click", () => openUrl("https://app.aave.com"));
   $("swap-find").addEventListener("click", findSwapAssets);
   $("swap-max").addEventListener("click", fillSwapMax);
   $("swap-form").addEventListener("submit", (event) => reviewMarket(event, swapSpec()));
@@ -6989,6 +7172,14 @@ function bind() {
     const name = $("account-name").value.trim().slice(0, 32);
     if (name) localStorage.setItem(NAME_KEY, name);
     else localStorage.removeItem(NAME_KEY);
+    if (session && session.hasPhrase) {
+      const book = readAccountBook();
+      const index = savedAccountIndex();
+      if (book[index]) {
+        book[index].name = name || `Account ${index + 1}`;
+        writeAccountBook(book);
+      }
+    }
     $("w-title").textContent = name || "Warthog";
     $("account-label").textContent = name || "Account";
   });
@@ -6998,12 +7189,31 @@ function bind() {
     const record = savedRecord();
     if (!record) return;
     try {
-      const privateKey = await openKey(record, $("key-pass").value);
-      const account = chainAccountsFromPrivateKey(privateKey);
-      if (account.address !== record.address) throw new Error("The saved wallet did not decrypt");
-      $("revealed-key").hidden = false;
-      $("revealed-key").value = account.privateKey;
-      $("key-pass").value = "";
+      let privateKey = await openKey(record, $("key-pass").value);
+      let phrase = "";
+      let root = null;
+      try {
+        root = chainAccountsFromPrivateKey(privateKey);
+        if (root.address !== record.address) throw new Error("The saved wallet did not decrypt");
+        if (record.phrase) {
+          phrase = await openKey(record.phrase, $("key-pass").value);
+          const check = chainAccountsFromPhrase(phrase, 0);
+          check.privateKey = "";
+          check.evmKey = "";
+          check.phrase = "";
+        }
+        const shown = (await vaultCall("exportKey", {})).privateKey;
+        $("revealed-key").hidden = false;
+        $("revealed-key").value = shown;
+        $("key-pass").value = "";
+      } finally {
+        privateKey = "";
+        phrase = "";
+        if (root) {
+          root.privateKey = "";
+          root.evmKey = "";
+        }
+      }
       setTimeout(() => {
         $("revealed-key").value = "";
         $("revealed-key").hidden = true;
@@ -7012,6 +7222,76 @@ function bind() {
       $("key-error").textContent = "Wrong password.";
     }
   });
+  const phraseReveal = $("phrase-reveal-form");
+  if (phraseReveal) {
+    phraseReveal.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const error = $("phrase-error");
+      if (error) error.textContent = "";
+      const record = savedRecord();
+      if (!record || !record.phrase) return;
+      try {
+        let phrase = await openKey(record.phrase, $("phrase-pass-reveal").value);
+        let root = null;
+        try {
+          root = chainAccountsFromPhrase(phrase, 0);
+          const exported = await vaultCall("exportPhrase", {});
+          $("revealed-phrase").hidden = false;
+          $("revealed-phrase").value = exported.phrase;
+          $("phrase-pass-reveal").value = "";
+        } finally {
+          phrase = "";
+          if (root) {
+            root.privateKey = "";
+            root.evmKey = "";
+            root.phrase = "";
+          }
+        }
+        setTimeout(() => {
+          $("revealed-phrase").value = "";
+          $("revealed-phrase").hidden = true;
+        }, 20000);
+      } catch {
+        if (error) error.textContent = "Wrong password.";
+      }
+    });
+  }
+  const accountAdd = $("account-add");
+  if (accountAdd) {
+    accountAdd.addEventListener("click", async () => {
+      const note = $("account-limit");
+      try {
+        if (!session || !session.hasPhrase) return;
+        const book = readAccountBook();
+        if (book.length >= 51) return;
+        const index = book.length;
+        const next = await vaultCall("activate", { index });
+        const name = `Account ${index + 1}`;
+        book.push({ name, address: next.address });
+        writeAccountBook(book);
+        localStorage.setItem(ACCOUNT_INDEX_KEY, String(index));
+        localStorage.setItem(NAME_KEY, name);
+        $("w-title").textContent = name;
+        $("account-label").textContent = name;
+        startSession(next);
+        await refreshWallet();
+        renderAccounts();
+      } catch (error) {
+        if (note) note.textContent = error.message;
+      }
+    });
+  }
+  const accountList = $("account-list");
+  if (accountList) {
+    accountList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-account-index]");
+      if (!button || button.disabled) return;
+      const note = $("account-limit");
+      usePhraseAccount(Number(button.dataset.accountIndex)).catch((error) => {
+        if (note) note.textContent = error.message;
+      });
+    });
+  }
   $("autolock").addEventListener("change", () => {
     localStorage.setItem(LOCK_KEY, $("autolock").value);
     scheduleLock();
@@ -7051,8 +7331,8 @@ function bind() {
     }
     localStorage.setItem(NAME_KEY, name);
     $("w-title").textContent = name;
-    pendingAccount = chainAccountsFromPrivateKey(createAccount().privateKey);
-    $("new-key").value = pendingAccount.privateKey;
+    pendingAccount = createPhraseAccount();
+    $("new-key").value = pendingAccount.phrase;
     $("saved-key").checked = false;
     $("create-pass").value = "";
     $("create-pass2").value = "";
@@ -7063,7 +7343,7 @@ function bind() {
     setSetupError("");
     if (!pendingAccount) return;
     if (!$("saved-key").checked) {
-      setSetupError("Save the private key before continuing.");
+      setSetupError("Save the recovery phrase before continuing.");
       return;
     }
     const password = $("create-pass").value;
@@ -7122,13 +7402,43 @@ function bind() {
     const record = savedRecord();
     if (!record) return;
     try {
-      const privateKey = await openKey(record, $("unlock-pass").value);
-      let account = chainAccountsFromPrivateKey(privateKey);
-      if (record.phrase) account = chainAccountsFromPhrase(await openKey(record.phrase, $("unlock-pass").value));
-      if (account.address !== record.address) {
-        throw new Error("The saved wallet did not decrypt to its address");
+      let privateKey = await openKey(record, $("unlock-pass").value);
+      let phrase = "";
+      const derived = [];
+      try {
+        let account = chainAccountsFromPrivateKey(privateKey);
+        derived.push(account);
+        if (record.phrase) {
+          phrase = await openKey(record.phrase, $("unlock-pass").value);
+          const root = chainAccountsFromPhrase(phrase, 0);
+          derived.push(root);
+          if (root.address !== record.address) throw new Error("The saved wallet did not decrypt to its address");
+          if (!readAccountBook().length) resetAccountBook(root);
+          let index = savedAccountIndex();
+          const book = readAccountBook();
+          const picked = chainAccountsFromPhrase(phrase, index);
+          derived.push(picked);
+          if (!book[index] || book[index].address !== picked.address) index = 0;
+          localStorage.setItem(ACCOUNT_INDEX_KEY, String(index));
+          account = index === 0 ? root : picked;
+        } else if (account.address !== record.address) {
+          throw new Error("The saved wallet did not decrypt to its address");
+        }
+        const opened = await vaultCall("unlock", {
+          privateKey: account.privateKey,
+          phrase,
+          accountIndex: account.accountIndex || 0,
+        });
+        startSession(opened);
+      } finally {
+        privateKey = "";
+        phrase = "";
+        for (const row of derived) {
+          row.privateKey = "";
+          row.evmKey = "";
+          row.phrase = "";
+        }
       }
-      startSession(account);
       $("unlock-pass").value = "";
       showOpen();
       await refreshWallet();
@@ -7138,12 +7448,7 @@ function bind() {
   });
   $("forget").addEventListener("click", forgetWallet);
   $("forget-open").addEventListener("click", forgetWallet);
-  $("lock").addEventListener("click", () => {
-    session = null;
-    balance = null;
-    finishDapp(false);
-    showSetup();
-  });
+  $("lock").addEventListener("click", () => lockWallet());
   $("copy-address").addEventListener("click", () => {
     copyAddress($("w-addr-short"), () => shortAddress(activeAddress()));
   });
