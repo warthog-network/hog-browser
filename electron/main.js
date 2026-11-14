@@ -1024,13 +1024,9 @@ function onBookmarks(command) {
 
 const CONTAINER_ACTIONS = new Set("list add remove start stop restart logs launch create run recreate engine engine-start shell shell-close commit modprobe endpoint tailscale-up share-list share-status share-computer share-network share-remove share-publish share-pick share-drop media-open media-mkdir media-remove media-pick media-pick-folder browser-default browser-default-set browser-default-clear jellyfin-gpu jellyfin-gpu-set jellyfin-gpu-clear jellyfin-gpu-install runtime-set network-list network-create network-remove network-connect network-disconnect update-status update-check update-check-now update-install update-restart samba-status samba-save samba-on samba-off".split(" "));
 
-// The preview never installs the WebKit Hog's .deb. The default-browser
-// buttons point at the preview's own .desktop file (lib/default-browser.js).
-const PREVIEW_BLOCKED = {
-  "update-install": "Update the installed Hog from Hog itself. The Chromium preview does not install packages.",
-  "update-restart": "Restart the Chromium preview from your app menu.",
-};
-
+// The default-browser buttons point at the preview's own .desktop file
+// (lib/default-browser.js). Update actions are handled below: they must
+// not reach guard.py, which checks releases/latest (the WebKit Hog).
 function onContainers(command) {
   const first = command.indexOf(":");
   const second = command.indexOf(":", first + 1);
@@ -1040,11 +1036,8 @@ function onContainers(command) {
   if (action === "share-pick") return void pickShareFolder();
   if (action === "media-pick") return void pickLibrary("files");
   if (action === "media-pick-folder") return void pickLibrary("folder");
-  const hookName = action.startsWith("update-") ? "__hogUpdate" : action.startsWith("samba-") ? "__hogSamba" : "__hogContainers";
-  if (PREVIEW_BLOCKED[action]) {
-    hook(hookName, { ok: false, error: PREVIEW_BLOCKED[action], items: [] });
-    return;
-  }
+  if (action.startsWith("update-")) return void onPreviewUpdateAction(action);
+  const hookName = action.startsWith("samba-") ? "__hogSamba" : "__hogContainers";
   if (action.startsWith("browser-default")) {
     const job = action === "browser-default-set" ? defaultBrowser.set() : action === "browser-default-clear" ? defaultBrowser.clear() : defaultBrowser.status();
     job.then((payload) => hook(hookName, payload), (error) => hook(hookName, { ok: false, error: error.message }));
@@ -1756,6 +1749,33 @@ function sendPreviewState() {
   if (win && !win.isDestroyed()) win.webContents.send("hog:preview-state", previewState());
 }
 
+function updateUiPayload() {
+  return previewUpdate.uiPayload({
+    version: app.getVersion(),
+    found: preview.updateFound,
+    status: preview.updateStatus,
+    error: preview.updateError,
+    busy: preview.updateBusy,
+    installed: preview.updateInstalled,
+    canInstall: updateInstallable(),
+  });
+}
+
+function emitUpdateUi() {
+  sendPreviewState();
+  hook("__hogUpdate", updateUiPayload());
+}
+
+function onPreviewUpdateAction(action) {
+  if (action === "update-status") return emitUpdateUi();
+  if (action === "update-check" || action === "update-check-now") return void runUpdateCheck();
+  if (action === "update-install") return void runUpdateInstall();
+  if (action === "update-restart") {
+    if (preview.updateInstalled) relaunchSoon();
+    else emitUpdateUi();
+  }
+}
+
 async function chromeStorageRead(keys) {
   const code = `JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map((k) => [k, localStorage.getItem(k)]).filter((e) => e[1] !== null)))`;
   return JSON.parse(await win.webContents.executeJavaScript(code, true));
@@ -1825,8 +1845,9 @@ async function runWalletImport() {
 }
 
 async function runUpdateCheck() {
+  if (preview.updateBusy) return emitUpdateUi();
   preview.updateError = "";
-  preview.updateStatus = "Checking…";
+  preview.updateStatus = "Checking for a newer preview build…";
   sendPreviewState();
   try {
     const found = await previewUpdate.checkPreviewUpdate(app.getVersion());
@@ -1837,7 +1858,7 @@ async function runUpdateCheck() {
     preview.updateStatus = "";
     preview.updateError = `Could not check for preview builds (${error.message}).`;
   }
-  sendPreviewState();
+  emitUpdateUi();
 }
 
 async function runUpdateInstall() {
@@ -1846,12 +1867,12 @@ async function runUpdateInstall() {
   const can = updateInstallable();
   if (!can.ok) {
     preview.updateError = can.why;
-    return sendPreviewState();
+    return emitUpdateUi();
   }
   preview.updateBusy = true;
   preview.updateError = "";
   preview.updateStatus = `Downloading ${found.deb}…`;
-  sendPreviewState();
+  emitUpdateUi();
   let dir = "";
   try {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "hog-preview-update-"));
@@ -1863,13 +1884,13 @@ async function runUpdateInstall() {
         if (pct !== lastPct && pct % 5 === 0) {
           lastPct = pct;
           preview.updateStatus = `Downloading ${found.deb}… ${pct}%`;
-          sendPreviewState();
+          emitUpdateUi();
         }
       },
     });
     await previewUpdate.checkDebFields(file, found.version);
     preview.updateStatus = "Checked against SHA256SUMS. Enter your password in the system prompt to install…";
-    sendPreviewState();
+    emitUpdateUi();
     const result = await previewUpdate.installDeb(file);
     if (!result.ok) throw new Error(result.error);
     preview.updateInstalled = true;
@@ -1880,7 +1901,7 @@ async function runUpdateInstall() {
   } finally {
     preview.updateBusy = false;
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
-    sendPreviewState();
+    emitUpdateUi();
   }
 }
 

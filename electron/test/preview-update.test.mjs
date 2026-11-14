@@ -122,3 +122,49 @@ test("pickUpdate carries the download and SHA256SUMS links", () => {
   assert.ok(up.validDownloadUrl(best.debUrl));
   assert.ok(best.sumsUrl.endsWith("/SHA256SUMS"));
 });
+
+test("regular Updates section payload: idle, available, busy, installed", () => {
+  const version = "0.1.40-preview.7";
+  const found = {
+    version: "0.1.40-preview.8",
+    deb: "hog-chromium-preview_0.1.40-preview.8_amd64.deb",
+    url: "https://github.com/warthog-network/hog-browser/releases/tag/preview-0.1.40-8",
+  };
+  const idle = up.uiPayload({ version, canInstall: { ok: true, why: "" } });
+  assert.equal(idle.currentVersion, version);
+  assert.equal(idle.updateAvailable, false);
+  assert.equal(idle.updateCanInstall, false);
+  assert.equal(idle.updateRestart, false);
+  assert.match(idle.notice, /Chromium preview 0\.1\.40-preview\.7/);
+  assert.equal(idle.releaseUrl, up.RELEASES_PAGE);
+  assert.ok(!idle.releaseUrl.endsWith("/latest"));
+
+  const ready = up.uiPayload({ version, found, status: `Preview ${found.version} is available (${found.deb}).`, canInstall: { ok: true, why: "" } });
+  assert.equal(ready.updateAvailable, true);
+  assert.equal(ready.updateCanInstall, true);
+  assert.equal(ready.latestVersion, "0.1.40-preview.8");
+  assert.equal(ready.releaseUrl, found.url);
+  assert.equal(ready.manualCommand, `sudo apt install ./${found.deb}`);
+  assert.match(ready.notice, /Preview 0\.1\.40-preview\.8 is available/);
+
+  const busy = up.uiPayload({ version, found, status: "Downloading… 10%", busy: true, canInstall: { ok: true, why: "" } });
+  assert.equal(busy.updateCanInstall, false);
+  assert.equal(busy.updateAvailable, true);
+  assert.equal(busy.notice, "Downloading… 10%");
+
+  const unpacked = up.uiPayload({ version, found, canInstall: { ok: false, why: "Only the installed .deb can update itself. Download the new build from the release page." } });
+  assert.equal(unpacked.updateCanInstall, false);
+  assert.equal(unpacked.updateHelperReady, false);
+  assert.match(unpacked.updateHelperReason, /installed \.deb/);
+  assert.equal(unpacked.updateAvailable, true);
+
+  const done = up.uiPayload({ version, found, status: "Preview 0.1.40-preview.8 is installed. Restart the preview to use it.", installed: true, canInstall: { ok: true, why: "" } });
+  assert.equal(done.updateAvailable, false);
+  assert.equal(done.updateCanInstall, false);
+  assert.equal(done.updateRestart, true);
+  assert.equal(done.ok, true);
+
+  const fail = up.uiPayload({ version, error: "GitHub answered 500", canInstall: { ok: true, why: "" } });
+  assert.equal(fail.ok, false);
+  assert.equal(fail.error, "GitHub answered 500");
+});

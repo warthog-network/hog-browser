@@ -163,8 +163,47 @@ function installDeb(file, spawnImpl = spawn) {
   });
 }
 
+
+const RELEASES_PAGE = "https://github.com/warthog-network/hog-browser/releases";
+
+/** Shape expected by the regular Updates section (window.__hogUpdate / paintUpdate). */
+function uiPayload({
+  version,
+  found = null,
+  status = "",
+  error = "",
+  busy = false,
+  installed = false,
+  canInstall = { ok: false, why: "" },
+} = {}) {
+  const latest = (found && found.version) || "";
+  const available = Boolean(found && found.version) && !installed;
+  const helperOk = Boolean(canInstall && canInstall.ok);
+  const notice = status || (available
+    ? `Preview ${latest} is available (${found.deb}).`
+    : `This is the Chromium preview ${version}.`);
+  const page = (found && found.url) || RELEASES_PAGE;
+  return {
+    ok: !error,
+    error: error || "",
+    notice,
+    currentVersion: version || "",
+    latestVersion: latest,
+    updateAvailable: available,
+    releaseUrl: page,
+    assetName: (found && found.deb) || "",
+    manualCommand: found && found.deb ? `sudo apt install ./${found.deb}` : "",
+    updateCanInstall: Boolean(helperOk && available && !busy),
+    updateHelperReady: helperOk,
+    updateHelperReason: helperOk ? "" : (canInstall && canInstall.why) || "",
+    updateLog: "",
+    updateRestart: Boolean(installed),
+  };
+}
+
 module.exports = {
   RELEASES_URL,
+  RELEASES_PAGE,
   DOWNLOAD_PREFIX,
   parseVersion,
   compareVersions,
@@ -177,4 +216,5 @@ module.exports = {
   downloadVerified,
   checkDebFields,
   installDeb,
+  uiPayload,
 };
