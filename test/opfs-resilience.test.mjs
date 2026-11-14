@@ -13,6 +13,9 @@ import {
   applyOpfs,
   logOpfs,
   nodeRecoveryScript,
+  nodeHeadHeight,
+  nodeSyncedFlag,
+  NODE_STALL_MS,
   opfsErrorStatus,
   opfsLogInternals,
   rewriteHtml,
@@ -88,7 +91,7 @@ test("the node page gets Hog's recovery script; other sites do not", () => {
 });
 
 /** The recovery script against a fake node page. */
-function recoveryPage({ text = "", channel = true } = {}) {
+function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, head = null, running = false } = {}) {
   const store = new Map();
   const listeners = [];
   const posted = [];
@@ -96,13 +99,15 @@ function recoveryPage({ text = "", channel = true } = {}) {
   let reloads = 0;
   let clicks = 0;
   const tickers = [];
-  const button = { textContent: "Start node", disabled: false, click() { clicks += 1; } };
+  const button = { textContent: running ? "Stop node" : "Start node", disabled: false, click() { clicks += 1; } };
+  let headValue = head;
   const body = { innerText: text, appendChild() {} };
   const context = {
     Date: { now: () => now },
     JSON,
     Math,
     String,
+    Promise,
     sessionStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, String(v)),
@@ -115,6 +120,12 @@ function recoveryPage({ text = "", channel = true } = {}) {
     location: { reload() { reloads += 1; } },
     parent: { postMessage: (m) => posted.push(m) },
     setInterval: (fn) => tickers.push(fn),
+    wartNode: {
+      virtual_get: (path) => {
+        if (path !== "/chain/head") return Promise.reject(new Error("unexpected path"));
+        return Promise.resolve(headValue);
+      },
+    },
   };
   if (channel) {
     context.BroadcastChannel = class {
@@ -123,10 +134,11 @@ function recoveryPage({ text = "", channel = true } = {}) {
   }
   context.window = context;
   vm.createContext(context);
-  vm.runInContext(nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000 }), context);
+  vm.runInContext(nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000, stallMs }), context);
   return {
     body,
     button,
+    setHead(next) { headValue = next; },
     tick(ms = 2000) { now += ms; for (const fn of tickers) fn(); },
     fail() { for (const l of listeners) l.onmessage?.({ data: { type: "storage-failure" } }); },
     reloadPage() {
@@ -134,7 +146,7 @@ function recoveryPage({ text = "", channel = true } = {}) {
       tickers.length = 0;
       listeners.length = 0;
       context.window.__hogNodeRecovery = false;
-      vm.runInContext(nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000 }), context);
+      vm.runInContext(nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000, stallMs }), context);
     },
     get reloads() { return reloads; },
     get clicks() { return clicks; },
@@ -179,6 +191,81 @@ test("the node page is not restarted for corruption or for errors Hog's storage 
   notOurs.body.innerText = "SQLite disk I/O error opening chain.db3.";
   notOurs.tick();
   assert.equal(notOurs.reloads, 0, "no storage failure was reported by Hog's polyfill");
+});
+
+
+test("nodeHeadHeight reads the same payload shapes as the in-page node", () => {
+  assert.equal(nodeHeadHeight({ data: { height: 2778390, synced: false } }), 2778390);
+  assert.equal(nodeHeadHeight({ chainHead: { height: 12, synced: true } }), 12);
+  assert.equal(nodeHeadHeight('{"data":{"height":"100","synced":false}}'), 100);
+  assert.equal(nodeHeadHeight({ synced: true }), 0);
+  assert.equal(nodeSyncedFlag({ data: { height: 2778390, synced: false } }), false);
+  assert.equal(NODE_STALL_MS, 3 * 60_000);
+});
+
+test("a running unsynced node whose height is stuck is reloaded and Start is pressed", async () => {
+  const page = recoveryPage({
+    running: true,
+    stallMs: 180_000,
+    head: { data: { height: 2778390, synced: false } },
+  });
+  page.tick();
+  await Promise.resolve();
+  assert.equal(page.reloads, 0, "needs a few minutes with no progress first");
+  page.tick(120_000);
+  await Promise.resolve();
+  assert.equal(page.reloads, 0);
+  page.tick(60_000);
+  await Promise.resolve();
+  assert.equal(page.reloads, 1);
+  assert.ok(page.posted.some((m) => m.type === "node-stall-restart"));
+  page.reloadPage();
+  page.button.textContent = "Start node";
+  page.tick(30_000);
+  assert.equal(page.clicks, 0, "waits for the old storage lock to lapse");
+  page.tick(36_000);
+  assert.equal(page.clicks, 1);
+  // A second stall within the quiet window is left for the user.
+  page.button.textContent = "Stop node";
+  page.tick(180_000);
+  await Promise.resolve();
+  assert.equal(page.reloads, 1);
+});
+
+test("the stall watchdog does not restart a node that is still advancing, synced, or stopped", async () => {
+  const advancing = recoveryPage({
+    running: true,
+    stallMs: 180_000,
+    head: { data: { height: 100, synced: false } },
+  });
+  advancing.tick();
+  await Promise.resolve();
+  advancing.setHead({ data: { height: 200, synced: false } });
+  advancing.tick(180_000);
+  await Promise.resolve();
+  assert.equal(advancing.reloads, 0);
+
+  const synced = recoveryPage({
+    running: true,
+    stallMs: 60_000,
+    head: { data: { height: 2778390, synced: true } },
+  });
+  synced.tick();
+  await Promise.resolve();
+  synced.tick(120_000);
+  await Promise.resolve();
+  assert.equal(synced.reloads, 0);
+
+  const stopped = recoveryPage({
+    running: false,
+    stallMs: 60_000,
+    head: { data: { height: 2778390, synced: false } },
+  });
+  stopped.tick();
+  await Promise.resolve();
+  stopped.tick(180_000);
+  await Promise.resolve();
+  assert.equal(stopped.reloads, 0);
 });
 
 // ---------------------------------------------------------------------------

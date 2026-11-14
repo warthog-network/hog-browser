@@ -492,6 +492,23 @@ export function nodeSyncedFlag(body) {
   return flag === true || flag === 1 || flag === "1" || flag === "true";
 }
 
+/** Local chain height from the same /chain/head payload, or 0 if unknown. */
+export function nodeHeadHeight(body) {
+  let data = body;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      return 0;
+    }
+  }
+  if (!data || typeof data !== "object") return 0;
+  if (data.data && typeof data.data === "object") data = data.data;
+  const head = data.chainHead && typeof data.chainHead === "object" ? data.chainHead : data;
+  const n = Number(head.height ?? data.height);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
 export function nodeSyncScript() {
   return `(function () {
   if (window.__hogNodeSync) return;
@@ -525,13 +542,20 @@ export function nodeSyncScript() {
  * disk is intact, so Hog reloads the page and presses Start once by itself,
  * after the old threads' storage lock has lapsed. A second failure within
  * NODE_RESTART_QUIET_MS is left for the user.
+ *
+ * The same restart is used if the node stays running and unsynced but its
+ * height does not move for NODE_STALL_MS (a stuck block request or stale
+ * peer descriptor that never times out). That is the same action as Stop
+ * then Start in the node UI, after the storage lock lapses.
  */
 export const NODE_RESTART_WAIT_MS = 65_000;
 export const NODE_RESTART_QUIET_MS = 30 * 60_000;
+export const NODE_STALL_MS = 3 * 60_000;
 
 export function nodeRecoveryScript(options = {}) {
   const waitMs = Number(options.waitMs ?? NODE_RESTART_WAIT_MS);
   const quietMs = Number(options.quietMs ?? NODE_RESTART_QUIET_MS);
+  const stallMs = Number(options.stallMs ?? NODE_STALL_MS);
   const tickMs = Number(options.tickMs ?? 2000);
   return `(function () {
   if (window.__hogNodeRecovery) return;
@@ -539,8 +563,12 @@ export function nodeRecoveryScript(options = {}) {
   var KEY = "hogNodeAutoRestart";
   var WAIT_MS = ${waitMs};
   var QUIET_MS = ${quietMs};
+  var STALL_MS = ${stallMs};
   var GIVE_UP_MS = 120000;
+  var readSynced = ${nodeSyncedFlag.toString()};
+  var readHeight = ${nodeHeadHeight.toString()};
   var lastFailure = 0;
+  var stall = { height: 0, since: 0 };
   var channel = null;
   try {
     channel = new BroadcastChannel("hog-opfs");
@@ -578,7 +606,10 @@ export function nodeRecoveryScript(options = {}) {
     if (state.startAt) {
       var left = state.startAt - now;
       if (left > 0) {
-        note("Hog: a storage request failed. Your chain data is fine; restarting the node in " + Math.ceil(left / 1000) + " s.");
+        var wait = Math.ceil(left / 1000);
+        note(state.reason === "node-stall-restart"
+          ? "Hog: the node has not advanced for " + Math.round(STALL_MS / 60000) + " minutes while still syncing. Your chain data is fine; restarting the node in " + wait + " s."
+          : "Hog: a storage request failed. Your chain data is fine; restarting the node in " + wait + " s.");
         return;
       }
       var button = startButton();
@@ -594,13 +625,47 @@ export function nodeRecoveryScript(options = {}) {
       return;
     }
     var text = document.body ? String(document.body.innerText || "") : "";
-    if (!/SQLite disk I\\/O error/i.test(text)) return;
-    if (/malformed|not a database|SQLITE_CORRUPT/i.test(text)) return;
-    if (channel && now - lastFailure > GIVE_UP_MS) return;
+    if (/SQLite disk I\\/O error/i.test(text)) {
+      if (/malformed|not a database|SQLITE_CORRUPT/i.test(text)) return;
+      if (channel && now - lastFailure > GIVE_UP_MS) return;
+      beginRestart("node-storage-restart");
+      return;
+    }
+    checkStall();
+  }
+  function beginRestart(type) {
+    var state = load();
+    var now = Date.now();
+    if (state.startAt) return;
     if (state.last && now - state.last < QUIET_MS) return;
-    save({ last: now, startAt: now + WAIT_MS });
-    tell("node-storage-restart");
+    save({ last: now, startAt: now + WAIT_MS, reason: type });
+    tell(type);
     location.reload();
+  }
+  function checkStall() {
+    if (startButton()) {
+      stall = { height: 0, since: 0 };
+      return;
+    }
+    var state = load();
+    if (state.last && Date.now() - state.last < QUIET_MS) return;
+    var mod = window.wartNode || window.Module;
+    if (!mod || typeof mod.virtual_get !== "function") return;
+    Promise.resolve(mod.virtual_get("/chain/head")).then(function (raw) {
+      var synced = readSynced(raw);
+      var height = readHeight(raw);
+      var now = Date.now();
+      if (synced || !height) {
+        stall = { height: height || 0, since: now };
+        return;
+      }
+      if (stall.height !== height || !stall.since) {
+        stall = { height: height, since: now };
+        return;
+      }
+      if (now - stall.since < STALL_MS) return;
+      beginRestart("node-stall-restart");
+    }).catch(function () {});
   }
   setInterval(tick, ${tickMs});
 })();`;
