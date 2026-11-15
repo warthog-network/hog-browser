@@ -18,7 +18,18 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export NEEDRESTART_MODE=a
 
+if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
+  echo "This installer uses apt. Docker Desktop's deb package is published for Ubuntu and Debian." >&2
+  exit 1
+fi
+
+if [ ! -c /dev/kvm ]; then
+  modprobe kvm >/dev/null 2>&1 || true
+  modprobe kvm_intel >/dev/null 2>&1 || true
+  modprobe kvm_amd >/dev/null 2>&1 || true
+fi
 if [ ! -c /dev/kvm ]; then
   echo "KVM is not available (/dev/kvm is missing). Docker Desktop runs containers in a virtual machine and needs KVM. GPU passthrough uses Docker Engine on this computer instead." >&2
   exit 1
@@ -32,16 +43,16 @@ fi
 # shellcheck disable=SC1091
 . /etc/os-release
 ident="$(printf '%s' "${ID:-ubuntu}" | tr '[:upper:]' '[:lower:]')"
-if [ "$ident" != "ubuntu" ] && [ "$ident" != "debian" ]; then
-  echo "Docker Desktop's deb package is published for Ubuntu and Debian. This computer is ${ident}." >&2
-  exit 1
-fi
-if [ "$ident" = "debian" ]; then
+like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+if [ -n "${UBUNTU_CODENAME:-}" ] || [ "$ident" = "ubuntu" ] || printf '%s' " $like " | grep -q ' ubuntu '; then
+  distro="ubuntu"
+  codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+elif [ "$ident" = "debian" ] || printf '%s' " $like " | grep -q ' debian '; then
   distro="debian"
   codename="${VERSION_CODENAME:-}"
 else
-  distro="ubuntu"
-  codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+  echo "Docker Desktop's deb package is published for Ubuntu and Debian. This computer is ${ident}." >&2
+  exit 1
 fi
 if [ -z "$codename" ]; then
   echo "Could not read this distribution's version codename from /etc/os-release." >&2
@@ -57,26 +68,98 @@ case "$arch" in
     ;;
 esac
 
-echo "Installing prerequisites…"
-apt-get update
-apt-get install -y ca-certificates curl
-
-echo "Adding Docker's apt repository…"
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL --proto '=https' --tlsv1.2 -o /etc/apt/keyrings/docker.asc \
-  "https://download.docker.com/linux/${distro}/gpg"
-chmod a+r /etc/apt/keyrings/docker.asc
-printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
-  "$arch" "$distro" "$codename" > /etc/apt/sources.list.d/docker.list
-chmod a+r /etc/apt/sources.list.d/docker.list
-apt-get update
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+wrote_sources=0
+parked=""
+restore_parked() {
+  if [ "$wrote_sources" = "1" ]; then
+    return 0
+  fi
+  for f in $parked; do
+    if [ -n "$f" ] && [ ! -e "$f" ] && [ -e "${f}.hog-bak" ]; then
+      mv "${f}.hog-bak" "$f"
+    fi
+  done
+}
+trap 'rm -rf "$work"; restore_parked' EXIT
+
+for f in /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources; do
+  if [ -e "$f" ]; then
+    mv "$f" "${f}.hog-bak"
+    parked="$parked $f"
+    echo "Moved ${f} aside so an older Docker repository list cannot block apt."
+  fi
+done
+
+echo "Updating package lists…"
+if ! apt_get update; then
+  echo "apt update reported a problem. Hog will still try to install curl from the distribution repositories."
+fi
+
+echo "Installing prerequisites…"
+if ! apt_get install -y ca-certificates curl; then
+  echo "Could not install ca-certificates and curl. Another apt process may be using the lock, or a repository in /etc/apt is broken." >&2
+  exit 1
+fi
+
+echo "Adding Docker's apt repository (${distro} ${codename}, ${arch})…"
+install -m 0755 -d /etc/apt/keyrings
+if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
+  -o /etc/apt/keyrings/docker.asc \
+  "https://download.docker.com/linux/${distro}/gpg"; then
+  echo "Could not download Docker's signing key from https://download.docker.com/linux/${distro}/gpg." >&2
+  exit 1
+fi
+chmod a+r /etc/apt/keyrings/docker.asc
+cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/${distro}
+Suites: ${codename}
+Components: stable
+Architectures: ${arch}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+chmod a+r /etc/apt/sources.list.d/docker.sources
+wrote_sources=1
+rm -f /etc/apt/sources.list.d/docker.list.hog-bak /etc/apt/sources.list.d/docker.sources.hog-bak
+
+echo "Removing packages that conflict with Docker Desktop, when they are installed…"
+pkgs=""
+for pkg in docker.io docker-compose docker-compose-v2 docker-doc docker-buildx podman-docker; do
+  status="$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)"
+  case "$status" in
+    *"install ok installed"*) pkgs="$pkgs $pkg" ;;
+  esac
+done
+if [ -n "$pkgs" ]; then
+  echo "Removing:${pkgs}"
+  # shellcheck disable=SC2086
+  apt_get remove -y $pkgs
+fi
+
+if command -v snap >/dev/null 2>&1 && snap list docker >/dev/null 2>&1; then
+  echo "Disabling the Docker snap so Docker Desktop can own the docker command."
+  snap stop docker || true
+  snap disable docker || true
+fi
+
+echo "Updating package lists, including Docker's repository…"
+if ! apt_get update; then
+  echo "Docker's repository has no packages for ${distro} ${codename} (${arch}). The suite name comes from /etc/os-release." >&2
+  exit 1
+fi
+
 url="https://desktop.docker.com/linux/main/${arch}/docker-desktop-${arch}.deb"
 echo "Downloading Docker Desktop…"
-curl -fL --proto '=https' --tlsv1.2 --retry 3 --max-redirs 5 \
-  -o "$work/docker-desktop.deb" "$url"
+if ! curl -fL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 --max-redirs 5 \
+  -o "$work/docker-desktop.deb" "$url"; then
+  echo "Could not download Docker Desktop from ${url}." >&2
+  exit 1
+fi
 pkg="$(dpkg-deb -f "$work/docker-desktop.deb" Package 2>/dev/null || true)"
 if [ "$pkg" != "docker-desktop" ]; then
   echo "The downloaded file was not the Docker Desktop package." >&2
@@ -84,21 +167,29 @@ if [ "$pkg" != "docker-desktop" ]; then
 fi
 
 echo "Installing Docker Desktop. The NVIDIA runtime is not changed."
-if ! apt-get install -y "$work/docker-desktop.deb"; then
+if ! apt_get install -y "$work/docker-desktop.deb"; then
   if dpkg-query -W -f='${Status}' docker-desktop 2>/dev/null | grep -q 'install ok installed'; then
-    echo "Docker Desktop is installed."
+    echo "Docker Desktop is installed. apt reported a notice about the downloaded package. That notice is safe to ignore."
   else
+    echo "Docker Desktop did not install. The log above is apt's reason." >&2
     exit 1
   fi
 fi
 
-uid="${PKEXEC_UID:-}"
-if [ -n "$uid" ]; then
-  user="$(id -nu "$uid" 2>/dev/null || true)"
-  if [ -n "$user" ] && [ "$user" != "root" ]; then
-    echo "Adding ${user} to the kvm group…"
-    usermod -aG kvm "$user" || true
-  fi
+uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+if [ -z "$uid" ] || [ "$uid" = "0" ]; then
+  echo "Docker Desktop is installed. Hog could not see which user launched the installer, so nobody was added to the kvm group. Run sudo usermod -aG kvm USER, log out and back in, then press Start Docker." >&2
+  exit 1
+fi
+user="$(id -nu "$uid" 2>/dev/null || true)"
+if [ -z "$user" ] || [ "$user" = "root" ]; then
+  echo "Docker Desktop is installed. Hog could not map uid ${uid} to a login name. Add that user to the kvm group, log out and back in, then press Start Docker." >&2
+  exit 1
+fi
+echo "Adding ${user} to the kvm group…"
+if ! usermod -aG kvm "$user"; then
+  echo "Docker Desktop is installed, but Hog could not add ${user} to the kvm group. Run sudo usermod -aG kvm ${user}, log out and back in, then press Start Docker." >&2
+  exit 1
 fi
 
-echo "Docker Desktop is installed. It runs containers in a virtual machine, so it cannot pass through an NVIDIA GPU. Use Docker Engine for GPU acceleration. Log out and back in if Hog just added you to the kvm group, then press Start Docker."
+echo "Docker Desktop is installed. It runs containers in a virtual machine, so it cannot pass through an NVIDIA GPU. Use Docker Engine for GPU acceleration. Log out and back in so ${user} can use KVM, then press Start Docker."

@@ -17,6 +17,12 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export NEEDRESTART_MODE=a
+
+if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
+  echo "This installer uses apt. It supports Ubuntu, Debian, and Ubuntu derivatives." >&2
+  exit 1
+fi
 
 if [ ! -r /etc/os-release ]; then
   echo "Could not read /etc/os-release." >&2
@@ -26,7 +32,11 @@ fi
 # shellcheck disable=SC1091
 . /etc/os-release
 ident="$(printf '%s' "${ID:-ubuntu}" | tr '[:upper:]' '[:lower:]')"
-if [ "$ident" = "debian" ]; then
+like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+if [ -n "${UBUNTU_CODENAME:-}" ] || [ "$ident" = "ubuntu" ] || printf '%s' " $like " | grep -q ' ubuntu '; then
+  distro="ubuntu"
+  codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+elif [ "$ident" = "debian" ] || printf '%s' " $like " | grep -q ' debian '; then
   distro="debian"
   codename="${VERSION_CODENAME:-}"
 else
@@ -40,42 +50,152 @@ fi
 
 arch="$(dpkg --print-architecture)"
 case "$arch" in
-  amd64|arm64|armhf|s390x|ppc64le) ;;
+  amd64|arm64|armhf|s390x|ppc64el) ;;
   *)
-    echo "Docker Engine packages are not published for ${arch}." >&2
+    echo "Docker Engine publishes packages for amd64, arm64, armhf, s390x, and ppc64el. This computer is ${arch}." >&2
     exit 1
     ;;
 esac
 
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
+
+wrote_sources=0
+parked=""
+restore_parked() {
+  if [ "$wrote_sources" = "1" ]; then
+    return 0
+  fi
+  for f in $parked; do
+    if [ -n "$f" ] && [ ! -e "$f" ] && [ -e "${f}.hog-bak" ]; then
+      mv "${f}.hog-bak" "$f"
+    fi
+  done
+}
+trap restore_parked EXIT
+
+for f in /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources; do
+  if [ -e "$f" ]; then
+    mv "$f" "${f}.hog-bak"
+    parked="$parked $f"
+    echo "Moved ${f} aside so an older Docker repository list cannot block apt."
+  fi
+done
+
+echo "Updating package lists…"
+if ! apt_get update; then
+  echo "apt update reported a problem. Hog will still try to install curl from the distribution repositories."
+fi
+
 echo "Installing prerequisites…"
-apt-get update
-apt-get install -y ca-certificates curl
+if ! apt_get install -y ca-certificates curl; then
+  echo "Could not install ca-certificates and curl. Another apt process may be using the lock, or a repository in /etc/apt is broken." >&2
+  exit 1
+fi
 
-echo "Adding Docker's apt repository…"
+echo "Adding Docker's apt repository (${distro} ${codename}, ${arch})…"
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL --proto '=https' --tlsv1.2 -o /etc/apt/keyrings/docker.asc \
-  "https://download.docker.com/linux/${distro}/gpg"
+if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
+  -o /etc/apt/keyrings/docker.asc \
+  "https://download.docker.com/linux/${distro}/gpg"; then
+  echo "Could not download Docker's signing key from https://download.docker.com/linux/${distro}/gpg." >&2
+  exit 1
+fi
 chmod a+r /etc/apt/keyrings/docker.asc
-printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
-  "$arch" "$distro" "$codename" > /etc/apt/sources.list.d/docker.list
-chmod a+r /etc/apt/sources.list.d/docker.list
+cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/${distro}
+Suites: ${codename}
+Components: stable
+Architectures: ${arch}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+chmod a+r /etc/apt/sources.list.d/docker.sources
+wrote_sources=1
+rm -f /etc/apt/sources.list.d/docker.list.hog-bak /etc/apt/sources.list.d/docker.sources.hog-bak
 
-echo "Installing Docker Engine…"
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+echo "Removing packages that conflict with docker-ce, when they are installed…"
+pkgs=""
+for pkg in docker.io docker-compose docker-compose-v2 docker-doc docker-buildx podman-docker containerd runc; do
+  status="$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)"
+  case "$status" in
+    *"install ok installed"*) pkgs="$pkgs $pkg" ;;
+  esac
+done
+if [ -n "$pkgs" ]; then
+  echo "Removing:${pkgs}"
+  # shellcheck disable=SC2086
+  apt_get remove -y $pkgs
+fi
 
-echo "Starting docker.service. Docker Desktop is not changed."
-systemctl enable --now docker
-
-uid="${PKEXEC_UID:-}"
-if [ -n "$uid" ]; then
-  user="$(id -nu "$uid" 2>/dev/null || true)"
-  if [ -n "$user" ] && [ "$user" != "root" ]; then
-    echo "Adding ${user} to the docker group…"
-    usermod -aG docker "$user"
-    echo "Docker Engine is installed. Log out and back in so ${user} can use it."
-    exit 0
+if command -v snap >/dev/null 2>&1 && snap list docker >/dev/null 2>&1; then
+  echo "Disabling the Docker snap so docker-ce can use /var/run/docker.sock."
+  snap stop docker || true
+  snap disable docker || true
+  if ! systemctl is-active -q docker.service 2>/dev/null; then
+    rm -f /var/run/docker.sock /var/run/docker.pid
   fi
 fi
 
-echo "Docker Engine is installed. Add your user to the docker group, then log out and back in."
+echo "Updating package lists, including Docker's repository…"
+if ! apt_get update; then
+  echo "Docker's repository has no packages for ${distro} ${codename} (${arch}). The suite name comes from /etc/os-release." >&2
+  exit 1
+fi
+
+echo "Installing Docker Engine. Docker Desktop is not changed."
+if ! apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+  echo "docker-ce did not install. The log above is apt's reason. A leftover docker.io package or the Docker snap is the usual cause." >&2
+  exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "Docker Engine packages are installed, but this computer has no systemctl, so Hog could not start docker.service." >&2
+  exit 1
+fi
+
+systemctl unmask docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+systemctl reset-failed docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+systemctl enable containerd.service >/dev/null 2>&1 || true
+echo "Starting docker.service. Docker Desktop is not changed."
+if ! systemctl enable --now docker.service; then
+  journalctl -u docker.service -n 40 --no-pager >&2 || true
+  echo "Docker Engine packages are installed, but docker.service did not start. The log above is from journalctl." >&2
+  exit 1
+fi
+
+info_err="$(mktemp)"
+if command -v timeout >/dev/null 2>&1; then
+  info_ok=0
+  timeout 30 docker info >/dev/null 2>"$info_err" || info_ok=$?
+else
+  info_ok=0
+  docker info >/dev/null 2>"$info_err" || info_ok=$?
+fi
+if [ "$info_ok" -ne 0 ]; then
+  cat "$info_err" >&2 || true
+  rm -f "$info_err"
+  echo "docker.service is installed, but the docker client could not talk to it." >&2
+  exit 1
+fi
+rm -f "$info_err"
+
+if ! getent group docker >/dev/null 2>&1; then
+  echo "Docker Engine is running, but the docker group does not exist, so Hog could not grant access." >&2
+  exit 1
+fi
+
+uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+if [ -z "$uid" ] || [ "$uid" = "0" ]; then
+  echo "Docker Engine is installed and running. Hog could not see which user launched the installer, so nobody was added to the docker group. Run sudo usermod -aG docker USER, then log out and back in." >&2
+  exit 1
+fi
+user="$(id -nu "$uid" 2>/dev/null || true)"
+if [ -z "$user" ] || [ "$user" = "root" ]; then
+  echo "Docker Engine is installed and running. Hog could not map uid ${uid} to a login name. Add that user to the docker group, then log out and back in." >&2
+  exit 1
+fi
+echo "Adding ${user} to the docker group…"
+usermod -aG docker "$user"
+echo "Docker Engine is installed. Log out and back in so ${user} can use it. Docker Desktop was not removed."

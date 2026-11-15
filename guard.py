@@ -283,24 +283,39 @@ def os_release_fields():
     return fields
 
 
-def docker_engine_install_commands():
-    fields = os_release_fields()
+def docker_repo_distro(fields=None):
+    fields = os_release_fields() if fields is None else fields
     ident = str(fields.get("ID") or "ubuntu").lower()
-    distro = "debian" if ident == "debian" else "ubuntu"
-    codename_expr = '${UBUNTU_CODENAME:-$VERSION_CODENAME}' if distro == "ubuntu" else "$VERSION_CODENAME"
+    like = str(fields.get("ID_LIKE") or "").lower()
+    if fields.get("UBUNTU_CODENAME") or ident == "ubuntu" or "ubuntu" in like.split():
+        return "ubuntu", "${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+    if ident == "debian" or "debian" in like.split():
+        return "debian", "$VERSION_CODENAME"
+    return "ubuntu", "${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+
+
+def docker_engine_install_commands():
+    distro, codename_expr = docker_repo_distro()
     return [
-        "sudo apt-get update",
-        "sudo apt-get install -y ca-certificates curl",
+        "sudo apt-get -o DPkg::Lock::Timeout=300 update",
+        "sudo apt-get -o DPkg::Lock::Timeout=300 install -y ca-certificates curl",
         "sudo install -m 0755 -d /etc/apt/keyrings",
-        f"sudo curl -fsSL https://download.docker.com/linux/{distro}/gpg -o /etc/apt/keyrings/docker.asc",
+        f"sudo curl -fsSL --proto '=https' --tlsv1.2 https://download.docker.com/linux/{distro}/gpg -o /etc/apt/keyrings/docker.asc",
         "sudo chmod a+r /etc/apt/keyrings/docker.asc",
         (
-            'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] '
-            f'https://download.docker.com/linux/{distro} $(. /etc/os-release && echo "'
-            f'{codename_expr}") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null'
+            "sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF\n"
+            "Types: deb\n"
+            f"URIs: https://download.docker.com/linux/{distro}\n"
+            f'Suites: $(. /etc/os-release && echo "{codename_expr}")\n'
+            "Components: stable\n"
+            "Architectures: $(dpkg --print-architecture)\n"
+            "Signed-By: /etc/apt/keyrings/docker.asc\n"
+            "EOF"
         ),
-        "sudo apt-get update",
-        "sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+        "sudo apt-get -o DPkg::Lock::Timeout=300 update",
+        "for pkg in docker.io docker-compose docker-compose-v2 docker-doc docker-buildx podman-docker containerd runc; do sudo apt-get -o DPkg::Lock::Timeout=300 remove -y \"$pkg\" || true; done",
+        "sudo snap disable docker || true",
+        "sudo apt-get -o DPkg::Lock::Timeout=300 install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
         "sudo systemctl enable --now docker",
         'sudo usermod -aG docker "$USER"',
     ]
@@ -414,6 +429,17 @@ def privileged_argv(helper, env=None, systemd_run="/usr/bin/systemd-run", pkexec
         wrapped.append(f"--setenv={key}={value}")
     wrapped.extend(command)
     return wrapped
+
+
+def install_failure_line(log):
+    """Last useful installer line. Apt warnings and fetch progress are skipped."""
+    skipped = ("W:", "N:", "Get:", "Hit:", "Ign:", "Reading ", "Building ", "Fetched ", "Selecting ", "Preparing ", "Unpacking ", "Setting up ")
+    lines = [line.strip() for line in str(log or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith(skipped):
+            continue
+        return line[:180]
+    return "The install did not finish."
 
 
 def privileged_prompt_error(returncode, log):
@@ -2457,8 +2483,7 @@ class Guard:
             payload["notice"] = success_notice
             return payload
         payload["ok"] = False
-        detail = log.strip().splitlines()
-        message = detail[-1][:180] if detail else "The install did not finish."
+        message = install_failure_line(log)
         payload["error"] = f"{message} See the log, or copy the commands below."
         return payload
 

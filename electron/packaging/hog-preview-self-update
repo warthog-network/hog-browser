@@ -112,7 +112,7 @@ if ! dpkg --compare-versions "$got" gt "$installed"; then
 fi
 
 echo "Installing hog-chromium-preview $got over $installed…"
-apt-get install -y --no-install-recommends -- "$DEST"
+apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends -- "$DEST"
 echo "Installed hog-chromium-preview $got. Restart Hog to finish."
 rm -f -- "$DEST"
 trap - EXIT

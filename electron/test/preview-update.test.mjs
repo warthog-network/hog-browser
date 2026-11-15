@@ -120,6 +120,7 @@ test("one-click update: SHA256SUMS, package check, pkexec hand-off", async () =>
     "/usr/bin/pkexec", up.UPDATE_HELPER, "/tmp/d/x.deb",
   ]);
   assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126), helperThere, {})).error, /cancelled/);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126, "pkexec must be setuid root\n"), helperThere, {})).error, /cannot start from inside Hog/);
   assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(127, "Error executing command as another user: Not authorized\n"), helperThere, {})).error, /Not authorized/);
   assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(1, "pkexec must be setuid root\n"), (p) => p === up.UPDATE_HELPER, {})).error, /cannot start from inside Hog/);
   assert.deepEqual(calls.at(-1), ["/usr/bin/pkexec", up.UPDATE_HELPER, "/tmp/d/x.deb"]);

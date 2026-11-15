@@ -127,8 +127,8 @@ On **Settings → Containers**, the **GPU acceleration (NVIDIA)** card checks th
 
 If a check is missing and you installed Hog, the page can run a fixed root helper through `pkexec`. Ubuntu asks for your password in its own dialog. Hog never stores or types that password, and none of the helpers take arguments.
 
-- **Install Docker Engine** installs docker-ce beside Docker Desktop, starts `docker.service`, and adds you to the `docker` group. Log out and back in after it finishes. GPU passthrough uses this engine.
-- **Install Docker Desktop** installs Docker's official Desktop package. Desktop runs a virtual machine, so it cannot pass through an NVIDIA GPU. It needs KVM (`/dev/kvm`).
+- **Install Docker Engine** steps the Hog window aside, then installs docker-ce beside Docker Desktop, starts `docker.service`, and adds you to the `docker` group. It waits if apt is busy, replaces a broken Docker apt list, removes conflicting packages such as `docker.io` when they are installed, and disables the Docker snap when that snap is present. Log out and back in after it finishes. GPU passthrough uses this engine.
+- **Install Docker Desktop** steps aside the same way and installs Docker's official Desktop package. Ubuntu derivatives that set `UBUNTU_CODENAME` use that Ubuntu suite. Desktop runs a virtual machine, so it cannot pass through an NVIDIA GPU. It needs KVM (`/dev/kvm`) and loads the KVM module when the device node is missing.
 - **Install NVIDIA toolkit** installs the NVIDIA Container Toolkit, configures the Engine runtime, and restarts `docker.service` only. Docker Desktop is not changed.
 
 The same helpers are safe to run more than once. If you are running Hog from source, or `pkexec` is missing, the buttons are hidden and you can copy the commands instead. The NVIDIA driver check stays as copyable commands: replacing a working driver can change the display and needs a reboot. Hog does not install the driver from a button.

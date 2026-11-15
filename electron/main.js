@@ -1192,7 +1192,13 @@ function onContainers(command) {
     }
   }
   const emit = (payload) => hook(hookName, payload);
-  guard.handle(action, name, image, emit, emit);
+  const run = () => guard.handle(action, name, image, emit, emit);
+  // GNOME dismisses the password dialog while this window stays in front.
+  if (action === "docker-engine-install" || action === "docker-desktop-install" || action === "jellyfin-gpu-install") {
+    withPasswordPromptVisible(run);
+    return;
+  }
+  run();
 }
 
 // ---------------------------------------------------------------- window
@@ -2001,7 +2007,7 @@ async function runUpdateCheck() {
     const found = await previewUpdate.checkPreviewUpdate(app.getVersion());
     preview.updateUrl = found ? found.url : "";
     preview.updateFound = found;
-    preview.updateStatus = found ? `Preview ${found.version} is available (${found.deb}).` : `No newer preview build is published. This is ${app.getVersion()}.`;
+    preview.updateStatus = found ? `Preview ${found.version} is available (${found.deb}).` : `No newer preview build is published. This is ${app.getVersion()}, the newest one GitHub is offering.`;
   } catch (error) {
     preview.updateStatus = "";
     preview.updateError = `Could not check for preview builds (${error.message}).`;
@@ -2059,14 +2065,18 @@ async function runUpdateInstall() {
   }
 }
 
-/** GNOME dismisses the password dialog while this window stays in front. */
+/** GNOME dismisses the password dialog while this window stays in front.
+ *  Minimize, then wait long enough for the compositor to drop the window
+ *  before pkexec opens the dialog. */
 function withPasswordPromptVisible(job) {
-  if (!win || win.isDestroyed()) return job();
+  if (!win || win.isDestroyed()) return Promise.resolve().then(job);
   const full = win.isFullScreen();
   const minimized = win.isMinimized();
   if (full) win.setFullScreen(false);
+  try { win.setAlwaysOnTop(false); } catch { /* the window may not support it */ }
   if (!minimized) win.minimize();
-  return Promise.resolve()
+  win.blur();
+  return new Promise((resolve) => setTimeout(resolve, 500))
     .then(job)
     .finally(() => {
       if (!win || win.isDestroyed()) return;

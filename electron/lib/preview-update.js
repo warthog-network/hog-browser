@@ -156,13 +156,15 @@ async function checkDebFields(file, version, runner = run) {
 
 function promptFailure(code, output) {
   const text = String(output || "");
-  if (/Request dismissed/i.test(text) || code === 126) return "The password prompt was cancelled.";
-  if (/No authentication agent/i.test(text) || /textual authentication agent/i.test(text)) {
-    return "Ubuntu could not show the password prompt. Install the .deb from the release page in a terminal.";
-  }
+  // Exit 126 is also what pkexec uses when it is not setuid. The text wins,
+  // so a Hog that still has no_new_privs is not reported as a cancelled prompt.
   if (/must be setuid root/i.test(text)) {
     return "Ubuntu's password prompt cannot start from inside Hog. Install the .deb from the release page in a terminal.";
   }
+  if (/No authentication agent/i.test(text) || /textual authentication agent/i.test(text)) {
+    return "Ubuntu could not show the password prompt. Install the .deb from the release page in a terminal.";
+  }
+  if (/Request dismissed/i.test(text) || code === 126) return "The password prompt was cancelled.";
   const last = text.trim().split("\n").filter((l) => l && !/^W:/.test(l)).pop();
   if (last) return last.slice(0, 200);
   if (code === 127) return "The password prompt was not authorized.";

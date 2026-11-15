@@ -4385,8 +4385,8 @@ function paintDocker(payload) {
   if (row) row.hidden = !(showEngine || showDesktop || engineBusy || desktopBusy);
   if (hint) {
     const notes = [];
-    if (showEngine || engineBusy) notes.push("Install Docker Engine adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. GPU passthrough uses Engine.");
-    if (showDesktop || desktopBusy) notes.push("Install Docker Desktop puts containers in a virtual machine. That virtual machine cannot pass through the NVIDIA GPU.");
+    if (showEngine || engineBusy) notes.push("Install Docker Engine steps aside so Ubuntu can ask for your password, then adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. GPU passthrough uses Engine.");
+    if (showDesktop || desktopBusy) notes.push("Install Docker Desktop steps aside for Ubuntu's password dialog. Desktop puts containers in a virtual machine, and that virtual machine cannot pass through the NVIDIA GPU.");
     hint.hidden = !notes.length;
     if (notes.length) hint.textContent = notes.join(" ");
   }
@@ -8226,14 +8226,14 @@ function bind() {
   bindDockerInstall(
     "docker-engine-install",
     "containers:docker-engine-install",
-    "Install Docker Engine on this computer? Ubuntu will ask for your password. Hog adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. Docker Desktop is not removed.",
-    "Ubuntu will ask for your password. Hog is installing Docker Engine. Docker Desktop is not removed.",
+    "Install Docker Engine on this computer? Hog will step aside and Ubuntu will ask for your password. Hog adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. Docker Desktop is not removed.",
+    "Hog is stepping aside. Ubuntu will ask for your password, then install Docker Engine. Docker Desktop is not removed.",
   );
   bindDockerInstall(
     "docker-desktop-install",
     "containers:docker-desktop-install",
-    "Install Docker Desktop on this computer? Ubuntu will ask for your password. Docker Desktop runs containers in a virtual machine and cannot pass through the NVIDIA GPU.",
-    "Ubuntu will ask for your password. Hog is installing Docker Desktop. GPU passthrough stays on Docker Engine.",
+    "Install Docker Desktop on this computer? Hog will step aside and Ubuntu will ask for your password. Docker Desktop runs containers in a virtual machine and cannot pass through the NVIDIA GPU.",
+    "Hog is stepping aside. Ubuntu will ask for your password, then install Docker Desktop. GPU passthrough stays on Docker Engine.",
   );
   $("node-btn").addEventListener("click", () => openUrl("https://browser-node.netlify.app/"));
   $("clear-history").addEventListener("click", () => {

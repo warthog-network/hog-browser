@@ -28,7 +28,9 @@ from guard import (
     DOCKER_ENGINE_HELPER,
     NVIDIA_TOOLKIT_HELPER,
     docker_engine_install_commands,
+    docker_repo_distro,
     first_trusted_helper,
+    install_failure_line,
     privileged_argv,
     docker_offline,
     docker_volume_data,
@@ -1325,8 +1327,25 @@ class JellyfinGpuTest(unittest.TestCase):
     def test_install_commands_are_official(self):
         engine = "\n".join(docker_engine_install_commands())
         self.assertIn("download.docker.com/linux/", engine)
+        self.assertIn("docker.sources", engine)
         self.assertIn("docker-ce", engine)
         self.assertIn('usermod -aG docker "$USER"', engine)
+        mint, mint_suite = docker_repo_distro({
+            "ID": "linuxmint",
+            "ID_LIKE": "ubuntu",
+            "UBUNTU_CODENAME": "noble",
+            "VERSION_CODENAME": "xia",
+        })
+        self.assertEqual(mint, "ubuntu")
+        self.assertIn("UBUNTU_CODENAME", mint_suite)
+        debian, debian_suite = docker_repo_distro({"ID": "debian", "VERSION_CODENAME": "trixie"})
+        self.assertEqual(debian, "debian")
+        self.assertEqual(debian_suite, "$VERSION_CODENAME")
+        self.assertIn("wilma", install_failure_line(
+            "Reading package lists...\n"
+            "E: The repository 'https://download.docker.com/linux/ubuntu wilma Release' does not have a Release file.\n"
+            "W: Some index files failed to download.\n"
+        ))
         toolkit = "\n".join(nvidia_toolkit_install_commands())
         self.assertIn("nvidia.github.io/libnvidia-container", toolkit)
         self.assertIn("nvidia-container-toolkit", toolkit)
@@ -1697,6 +1716,7 @@ class ToolkitInstallTest(unittest.TestCase):
             guard.media_view = lambda: ("", [])
             guard.gpu_readiness = readiness
             guard.toolkit_helper_status = lambda: (True, "")
+            guard.toolkit_helper_path = lambda: NVIDIA_TOOLKIT_HELPER
             guard.run_argv = run_argv
             payload = guard.handle("jellyfin-gpu-install")
             self.assertTrue(payload["ok"], payload)
@@ -1780,11 +1800,22 @@ class ToolkitInstallTest(unittest.TestCase):
         self.assertIn("This helper takes no arguments", engine)
         self.assertIn("must run as root via pkexec", engine)
         self.assertIn("https://download.docker.com/linux/${distro}/gpg", engine)
+        self.assertIn("docker.sources", engine)
+        self.assertIn("DPkg::Lock::Timeout=300", engine)
+        self.assertIn("docker.io", engine)
+        self.assertIn("PKEXEC_UID", engine)
+        self.assertIn("ppc64el", engine)
+        self.assertNotIn("ppc64le", engine)
+        self.assertIn("snap disable docker", engine)
         self.assertIn("docker-ce", engine)
         self.assertIn("usermod -aG docker", engine)
         self.assertNotIn("desktop.docker.com", engine)
         self.assertNotIn("nvidia-ctk", engine)
         self.assertIn("https://desktop.docker.com/linux/main/${arch}/docker-desktop-${arch}.deb", desktop)
+        self.assertIn("docker.sources", desktop)
+        self.assertIn("UBUNTU_CODENAME", desktop)
+        self.assertIn("DPkg::Lock::Timeout=300", desktop)
+        self.assertIn("modprobe kvm", desktop)
         self.assertIn('pkg" != "docker-desktop"', desktop)
         self.assertIn("/dev/kvm", desktop)
         self.assertNotIn("nvidia-ctk", desktop)
@@ -1873,6 +1904,23 @@ class ToolkitInstallTest(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("cannot start from inside Hog", payload["error"])
             self.assertEqual(payload.get("dockerInstallLog", "").strip(), "pkexec must be setuid root")
+
+    def test_engine_install_reports_the_apt_line_not_the_warning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = self._quiet_guard(folder)
+            guard.docker_engine_helper_status = lambda: (True, "")
+            guard.docker_engine_helper_path = lambda: DOCKER_ENGINE_HELPER
+            guard.run_argv = lambda args, timeout=8: subprocess.CompletedProcess(
+                args,
+                1,
+                "",
+                "E: The repository 'https://download.docker.com/linux/ubuntu wilma Release' does not have a Release file.\n"
+                "W: Some index files failed to download.\n",
+            )
+            payload = guard.handle("docker-engine-install")
+            self.assertFalse(payload["ok"])
+            self.assertIn("wilma", payload["error"])
+            self.assertNotIn("Some index files", payload["error"])
 
 
 
