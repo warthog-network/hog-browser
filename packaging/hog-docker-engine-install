@@ -5,6 +5,13 @@
 # Takes no arguments. Idempotent. Does not install Docker Desktop or the NVIDIA toolkit.
 set -eu
 
+# Apt and this shell block-buffer on a pipe. Re-exec once so each line
+# reaches the Containers terminal while the install is still running.
+if [ -z "${HOG_LINE_BUFFER:-}" ] && command -v stdbuf >/dev/null 2>&1; then
+  export HOG_LINE_BUFFER=1
+  exec stdbuf -oL -eL "$0" "$@"
+fi
+
 if [ "$#" -ne 0 ]; then
   echo "This helper takes no arguments." >&2
   exit 2
@@ -14,6 +21,8 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "This helper must run as root via pkexec." >&2
   exit 1
 fi
+
+echo "Password accepted. Installing Docker Engine."
 
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -58,7 +67,11 @@ case "$arch" in
 esac
 
 apt_get() {
-  apt-get -o DPkg::Lock::Timeout=300 "$@"
+  if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf -oL -eL apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Progress-Fancy=0 "$@"
+  else
+    apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Progress-Fancy=0 "$@"
+  fi
 }
 
 wrote_sources=0

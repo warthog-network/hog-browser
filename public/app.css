@@ -334,6 +334,18 @@ button { cursor: pointer; }
   max-height: 200px;
   overflow: auto;
 }
+#docker-install-log {
+  min-height: 180px;
+  max-height: 320px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: #0e1116;
+  color: #d6deea;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
 
 .endpoint-row { max-width: 720px; margin-top: 14px; }
 .endpoint-row .row { margin-top: 8px; }

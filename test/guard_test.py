@@ -1802,6 +1802,9 @@ class ToolkitInstallTest(unittest.TestCase):
         self.assertIn("https://download.docker.com/linux/${distro}/gpg", engine)
         self.assertIn("docker.sources", engine)
         self.assertIn("DPkg::Lock::Timeout=300", engine)
+        self.assertIn("stdbuf -oL -eL", engine)
+        self.assertIn("Dpkg::Progress-Fancy=0", engine)
+        self.assertIn("Password accepted. Installing Docker Engine.", engine)
         self.assertIn("docker.io", engine)
         self.assertIn("PKEXEC_UID", engine)
         self.assertIn("ppc64el", engine)
@@ -1815,6 +1818,8 @@ class ToolkitInstallTest(unittest.TestCase):
         self.assertIn("docker.sources", desktop)
         self.assertIn("UBUNTU_CODENAME", desktop)
         self.assertIn("DPkg::Lock::Timeout=300", desktop)
+        self.assertIn("stdbuf -oL -eL", desktop)
+        self.assertIn("Password accepted. Installing Docker Desktop.", desktop)
         self.assertIn("modprobe kvm", desktop)
         self.assertIn('pkg" != "docker-desktop"', desktop)
         self.assertIn("/dev/kvm", desktop)
@@ -1855,13 +1860,13 @@ class ToolkitInstallTest(unittest.TestCase):
             guard = self._quiet_guard(folder)
             calls = []
 
-            def run_argv(args, timeout=8):
+            def run_argv_stream(args, timeout=8, on_text=None):
                 calls.append((list(args), timeout))
                 return subprocess.CompletedProcess(args, 0, "Docker Engine is installed.\n", "")
 
             guard.docker_engine_helper_status = lambda: (True, "")
             guard.docker_engine_helper_path = lambda: DOCKER_ENGINE_HELPER
-            guard.run_argv = run_argv
+            guard.run_argv_stream = run_argv_stream
             payload = guard.handle("docker-engine-install")
             self.assertTrue(payload["ok"], payload)
             self.assertEqual(calls[0][0][-2:], ["/usr/bin/pkexec", str(DOCKER_ENGINE_HELPER)])
@@ -1875,7 +1880,7 @@ class ToolkitInstallTest(unittest.TestCase):
             guard = self._quiet_guard(folder)
             calls = []
             guard.docker_desktop_helper_status = lambda: (False, "Install a Hog .deb to use this button. Until then, copy the commands below.")
-            guard.run_argv = lambda args, timeout=8: calls.append(list(args))
+            guard.run_argv_stream = lambda args, timeout=8, on_text=None: calls.append(list(args))
             payload = guard.handle("docker-desktop-install")
             self.assertFalse(payload["ok"])
             self.assertIn(".deb", payload["error"])
@@ -1886,7 +1891,7 @@ class ToolkitInstallTest(unittest.TestCase):
             guard = self._quiet_guard(folder)
             calls = []
             guard.engine_runtime_status = lambda: {"ok": True, "available": True}
-            guard.run_argv = lambda args, timeout=8: calls.append(list(args))
+            guard.run_argv_stream = lambda args, timeout=8, on_text=None: calls.append(list(args))
             payload = guard.handle("docker-engine-install")
             self.assertTrue(payload["ok"], payload)
             self.assertIn("already installed", payload["notice"])
@@ -1897,7 +1902,7 @@ class ToolkitInstallTest(unittest.TestCase):
             guard = self._quiet_guard(folder)
             guard.docker_desktop_helper_status = lambda: (True, "")
             guard.docker_desktop_helper_path = lambda: DOCKER_DESKTOP_HELPER
-            guard.run_argv = lambda args, timeout=8: subprocess.CompletedProcess(
+            guard.run_argv_stream = lambda args, timeout=8, on_text=None: subprocess.CompletedProcess(
                 args, 126, "", "pkexec must be setuid root\n"
             )
             payload = guard.handle("docker-desktop-install")
@@ -1910,7 +1915,7 @@ class ToolkitInstallTest(unittest.TestCase):
             guard = self._quiet_guard(folder)
             guard.docker_engine_helper_status = lambda: (True, "")
             guard.docker_engine_helper_path = lambda: DOCKER_ENGINE_HELPER
-            guard.run_argv = lambda args, timeout=8: subprocess.CompletedProcess(
+            guard.run_argv_stream = lambda args, timeout=8, on_text=None: subprocess.CompletedProcess(
                 args,
                 1,
                 "",
@@ -1921,6 +1926,69 @@ class ToolkitInstallTest(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("wilma", payload["error"])
             self.assertNotIn("Some index files", payload["error"])
+
+    def test_run_argv_stream_reports_output_before_the_command_exits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            seen = []
+            result = guard.run_argv_stream(
+                ["/bin/sh", "-c", "printf 'one\\n'; sleep 0.35; printf 'two\\n'"],
+                timeout=5,
+                on_text=seen.append,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(any("one" in text and "two" not in text for text in seen), seen)
+        self.assertIn("two", result.stdout)
+
+    def test_run_argv_stream_stops_the_command_on_timeout(self):
+        script = (
+            "import os,sys,time; sys.stdout.buffer.write(str(os.getpid()).encode()+b'\\n'); "
+            "sys.stdout.buffer.flush(); time.sleep(30)"
+        )
+        pid = None
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                guard = Guard(folder, docker="docker")
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    guard.run_argv_stream(["/usr/bin/python3", "-c", script], timeout=0.8)
+            pid_text = str(getattr(caught.exception, "stdout", "") or "")
+            pid = int(pid_text.splitlines()[0])
+            time.sleep(0.15)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+        finally:
+            if pid:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+
+    def test_engine_install_streams_log_lines_to_the_page(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = self._quiet_guard(folder)
+            seen = []
+
+            def run_argv_stream(args, timeout=8, on_text=None):
+                if on_text:
+                    on_text("Get:1 https://download.docker.com docker-ce\n")
+                    on_text("Get:1 https://download.docker.com docker-ce\nSetting up docker-ce\n")
+                return subprocess.CompletedProcess(args, 0, "Docker Engine is installed.\n", "")
+
+            guard.docker_engine_helper_status = lambda: (True, "")
+            guard.docker_engine_helper_path = lambda: DOCKER_ENGINE_HELPER
+            guard.run_argv_stream = run_argv_stream
+            payload = guard.handle("docker-engine-install", progress=seen.append)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(seen)
+        live = seen[-1]
+        self.assertTrue(live.get("dockerInstallLive"))
+        self.assertIsInstance(live.get("docker"), bool)
+        self.assertNotIn("ok", live)
+        self.assertNotIn("error", live)
+        self.assertNotIn("notice", live)
+        self.assertIn("Setting up docker-ce", live.get("dockerInstallLog", ""))
+        self.assertIn("Log out and back in", payload["notice"])
+        self.assertNotIn("dockerInstallLive", payload)
 
 
 

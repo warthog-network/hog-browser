@@ -4351,7 +4351,9 @@ function paintDocker(payload) {
   if (desktop.ok || payload.docker) parts.push("Docker Desktop is running.");
   else if (desktop.available) parts.push("Docker Desktop is not running. Start it here if you want Desktop containers.");
   else parts.push("Docker Desktop is not installed.");
-  state.textContent = parts.join(" ");
+  state.textContent = payload.dockerInstallLive
+    ? "Installer output is in the terminal below."
+    : parts.join(" ");
   const engineBtn = $("docker-engine-install");
   const desktopBtn = $("docker-desktop-install");
   const row = $("docker-install-row");
@@ -4364,6 +4366,11 @@ function paintDocker(payload) {
     log.hidden = !textLog;
     log.textContent = textLog;
     if (textLog) log.scrollTop = log.scrollHeight;
+    if (payload.dockerInstallLive) {
+      for (const installBtn of [engineBtn, desktopBtn]) {
+        if (installBtn && installBtn.dataset.busy === "1") installBtn.textContent = "Installing…";
+      }
+    }
     if (payload.ok === true || payload.ok === false) {
       for (const installBtn of [engineBtn, desktopBtn]) {
         if (installBtn && installBtn.dataset.busy === "1") delete installBtn.dataset.busy;
@@ -4726,6 +4733,10 @@ function renderContainers(payload) {
       && !Array.isArray(payload.shares)
       && !Array.isArray(payload.media)) {
     paintDefaultBrowser(payload);
+    return;
+  }
+  if (payload.dockerInstallLive) {
+    paintDocker(payload);
     return;
   }
   paintDocker(payload);
@@ -8216,8 +8227,8 @@ function bind() {
       const log = $("docker-install-log");
       if (error) error.textContent = "";
       if (log) {
-        log.hidden = true;
-        log.textContent = "";
+        log.hidden = false;
+        log.textContent = "Waiting for Ubuntu's password dialog…\nThe installer output will appear here.\n";
       }
       $("docker-state").textContent = waiting;
       desktopCommand(action);

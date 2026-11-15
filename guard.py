@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -1952,6 +1953,93 @@ class Guard:
             kwargs["env"] = env
         return subprocess.run(list(args), **kwargs)
 
+    def run_argv_stream(self, args, timeout=8, on_text=None):
+        """Run a command and report combined output as it arrives.
+
+        on_text receives the text so far. Callers use it to show a live
+        installer terminal. Reads the pipe directly so a text buffer cannot
+        hide lines from select. Output is capped in the caller. The process
+        is killed only when the timeout fires.
+        """
+        proc = subprocess.Popen(
+            list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        collected = bytearray()
+        started = time.monotonic()
+        last_emit = 0.0
+        timed_out = False
+        fd = proc.stdout.fileno()
+
+        def snapshot():
+            return collected.decode("utf-8", "replace")
+
+        def emit(force=False):
+            nonlocal last_emit
+            if not on_text:
+                return
+            now = time.monotonic()
+            if not force and now - last_emit < 0.12:
+                return
+            last_emit = now
+            try:
+                on_text(snapshot())
+            except Exception:
+                return
+
+        try:
+            while True:
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready, _, _ = select.select([fd], [], [], min(0.3, remaining))
+                if not ready:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                collected.extend(chunk)
+                emit()
+            if not timed_out:
+                while True:
+                    try:
+                        ready, _, _ = select.select([fd], [], [], 0)
+                    except (OSError, ValueError):
+                        break
+                    if not ready:
+                        break
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    collected.extend(chunk)
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        if timed_out:
+            proc.kill()
+            proc.wait(timeout=3)
+            raise subprocess.TimeoutExpired(list(args), timeout, output=snapshot())
+        try:
+            code = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait(timeout=3)
+        emit(force=True)
+        return subprocess.CompletedProcess(list(args), 1 if code is None else code, snapshot(), "")
+
     def run_on(self, args, timeout=8, sock=None):
         argv = [self.docker, *args]
         if sock:
@@ -2443,7 +2531,7 @@ class Guard:
             payload["error"] = f"{message} See the log, or copy the commands below."
         return payload
 
-    def _install_fixed_helper(self, status_fn, path_fn, timeout, success_notice):
+    def _install_fixed_helper(self, status_fn, path_fn, timeout, success_notice, progress=None):
         can_install, reason = status_fn()
         if not can_install:
             payload = self.engine_status()
@@ -2451,8 +2539,32 @@ class Guard:
             payload["error"] = reason
             payload["dockerInstallLog"] = ""
             return payload
+        live = {"docker": False, "dockerInstallLive": True}
         try:
-            result = self.run_argv(privileged_argv(path_fn()), timeout=timeout)
+            live["docker"] = bool(self.docker_running())
+        except Exception:
+            live["docker"] = False
+        try:
+            live.update(self.docker_install_fields())
+        except Exception:
+            pass
+
+        def emit_log(text):
+            if not progress:
+                return
+            payload = dict(live)
+            payload.pop("ok", None)
+            payload.pop("error", None)
+            payload.pop("notice", None)
+            payload["dockerInstallLog"] = (text or "")[-8000:]
+            payload["dockerInstallLive"] = True
+            try:
+                progress(payload)
+            except Exception:
+                return
+
+        try:
+            result = self.run_argv_stream(privileged_argv(path_fn()), timeout=timeout, on_text=emit_log)
         except FileNotFoundError:
             payload = self.engine_status()
             payload["ok"] = False
@@ -2487,7 +2599,7 @@ class Guard:
         payload["error"] = f"{message} See the log, or copy the commands below."
         return payload
 
-    def install_docker_engine(self):
+    def install_docker_engine(self, progress=None):
         if self.engine_runtime_status().get("ok"):
             payload = self.engine_status()
             payload["notice"] = "Docker Engine is already installed and running."
@@ -2501,9 +2613,10 @@ class Guard:
                 "Docker Engine is installed. Log out and back in so Hog can use it. "
                 "Docker Desktop was not removed. GPU passthrough uses Engine, not Desktop."
             ),
+            progress=progress,
         )
 
-    def install_docker_desktop(self):
+    def install_docker_desktop(self, progress=None):
         if self.desktop_status().get("ok"):
             payload = self.engine_status()
             payload["notice"] = "Docker Desktop is already running."
@@ -2517,6 +2630,7 @@ class Guard:
                 "Docker Desktop is installed. Press Start Docker to open it. "
                 "It runs containers in a virtual machine, so it cannot pass through the NVIDIA GPU."
             ),
+            progress=progress,
         )
 
     def _attach_gpu(self, payload):
@@ -4897,9 +5011,9 @@ class Guard:
         if action == "jellyfin-gpu-install":
             return self._mark_docker(self.install_nvidia_toolkit())
         if action == "docker-engine-install":
-            return self._mark_docker(self.install_docker_engine())
+            return self._mark_docker(self.install_docker_engine(progress=progress))
         if action == "docker-desktop-install":
-            return self._mark_docker(self.install_docker_desktop())
+            return self._mark_docker(self.install_docker_desktop(progress=progress))
         if action == "runtime-set":
             return self._mark_docker(self.set_container_runtime(name, image))
         if action == "network-list":

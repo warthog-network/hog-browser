@@ -1192,13 +1192,26 @@ function onContainers(command) {
     }
   }
   const emit = (payload) => hook(hookName, payload);
-  const run = () => guard.handle(action, name, image, emit, emit);
-  // GNOME dismisses the password dialog while this window stays in front.
+  // guard.handle returns immediately. The password window has to stay aside
+  // until the bridge reports progress or the installer finishes.
   if (action === "docker-engine-install" || action === "docker-desktop-install" || action === "jellyfin-gpu-install") {
-    withPasswordPromptVisible(run);
+    const release = beginPasswordPrompt();
+    setTimeout(() => {
+      if (!guard) {
+        release();
+        return;
+      }
+      guard.handle(action, name, image, (payload) => {
+        release();
+        emit(payload);
+      }, (payload) => {
+        release();
+        emit(payload);
+      });
+    }, 500);
     return;
   }
-  run();
+  guard.handle(action, name, image, emit, emit);
 }
 
 // ---------------------------------------------------------------- window
@@ -2065,25 +2078,33 @@ async function runUpdateInstall() {
   }
 }
 
-/** GNOME dismisses the password dialog while this window stays in front.
- *  Minimize, then wait long enough for the compositor to drop the window
- *  before pkexec opens the dialog. */
-function withPasswordPromptVisible(job) {
-  if (!win || win.isDestroyed()) return Promise.resolve().then(job);
+/** Move Hog aside so Ubuntu's password dialog is not covered. Call the
+ *  returned function to bring Hog back. A second call does nothing. */
+function beginPasswordPrompt() {
+  if (!win || win.isDestroyed()) return () => {};
   const full = win.isFullScreen();
   const minimized = win.isMinimized();
   if (full) win.setFullScreen(false);
   try { win.setAlwaysOnTop(false); } catch { /* the window may not support it */ }
   if (!minimized) win.minimize();
   win.blur();
-  return new Promise((resolve) => setTimeout(resolve, 500))
-    .then(job)
-    .finally(() => {
-      if (!win || win.isDestroyed()) return;
-      if (!minimized) win.restore();
-      if (full) win.setFullScreen(true);
-      win.focus();
-    });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (!win || win.isDestroyed()) return;
+    if (!minimized) win.restore();
+    if (full) win.setFullScreen(true);
+    win.focus();
+  };
+}
+
+/** GNOME dismisses the password dialog while this window stays in front.
+ *  Minimize, then wait long enough for the compositor to drop the window
+ *  before pkexec opens the dialog. */
+function withPasswordPromptVisible(job) {
+  const release = beginPasswordPrompt();
+  return new Promise((resolve) => setTimeout(resolve, 500)).then(job).finally(release);
 }
 
 function scheduleUpdateChecks() {
