@@ -112,12 +112,19 @@ test("one-click update: SHA256SUMS, package check, pkexec hand-off", async () =>
     return child;
   };
   const helperThere = () => true;
-  assert.deepEqual(await up.installDeb("/tmp/d/x.deb", fakeSpawn(0), helperThere), { ok: true });
-  assert.deepEqual(calls[0], ["/usr/bin/pkexec", up.UPDATE_HELPER, "/tmp/d/x.deb"]);
-  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126), helperThere)).error, /cancelled/);
-  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(127, "Error executing command as another user: Not authorized\n"), helperThere)).error, /Not authorized/);
-  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(0), () => false)).error, /helper is not installed/);
-  assert.equal((await up.installDeb("x.deb", fakeSpawn(0), helperThere)).ok, false);
+  const quietEnv = { DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0", XDG_RUNTIME_DIR: "/run/user/1000" };
+  assert.deepEqual(await up.installDeb("/tmp/d/x.deb", fakeSpawn(0), helperThere, quietEnv), { ok: true });
+  assert.deepEqual(calls[0], [
+    "/usr/bin/systemd-run", "--user", "--pipe", "--wait", "--collect", "--quiet",
+    "--setenv=DISPLAY=:0", "--setenv=WAYLAND_DISPLAY=wayland-0", "--setenv=XDG_RUNTIME_DIR=/run/user/1000",
+    "/usr/bin/pkexec", up.UPDATE_HELPER, "/tmp/d/x.deb",
+  ]);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126), helperThere, {})).error, /cancelled/);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(127, "Error executing command as another user: Not authorized\n"), helperThere, {})).error, /Not authorized/);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(1, "pkexec must be setuid root\n"), (p) => p === up.UPDATE_HELPER, {})).error, /cannot start from inside Hog/);
+  assert.deepEqual(calls.at(-1), ["/usr/bin/pkexec", up.UPDATE_HELPER, "/tmp/d/x.deb"]);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(0), () => false, {})).error, /helper is not installed/);
+  assert.equal((await up.installDeb("x.deb", fakeSpawn(0), helperThere, {})).ok, false);
   assert.equal(up.canInstallDeb({
     isPackaged: true,
     execPath: "/opt/Hog (Chromium preview)/hog-chromium-preview",

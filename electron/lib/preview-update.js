@@ -13,6 +13,11 @@ const RELEASES_URL = "https://api.github.com/repos/warthog-network/hog-browser/r
 const DEB_RE = /^hog-chromium-preview_(\d+\.\d+\.\d+(?:-preview\.\d+)?)_amd64\.deb$/;
 const DOWNLOAD_PREFIX = "https://github.com/warthog-network/hog-browser/releases/download/";
 const UPDATE_HELPER = "/usr/libexec/hog-preview-self-update";
+// Hog's own process sets no_new_privs, so a pkexec it starts directly is not
+// setuid and exits with "pkexec must be setuid root". systemd-run asks the
+// user manager to start pkexec, and that process is allowed to be setuid.
+const SYSTEMD_RUN = "/usr/bin/systemd-run";
+const SESSION_ENV = ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CURRENT_DESKTOP"];
 const MAX_DEB = 400 * 1024 * 1024;
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -155,19 +160,36 @@ function promptFailure(code, output) {
   if (/No authentication agent/i.test(text) || /textual authentication agent/i.test(text)) {
     return "Ubuntu could not show the password prompt. Install the .deb from the release page in a terminal.";
   }
+  if (/must be setuid root/i.test(text)) {
+    return "Ubuntu's password prompt cannot start from inside Hog. Install the .deb from the release page in a terminal.";
+  }
   const last = text.trim().split("\n").filter((l) => l && !/^W:/.test(l)).pop();
   if (last) return last.slice(0, 200);
   if (code === 127) return "The password prompt was not authorized.";
   return `The updater exited with ${code}`;
 }
 
+/** Arguments that start pkexec outside Hog, so the setuid bit still applies. */
+function installCommand(file, exists = fs.existsSync, env = process.env) {
+  const pkexec = ["/usr/bin/pkexec", UPDATE_HELPER, file];
+  if (!exists(SYSTEMD_RUN)) return pkexec;
+  const cmd = [SYSTEMD_RUN, "--user", "--pipe", "--wait", "--collect", "--quiet"];
+  for (const key of SESSION_ENV) {
+    const value = env[key];
+    if (typeof value === "string" && value && !/[\s\n"'\\]/.test(value)) cmd.push(`--setenv=${key}=${value}`);
+  }
+  cmd.push(...pkexec);
+  return cmd;
+}
+
 /** pkexec shows Ubuntu's password prompt; the helper installs the checked .deb. */
-function installDeb(file, spawnImpl = spawn, exists = fs.existsSync) {
+function installDeb(file, spawnImpl = spawn, exists = fs.existsSync, env = process.env) {
   return new Promise((resolve) => {
     if (!path.isAbsolute(file) || !file.endsWith(".deb")) return resolve({ ok: false, error: "Bad package path." });
     if (!exists(UPDATE_HELPER)) return resolve({ ok: false, error: "The update helper is not installed. Download the .deb from the release page and install it with apt." });
     let output = "";
-    const child = spawnImpl("/usr/bin/pkexec", [UPDATE_HELPER, file], { stdio: ["ignore", "pipe", "pipe"] });
+    const command = installCommand(file, exists, env);
+    const child = spawnImpl(command[0], command.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
     const take = (d) => (output = (output + d).slice(-2000));
     if (child.stdout) child.stdout.on("data", take);
     if (child.stderr) child.stderr.on("data", take);
@@ -222,6 +244,8 @@ module.exports = {
   RELEASES_PAGE,
   DOWNLOAD_PREFIX,
   UPDATE_HELPER,
+  SYSTEMD_RUN,
+  installCommand,
   parseVersion,
   compareVersions,
   pickUpdate,
