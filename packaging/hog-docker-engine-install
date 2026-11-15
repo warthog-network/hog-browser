@@ -178,6 +178,25 @@ if ! systemctl enable --now docker.service; then
   exit 1
 fi
 
+if ! getent group docker >/dev/null 2>&1; then
+  echo "Docker Engine is installed, but the docker group does not exist, so Hog could not grant access." >&2
+  exit 1
+fi
+
+uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+if [ -z "$uid" ] || [ "$uid" = "0" ]; then
+  echo "Docker Engine is installed. Hog could not see which account launched the installer, so nobody was added to the docker group." >&2
+  exit 1
+fi
+user="$(id -nu "$uid" 2>/dev/null || true)"
+if [ -z "$user" ] || [ "$user" = "root" ]; then
+  echo "Docker Engine is installed. Hog could not map uid ${uid} to a login name, so nobody was added to the docker group." >&2
+  exit 1
+fi
+echo "Adding ${user} to the docker group…"
+usermod -aG docker "$user"
+echo "Added ${user} to the docker group."
+
 info_err="$(mktemp)"
 if command -v timeout >/dev/null 2>&1; then
   info_ok=0
@@ -189,26 +208,8 @@ fi
 if [ "$info_ok" -ne 0 ]; then
   cat "$info_err" >&2 || true
   rm -f "$info_err"
-  echo "docker.service is installed, but the docker client could not talk to it." >&2
+  echo "docker.service is installed and ${user} is in the docker group, but the docker client could not talk to it. Log out and back in, then try again." >&2
   exit 1
 fi
 rm -f "$info_err"
-
-if ! getent group docker >/dev/null 2>&1; then
-  echo "Docker Engine is running, but the docker group does not exist, so Hog could not grant access." >&2
-  exit 1
-fi
-
-uid="${PKEXEC_UID:-${SUDO_UID:-}}"
-if [ -z "$uid" ] || [ "$uid" = "0" ]; then
-  echo "Docker Engine is installed and running. Hog could not see which user launched the installer, so nobody was added to the docker group. Run sudo usermod -aG docker USER, then log out and back in." >&2
-  exit 1
-fi
-user="$(id -nu "$uid" 2>/dev/null || true)"
-if [ -z "$user" ] || [ "$user" = "root" ]; then
-  echo "Docker Engine is installed and running. Hog could not map uid ${uid} to a login name. Add that user to the docker group, then log out and back in." >&2
-  exit 1
-fi
-echo "Adding ${user} to the docker group…"
-usermod -aG docker "$user"
 echo "Docker Engine is installed. Log out and back in so ${user} can use it. Docker Desktop was not removed."

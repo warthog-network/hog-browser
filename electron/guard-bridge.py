@@ -25,7 +25,7 @@ from guard import Guard  # noqa: E402
 
 DATA = Path(os.environ.get("HOG_DATA", Path.home() / ".local" / "share" / "hog-browser"))
 ORIGIN = os.environ.get("HOG_ORIGIN", "http://127.0.0.1:4188")
-PROGRESS_ACTIONS = {"run", "recreate", "samba-on", "docker-engine-install", "docker-desktop-install", "jellyfin-gpu-install"}
+PROGRESS_ACTIONS = {"run", "recreate", "samba-on", "docker-engine-install", "docker-desktop-install", "docker-group-join", "jellyfin-gpu-install"}
 
 _out = threading.Lock()
 

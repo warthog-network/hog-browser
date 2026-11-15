@@ -4356,29 +4356,32 @@ function paintDocker(payload) {
     : parts.join(" ");
   const engineBtn = $("docker-engine-install");
   const desktopBtn = $("docker-desktop-install");
+  const groupBtn = $("docker-group-join");
   const row = $("docker-install-row");
   const hint = $("docker-install-hint");
   const log = $("docker-install-log");
   const showEngine = Boolean(payload.dockerEngineCanInstall) && !engine.ok && !engine.available;
   const showDesktop = Boolean(payload.dockerDesktopCanInstall) && !desktop.available && !desktop.ok;
+  const showGroup = Boolean(payload.dockerGroupCanJoin);
   if (log && Object.prototype.hasOwnProperty.call(payload, "dockerInstallLog")) {
     const textLog = typeof payload.dockerInstallLog === "string" ? payload.dockerInstallLog : "";
     log.hidden = !textLog;
     log.textContent = textLog;
     if (textLog) log.scrollTop = log.scrollHeight;
     if (payload.dockerInstallLive) {
-      for (const installBtn of [engineBtn, desktopBtn]) {
+      for (const installBtn of [engineBtn, desktopBtn, groupBtn]) {
         if (installBtn && installBtn.dataset.busy === "1") installBtn.textContent = "Installing…";
       }
     }
     if (payload.ok === true || payload.ok === false) {
-      for (const installBtn of [engineBtn, desktopBtn]) {
+      for (const installBtn of [engineBtn, desktopBtn, groupBtn]) {
         if (installBtn && installBtn.dataset.busy === "1") delete installBtn.dataset.busy;
       }
     }
   }
   const engineBusy = Boolean(engineBtn && engineBtn.dataset.busy === "1");
   const desktopBusy = Boolean(desktopBtn && desktopBtn.dataset.busy === "1");
+  const groupBusy = Boolean(groupBtn && groupBtn.dataset.busy === "1");
   if (engineBtn && !engineBusy) {
     engineBtn.hidden = !showEngine;
     engineBtn.disabled = !showEngine;
@@ -4389,11 +4392,17 @@ function paintDocker(payload) {
     desktopBtn.disabled = !showDesktop;
     desktopBtn.textContent = "Install Docker Desktop";
   }
-  if (row) row.hidden = !(showEngine || showDesktop || engineBusy || desktopBusy);
+  if (groupBtn && !groupBusy) {
+    groupBtn.hidden = !showGroup;
+    groupBtn.disabled = !showGroup;
+    groupBtn.textContent = "Add me to the docker group";
+  }
+  if (row) row.hidden = !(showEngine || showDesktop || showGroup || engineBusy || desktopBusy || groupBusy);
   if (hint) {
     const notes = [];
     if (showEngine || engineBusy) notes.push("Install Docker Engine steps aside so Ubuntu can ask for your password, then adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. GPU passthrough uses Engine.");
     if (showDesktop || desktopBusy) notes.push("Install Docker Desktop steps aside for Ubuntu's password dialog. Desktop puts containers in a virtual machine, and that virtual machine cannot pass through the NVIDIA GPU.");
+    if (showGroup || groupBusy) notes.push("Add me to the docker group steps aside for Ubuntu's password dialog. Log out and back in after it finishes.");
     hint.hidden = !notes.length;
     if (notes.length) hint.textContent = notes.join(" ");
   }
@@ -8245,6 +8254,12 @@ function bind() {
     "containers:docker-desktop-install",
     "Install Docker Desktop on this computer? Hog will step aside and Ubuntu will ask for your password. Docker Desktop runs containers in a virtual machine and cannot pass through the NVIDIA GPU.",
     "Hog is stepping aside. Ubuntu will ask for your password, then install Docker Desktop. GPU passthrough stays on Docker Engine.",
+  );
+  bindDockerInstall(
+    "docker-group-join",
+    "containers:docker-group-join",
+    "Add this account to the docker group? Hog will step aside and Ubuntu will ask for your password. Log out and back in after it finishes so Docker Engine can be used.",
+    "Hog is stepping aside. Ubuntu will ask for your password, then add this account to the docker group.",
   );
   $("node-btn").addEventListener("click", () => openUrl("https://browser-node.netlify.app/"));
   $("clear-history").addEventListener("click", () => {

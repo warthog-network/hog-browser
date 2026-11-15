@@ -1825,7 +1825,15 @@ class ToolkitInstallTest(unittest.TestCase):
         self.assertIn("/dev/kvm", desktop)
         self.assertNotIn("nvidia-ctk", desktop)
         self.assertNotIn("nvidia-container-toolkit", desktop)
-        for name in ("hog-docker-engine-install", "hog-docker-desktop-install"):
+        group = (root / "packaging" / "hog-docker-group").read_text(encoding="utf-8")
+        self.assertIn("Password accepted. Adding this account to the docker group.", group)
+        self.assertIn("usermod -aG docker", group)
+        self.assertIn("PKEXEC_UID", group)
+        self.assertNotIn("apt-get", group)
+        group_policy = (root / "electron" / "packaging" / "org.hog.BrowserChromiumPreview.docker-group.policy").read_text(encoding="utf-8")
+        self.assertIn("/usr/libexec/hog-docker-group", group_policy)
+        self.assertIn("docker group", group_policy)
+        for name in ("hog-docker-engine-install", "hog-docker-desktop-install", "hog-docker-group"):
             script = root / "packaging" / name
             extra = subprocess.run([str(script), "extra"], capture_output=True, text=True, check=False)
             self.assertEqual(extra.returncode, 2, extra.stderr)
@@ -1840,8 +1848,10 @@ class ToolkitInstallTest(unittest.TestCase):
         deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
         self.assertIn("${APP}/libexec/hog-docker-engine-install", deb)
         self.assertIn("${APP}/libexec/hog-docker-desktop-install", deb)
+        self.assertIn("${APP}/libexec/hog-docker-group", deb)
         package = (root / "electron" / "package.json").read_text(encoding="utf-8")
         self.assertIn("../packaging/hog-docker-engine-install", package)
+        self.assertIn("../packaging/hog-docker-group", package)
         self.assertIn("../packaging/hog-docker-desktop-install", package)
         self.assertIn("../packaging/hog-nvidia-toolkit-install", package)
 
@@ -1989,6 +1999,73 @@ class ToolkitInstallTest(unittest.TestCase):
         self.assertIn("Setting up docker-ce", live.get("dockerInstallLog", ""))
         self.assertIn("Log out and back in", payload["notice"])
         self.assertNotIn("dockerInstallLive", payload)
+
+    def test_account_in_group_reads_the_group_file(self):
+        import grp
+        import pwd
+        pw = pwd.getpwuid(os.getuid())
+        name = grp.getgrgid(pw.pw_gid).gr_name
+        self.assertTrue(guard_module.account_in_group(name, pw.pw_name))
+        self.assertFalse(guard_module.account_in_group("hog-missing-group-xyz", pw.pw_name))
+
+    def test_group_join_uses_the_fixed_helper(self):
+        original = guard_module.account_in_group
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                guard = self._quiet_guard(folder)
+                calls = []
+
+                def run_argv_stream(args, timeout=8, on_text=None):
+                    calls.append((list(args), timeout))
+                    text = "Added whitefang to the docker group.\n"
+                    if on_text:
+                        on_text(text)
+                    return subprocess.CompletedProcess(args, 0, text, "")
+
+                guard_module.account_in_group = lambda group_name, username=None: False
+                guard._native_engine_status = lambda: {"installed": True, "ok": False, "permission": False}
+                guard.docker_group_helper_status = lambda: (True, "")
+                guard.docker_group_helper_path = lambda: Path("/usr/libexec/hog-docker-group")
+                guard.run_argv_stream = run_argv_stream
+                payload = guard.handle("docker-group-join")
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(calls[0][0][-2:], ["/usr/bin/pkexec", "/usr/libexec/hog-docker-group"])
+            self.assertEqual(calls[0][1], 60)
+            self.assertNotIn("apt-get", " ".join(calls[0][0]))
+            self.assertIn("Log out and back in", payload["notice"])
+        finally:
+            guard_module.account_in_group = original
+
+    def test_group_join_skips_when_the_account_is_already_a_member(self):
+        original = guard_module.account_in_group
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                guard = self._quiet_guard(folder)
+                calls = []
+                guard_module.account_in_group = lambda group_name, username=None: True
+                guard.run_argv_stream = lambda args, timeout=8, on_text=None: calls.append(list(args))
+                payload = guard.handle("docker-group-join")
+            self.assertTrue(payload["ok"], payload)
+            self.assertIn("already in the docker group", payload["notice"])
+            self.assertEqual(calls, [])
+        finally:
+            guard_module.account_in_group = original
+
+    def test_group_join_waits_until_engine_is_installed(self):
+        original = guard_module.account_in_group
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                guard = self._quiet_guard(folder)
+                calls = []
+                guard_module.account_in_group = lambda group_name, username=None: False
+                guard._native_engine_status = lambda: {"installed": False, "ok": False, "permission": True}
+                guard.run_argv_stream = lambda args, timeout=8, on_text=None: calls.append(list(args))
+                payload = guard.handle("docker-group-join")
+            self.assertFalse(payload["ok"])
+            self.assertIn("Install Docker Engine", payload["error"])
+            self.assertEqual(calls, [])
+        finally:
+            guard_module.account_in_group = original
 
 
 

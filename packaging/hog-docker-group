@@ -1,0 +1,48 @@
+#!/bin/sh
+# Add the account that launched Hog to the docker group.
+# Invoked only as: pkexec /usr/libexec/hog-docker-group
+# or pkexec /opt/hog-browser/libexec/hog-docker-group
+# Takes no arguments. Does not install packages.
+set -eu
+
+if [ -z "${HOG_LINE_BUFFER:-}" ] && command -v stdbuf >/dev/null 2>&1; then
+  export HOG_LINE_BUFFER=1
+  exec stdbuf -oL -eL "$0" "$@"
+fi
+
+if [ "$#" -ne 0 ]; then
+  echo "This helper takes no arguments." >&2
+  exit 2
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "This helper must run as root via pkexec." >&2
+  exit 1
+fi
+
+echo "Password accepted. Adding this account to the docker group."
+
+if ! getent group docker >/dev/null 2>&1; then
+  echo "The docker group does not exist. Install Docker Engine first." >&2
+  exit 1
+fi
+
+uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+if [ -z "$uid" ] || [ "$uid" = "0" ]; then
+  echo "Hog could not see which account launched this prompt, so nobody was added to the docker group." >&2
+  exit 1
+fi
+user="$(id -nu "$uid" 2>/dev/null || true)"
+if [ -z "$user" ] || [ "$user" = "root" ]; then
+  echo "Hog could not map uid ${uid} to a login name, so nobody was added to the docker group." >&2
+  exit 1
+fi
+
+if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  echo "${user} is already in the docker group. Log out and back in so this login can use Docker Engine."
+  exit 0
+fi
+
+echo "Adding ${user} to the docker group…"
+usermod -aG docker "$user"
+echo "Added ${user} to the docker group. Log out and back in so this login can use Docker Engine."

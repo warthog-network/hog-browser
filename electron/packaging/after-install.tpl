@@ -104,3 +104,6 @@ install_fixed "$RES/hog-docker-desktop-install" /usr/libexec/hog-docker-desktop-
 install_fixed "$RES/hog-nvidia-toolkit-install" /usr/libexec/hog-nvidia-toolkit-install \
   "$RES/hog-nvidia-toolkit-install.policy" \
   /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.nvidia-toolkit-install.policy
+install_fixed "$RES/hog-docker-group" /usr/libexec/hog-docker-group \
+  "$RES/hog-docker-group.policy" \
+  /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.docker-group.policy

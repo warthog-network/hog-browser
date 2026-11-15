@@ -86,11 +86,13 @@ PREVIEW_LIBEXEC = Path("/usr/libexec")
 WEBKIT_LIBEXEC = Path("/opt/hog-browser/libexec")
 DOCKER_ENGINE_HELPER_NAME = "hog-docker-engine-install"
 DOCKER_DESKTOP_HELPER_NAME = "hog-docker-desktop-install"
+DOCKER_GROUP_HELPER_NAME = "hog-docker-group"
 NVIDIA_TOOLKIT_HELPER_NAME = "hog-nvidia-toolkit-install"
 DOCKER_ENGINE_HELPER = PREVIEW_LIBEXEC / DOCKER_ENGINE_HELPER_NAME
 DOCKER_DESKTOP_HELPER = PREVIEW_LIBEXEC / DOCKER_DESKTOP_HELPER_NAME
 DOCKER_ENGINE_INSTALL_TIMEOUT = 900
 DOCKER_DESKTOP_INSTALL_TIMEOUT = 1200
+DOCKER_GROUP_TIMEOUT = 60
 SESSION_ENV_KEYS = (
     "DISPLAY",
     "WAYLAND_DISPLAY",
@@ -354,6 +356,33 @@ def nvidia_toolkit_install_commands(configure_only=False):
 
 def docker_group_commands():
     return ['sudo usermod -aG docker "$USER"']
+
+
+def account_in_group(group_name, username=None):
+    """True when the login is a member in the group file, including its primary group.
+
+    The current session can still lack the group until the account logs out.
+    """
+    import grp
+    import pwd
+    if username is None:
+        try:
+            username = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            return False
+    username = str(username or "")
+    if not username or username == "root":
+        return False
+    try:
+        group = grp.getgrnam(str(group_name))
+    except KeyError:
+        return False
+    if username in group.gr_mem:
+        return True
+    try:
+        return pwd.getpwnam(username).pw_gid == group.gr_gid
+    except KeyError:
+        return False
 
 
 def packaged_helper_status(path, pkexec_path=None, missing=None):
@@ -2206,10 +2235,16 @@ class Guard:
             status["detail"] = "Native Docker Engine is installed and running."
         elif engine.get("installed") and not engine.get("permission", True):
             status["available"] = True
-            status["detail"] = (
-                "Docker Engine is installed, but this user cannot use /var/run/docker.sock. "
-                "Add the user to the docker group, then log out and back in."
-            )
+            if account_in_group("docker"):
+                status["detail"] = (
+                    "Docker Engine is installed and this account is in the docker group. "
+                    "Log out and back in so this login can use it."
+                )
+            else:
+                status["detail"] = (
+                    "Docker Engine is installed. Add this account to the docker group. "
+                    "Ubuntu will ask for your password. Then log out and back in."
+                )
         elif engine.get("installed"):
             status["detail"] = "Docker Engine is installed but not running."
         else:
@@ -2375,8 +2410,18 @@ class Guard:
             engine_detail = "Native Docker Engine is installed and running (separate from Docker Desktop)."
             engine_commands = []
         elif engine.get("installed") and not in_group:
-            engine_detail = "Docker Engine is installed, but this user cannot use /var/run/docker.sock. Add the user to the docker group, then log out and back in."
-            engine_commands = docker_group_commands()
+            if account_in_group("docker"):
+                engine_detail = (
+                    "Docker Engine is installed and this account is in the docker group. "
+                    "Log out and back in so this login can use it."
+                )
+                engine_commands = []
+            else:
+                engine_detail = (
+                    "Docker Engine is installed. Add this account to the docker group. "
+                    "Ubuntu will ask for your password. Then log out and back in."
+                )
+                engine_commands = docker_group_commands()
         elif engine.get("installed"):
             engine_detail = "Docker Engine is installed but not running, or it is Docker Desktop's socket rather than docker-ce."
             engine_commands = ["sudo systemctl enable --now docker"]
@@ -2447,6 +2492,13 @@ class Guard:
         path, _reason = first_trusted_helper(DOCKER_DESKTOP_HELPER_NAME)
         return path or DOCKER_DESKTOP_HELPER
 
+    def docker_group_helper_status(self):
+        return helper_ready(DOCKER_GROUP_HELPER_NAME)
+
+    def docker_group_helper_path(self):
+        path, _reason = first_trusted_helper(DOCKER_GROUP_HELPER_NAME)
+        return path or (PREVIEW_LIBEXEC / DOCKER_GROUP_HELPER_NAME)
+
     def docker_install_fields(self):
         try:
             engine = self.engine_runtime_status()
@@ -2460,9 +2512,17 @@ class Guard:
         desktop_can, _desktop_reason = self.docker_desktop_helper_status()
         engine_installed = bool(engine.get("available") or engine.get("ok"))
         desktop_installed = bool(desktop.get("available") or desktop.get("ok"))
+        needs_group = bool(
+            engine.get("available")
+            and not engine.get("ok")
+            and not engine.get("permission", True)
+            and not account_in_group("docker")
+        )
+        group_can, _group_reason = self.docker_group_helper_status()
         return {
             "dockerEngineCanInstall": bool(engine_can) and not engine_installed,
             "dockerDesktopCanInstall": bool(desktop_can) and not desktop_installed,
+            "dockerGroupCanJoin": bool(group_can) and needs_group,
         }
 
     def install_nvidia_toolkit(self):
@@ -2599,6 +2659,30 @@ class Guard:
         payload["error"] = f"{message} See the log, or copy the commands below."
         return payload
 
+    def install_docker_group(self, progress=None):
+        if account_in_group("docker"):
+            payload = self.engine_status()
+            payload["notice"] = (
+                "This account is already in the docker group. "
+                "Log out and back in so this login can use Docker Engine."
+            )
+            payload["dockerInstallLog"] = ""
+            return payload
+        engine = self._native_engine_status()
+        if not engine.get("installed"):
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "Install Docker Engine first. That install also adds this account to the docker group."
+            payload["dockerInstallLog"] = ""
+            return payload
+        return self._install_fixed_helper(
+            self.docker_group_helper_status,
+            self.docker_group_helper_path,
+            DOCKER_GROUP_TIMEOUT,
+            "This account is in the docker group. Log out and back in so this login can use Docker Engine.",
+            progress=progress,
+        )
+
     def install_docker_engine(self, progress=None):
         if self.engine_runtime_status().get("ok"):
             payload = self.engine_status()
@@ -2651,6 +2735,7 @@ class Guard:
         except Exception:
             payload.setdefault("dockerEngineCanInstall", False)
             payload.setdefault("dockerDesktopCanInstall", False)
+            payload.setdefault("dockerGroupCanJoin", False)
         try:
             payload.update(self.runtime_fields())
         except Exception:
@@ -5014,6 +5099,8 @@ class Guard:
             return self._mark_docker(self.install_docker_engine(progress=progress))
         if action == "docker-desktop-install":
             return self._mark_docker(self.install_docker_desktop(progress=progress))
+        if action == "docker-group-join":
+            return self._mark_docker(self.install_docker_group(progress=progress))
         if action == "runtime-set":
             return self._mark_docker(self.set_container_runtime(name, image))
         if action == "network-list":
