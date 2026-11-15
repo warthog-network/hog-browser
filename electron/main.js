@@ -474,8 +474,9 @@ function fetchMiningToken() {
 
 function prepareChromeSession(ses) {
   ses.setUserAgent(app.userAgentFallback);
-  // Isolated world for the node iframe only. mining-preload.js ignores every
-  // other frame. Do not enable nodeIntegrationInSubFrames on this window.
+  // The node tab is an iframe. This session preload runs there only because
+  // the Hog window sets nodeIntegrationInSubFrames. mining-preload.js ignores
+  // every other frame, and the mining token stays out of the page.
   try {
     ses.registerPreloadScript({ type: "frame", filePath: path.join(__dirname, "mining-preload.js") });
   } catch (error) {
@@ -1797,6 +1798,11 @@ function createWindow() {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
+      // Session preloads do not run in iframes without this. The node tab is
+      // an iframe, and that is the only place the mining socket can run.
+      // chrome-preload.js still exposes the Hog bridge only on the top Hog UI
+      // frame, so the node page does not get it.
+      nodeIntegrationInSubFrames: true,
       spellcheck: true,
       backgroundThrottling: false, // the node tab keeps syncing while hidden
     },

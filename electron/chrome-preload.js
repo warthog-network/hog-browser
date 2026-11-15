@@ -4,6 +4,20 @@
 // window.webkit.messageHandlers.hogwin.postMessage(command).
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
+// This file is also loaded in iframes because the Hog window enables
+// nodeIntegrationInSubFrames so the mining preload can run in the node tab.
+// Expose the Hog bridge only on the top Hog UI frame.
+function hogUiTopFrame() {
+  try {
+    if (window !== window.top) return false;
+    const url = new URL(location.href);
+    return url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost");
+  } catch {
+    return false;
+  }
+}
+
+if (hogUiTopFrame()) {
 contextBridge.exposeInMainWorld("__hogDesktop", true);
 contextBridge.exposeInMainWorld("__hogPageSandbox", true);
 contextBridge.exposeInMainWorld("__hogChromium", true);
@@ -298,3 +312,4 @@ window.addEventListener("DOMContentLoaded", () => {
   ensurePreviewCard();
   new MutationObserver(() => ensurePreviewCard()).observe(document.body, { childList: true, subtree: true });
 });
+}
