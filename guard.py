@@ -81,6 +81,23 @@ NVIDIA_CAPS_ENV = "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility"
 NVIDIA_DEV_RE = re.compile(r"^/dev/nvidia[A-Za-z0-9_/-]*$")
 NVIDIA_TOOLKIT_HELPER = Path("/opt/hog-browser/libexec/hog-nvidia-toolkit-install")
 NVIDIA_TOOLKIT_INSTALL_TIMEOUT = 600
+PREVIEW_LIBEXEC = Path("/usr/libexec")
+WEBKIT_LIBEXEC = Path("/opt/hog-browser/libexec")
+DOCKER_ENGINE_HELPER_NAME = "hog-docker-engine-install"
+DOCKER_DESKTOP_HELPER_NAME = "hog-docker-desktop-install"
+NVIDIA_TOOLKIT_HELPER_NAME = "hog-nvidia-toolkit-install"
+DOCKER_ENGINE_HELPER = PREVIEW_LIBEXEC / DOCKER_ENGINE_HELPER_NAME
+DOCKER_DESKTOP_HELPER = PREVIEW_LIBEXEC / DOCKER_DESKTOP_HELPER_NAME
+DOCKER_ENGINE_INSTALL_TIMEOUT = 900
+DOCKER_DESKTOP_INSTALL_TIMEOUT = 1200
+SESSION_ENV_KEYS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_CURRENT_DESKTOP",
+)
+HELPER_MISSING = "Install a Hog .deb to use this button. Until then, copy the commands below."
 SELF_UPDATE_HELPER = Path("/opt/hog-browser/libexec/hog-self-update")
 SELF_UPDATE_TIMEOUT = 600
 UPDATE_CACHE_TTL = 24 * 60 * 60
@@ -323,13 +340,10 @@ def docker_group_commands():
     return ['sudo usermod -aG docker "$USER"']
 
 
-def nvidia_toolkit_helper_status(path=None, pkexec_path=None, missing=None):
-    helper = Path(path) if path is not None else NVIDIA_TOOLKIT_HELPER
+def packaged_helper_status(path, pkexec_path=None, missing=None):
+    helper = Path(path)
     if not helper.is_file():
-        return False, missing or (
-            "Install the hog-browser .deb to install the toolkit from this button. "
-            "Until then, copy the commands below."
-        )
+        return False, missing or HELPER_MISSING
     pkexec = pkexec_path if pkexec_path is not None else shutil.which("pkexec")
     if not pkexec:
         return False, (
@@ -341,12 +355,80 @@ def nvidia_toolkit_helper_status(path=None, pkexec_path=None, missing=None):
     except OSError:
         return False, "The packaged helper could not be read. Use the command below."
     if st.st_uid != 0:
-        return False, "The packaged helper is not the root helper from the hog-browser .deb. Use the command below."
+        return False, "The packaged helper is not the root helper from the Hog .deb. Use the command below."
     if st.st_mode & 0o022:
         return False, "The packaged helper is writable and will not be run. Use the command below."
     if not os.access(helper, os.X_OK):
         return False, "The packaged helper is not executable. Use the command below."
     return True, ""
+
+
+def helper_candidates(name, roots=None):
+    bases = (PREVIEW_LIBEXEC, WEBKIT_LIBEXEC) if roots is None else tuple(roots)
+    return [Path(root) / name for root in bases]
+
+
+def first_trusted_helper(name, roots=None, pkexec_path=None):
+    """Return the first root-owned helper, preferring the preview libexec path."""
+    last = HELPER_MISSING
+    saw = False
+    for path in helper_candidates(name, roots):
+        if not path.is_file():
+            continue
+        saw = True
+        ok, reason = packaged_helper_status(path, pkexec_path=pkexec_path)
+        if ok:
+            return path, ""
+        last = reason
+    if not saw:
+        return None, HELPER_MISSING
+    return None, last
+
+
+def helper_ready(name, roots=None, pkexec_path=None):
+    path, reason = first_trusted_helper(name, roots=roots, pkexec_path=pkexec_path)
+    return path is not None, reason if path is None else ""
+
+
+def nvidia_toolkit_helper_status(path=None, pkexec_path=None, missing=None):
+    if path is None:
+        return helper_ready(NVIDIA_TOOLKIT_HELPER_NAME, pkexec_path=pkexec_path)
+    return packaged_helper_status(path, pkexec_path=pkexec_path, missing=missing)
+
+
+def privileged_argv(helper, env=None, systemd_run="/usr/bin/systemd-run", pkexec="/usr/bin/pkexec"):
+    """Start pkexec from the user manager so Hog's no_new_privs bit does not apply.
+
+    A pkexec Hog spawns directly is not setuid and exits with
+    "pkexec must be setuid root". systemd-run --user asks systemd to start it.
+    """
+    env = os.environ if env is None else env
+    command = [pkexec, str(helper)]
+    if not Path(systemd_run).is_file():
+        return command
+    wrapped = [str(systemd_run), "--user", "--pipe", "--wait", "--collect", "--quiet"]
+    for key in SESSION_ENV_KEYS:
+        value = env.get(key) if isinstance(env, dict) else ""
+        if not isinstance(value, str) or not value or re.search(r"[\s\n'\"\\]", value):
+            continue
+        wrapped.append(f"--setenv={key}={value}")
+    wrapped.extend(command)
+    return wrapped
+
+
+def privileged_prompt_error(returncode, log):
+    text = log or ""
+    if re.search(r"must be setuid root", text, re.I):
+        return (
+            "Ubuntu's password prompt cannot start from inside Hog. "
+            "Install the latest Hog preview from a terminal, then try again."
+        )
+    if returncode in {126, 127} or re.search(r"Request dismissed|not authorized", text, re.I):
+        return (
+            "The password prompt was dismissed or pkexec could not start the installer. "
+            "Try again, or copy the commands below."
+        )
+    return ""
 
 
 def hog_version(root=None):
@@ -2231,7 +2313,43 @@ class Guard:
         }
 
     def toolkit_helper_status(self):
-        return nvidia_toolkit_helper_status()
+        return helper_ready(NVIDIA_TOOLKIT_HELPER_NAME)
+
+    def toolkit_helper_path(self):
+        path, _reason = first_trusted_helper(NVIDIA_TOOLKIT_HELPER_NAME)
+        return path or NVIDIA_TOOLKIT_HELPER
+
+    def docker_engine_helper_status(self):
+        return helper_ready(DOCKER_ENGINE_HELPER_NAME)
+
+    def docker_engine_helper_path(self):
+        path, _reason = first_trusted_helper(DOCKER_ENGINE_HELPER_NAME)
+        return path or DOCKER_ENGINE_HELPER
+
+    def docker_desktop_helper_status(self):
+        return helper_ready(DOCKER_DESKTOP_HELPER_NAME)
+
+    def docker_desktop_helper_path(self):
+        path, _reason = first_trusted_helper(DOCKER_DESKTOP_HELPER_NAME)
+        return path or DOCKER_DESKTOP_HELPER
+
+    def docker_install_fields(self):
+        try:
+            engine = self.engine_runtime_status()
+        except Exception:
+            engine = {}
+        try:
+            desktop = self.desktop_status()
+        except Exception:
+            desktop = {}
+        engine_can, _engine_reason = self.docker_engine_helper_status()
+        desktop_can, _desktop_reason = self.docker_desktop_helper_status()
+        engine_installed = bool(engine.get("available") or engine.get("ok"))
+        desktop_installed = bool(desktop.get("available") or desktop.get("ok"))
+        return {
+            "dockerEngineCanInstall": bool(engine_can) and not engine_installed,
+            "dockerDesktopCanInstall": bool(desktop_can) and not desktop_installed,
+        }
 
     def install_nvidia_toolkit(self):
         can_install, reason = self.toolkit_helper_status()
@@ -2251,7 +2369,7 @@ class Guard:
             return payload
         try:
             result = self.run_argv(
-                ["pkexec", str(NVIDIA_TOOLKIT_HELPER)],
+                privileged_argv(self.toolkit_helper_path()),
                 timeout=NVIDIA_TOOLKIT_INSTALL_TIMEOUT,
             )
         except FileNotFoundError:
@@ -2282,12 +2400,10 @@ class Guard:
             )
             payload["error"] = ""
             return payload
-        if result.returncode in {126, 127}:
+        prompt_error = privileged_prompt_error(result.returncode, log)
+        if prompt_error:
             payload["ok"] = False
-            payload["error"] = (
-                "The password prompt was dismissed or pkexec could not start the installer. "
-                "Try again, or copy the commands below."
-            )
+            payload["error"] = prompt_error
             return payload
         payload["ok"] = False
         if result.returncode == 0 and not ready:
@@ -2300,6 +2416,83 @@ class Guard:
             message = detail[-1][:180] if detail else "The toolkit install did not finish."
             payload["error"] = f"{message} See the log, or copy the commands below."
         return payload
+
+    def _install_fixed_helper(self, status_fn, path_fn, timeout, success_notice):
+        can_install, reason = status_fn()
+        if not can_install:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = reason
+            payload["dockerInstallLog"] = ""
+            return payload
+        try:
+            result = self.run_argv(privileged_argv(path_fn()), timeout=timeout)
+        except FileNotFoundError:
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = (
+                "pkexec is not installed, so Hog cannot open a password prompt. "
+                "Copy the commands below, or install pkexec (policykit-1)."
+            )
+            payload["dockerInstallLog"] = ""
+            return payload
+        except subprocess.TimeoutExpired as exc:
+            output = f"{getattr(exc, 'stdout', '') or ''}{getattr(exc, 'stderr', '') or ''}".strip()
+            payload = self.engine_status()
+            payload["ok"] = False
+            payload["error"] = "The install took too long. Copy the commands below, or try again."
+            payload["dockerInstallLog"] = output[-8000:]
+            return payload
+        log = f"{result.stdout or ''}{result.stderr or ''}".strip()
+        payload = self.engine_status()
+        payload["dockerInstallLog"] = log[-8000:]
+        prompt_error = privileged_prompt_error(result.returncode, log)
+        if prompt_error:
+            payload["ok"] = False
+            payload["error"] = prompt_error
+            return payload
+        if result.returncode == 0:
+            payload["ok"] = True
+            payload["error"] = ""
+            payload["notice"] = success_notice
+            return payload
+        payload["ok"] = False
+        detail = log.strip().splitlines()
+        message = detail[-1][:180] if detail else "The install did not finish."
+        payload["error"] = f"{message} See the log, or copy the commands below."
+        return payload
+
+    def install_docker_engine(self):
+        if self.engine_runtime_status().get("ok"):
+            payload = self.engine_status()
+            payload["notice"] = "Docker Engine is already installed and running."
+            payload["dockerInstallLog"] = ""
+            return payload
+        return self._install_fixed_helper(
+            self.docker_engine_helper_status,
+            self.docker_engine_helper_path,
+            DOCKER_ENGINE_INSTALL_TIMEOUT,
+            (
+                "Docker Engine is installed. Log out and back in so Hog can use it. "
+                "Docker Desktop was not removed. GPU passthrough uses Engine, not Desktop."
+            ),
+        )
+
+    def install_docker_desktop(self):
+        if self.desktop_status().get("ok"):
+            payload = self.engine_status()
+            payload["notice"] = "Docker Desktop is already running."
+            payload["dockerInstallLog"] = ""
+            return payload
+        return self._install_fixed_helper(
+            self.docker_desktop_helper_status,
+            self.docker_desktop_helper_path,
+            DOCKER_DESKTOP_INSTALL_TIMEOUT,
+            (
+                "Docker Desktop is installed. Press Start Docker to open it. "
+                "It runs containers in a virtual machine, so it cannot pass through the NVIDIA GPU."
+            ),
+        )
 
     def _attach_gpu(self, payload):
         if not isinstance(payload, dict):
@@ -2314,6 +2507,11 @@ class Guard:
             payload.setdefault("jellyfinGpu", self.gpu_enabled())
             payload.setdefault("jellyfinGpuReady", False)
             payload.setdefault("jellyfinGpuChecks", [])
+        try:
+            payload.update(self.docker_install_fields())
+        except Exception:
+            payload.setdefault("dockerEngineCanInstall", False)
+            payload.setdefault("dockerDesktopCanInstall", False)
         try:
             payload.update(self.runtime_fields())
         except Exception:
@@ -4673,6 +4871,10 @@ class Guard:
             return self._mark_docker(self.set_jellyfin_gpu(False))
         if action == "jellyfin-gpu-install":
             return self._mark_docker(self.install_nvidia_toolkit())
+        if action == "docker-engine-install":
+            return self._mark_docker(self.install_docker_engine())
+        if action == "docker-desktop-install":
+            return self._mark_docker(self.install_docker_desktop())
         if action == "runtime-set":
             return self._mark_docker(self.set_container_runtime(name, image))
         if action == "network-list":

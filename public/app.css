@@ -173,7 +173,7 @@ button { cursor: pointer; }
   margin-top: 10px;
 }
 .engine-row .note { margin: 0; flex: 1; }
-#start-docker, #load-wireguard {
+#start-docker, #docker-engine-install, #docker-desktop-install, #load-wireguard {
   border: 1px solid rgba(var(--accent-rgb), 0.55);
   background: var(--panel);
   color: var(--gold);
@@ -181,7 +181,9 @@ button { cursor: pointer; }
   padding: 8px 14px;
   white-space: nowrap;
 }
-#start-docker:disabled, #load-wireguard:disabled, #endpoint-lan:disabled, #endpoint-public:disabled, #tailscale-up:disabled, #share-publish:disabled, #share-enable:disabled, .share-card:disabled { opacity: 0.6; cursor: wait; }
+#start-docker:disabled, #docker-engine-install:disabled, #docker-desktop-install:disabled, #load-wireguard:disabled, #endpoint-lan:disabled, #endpoint-public:disabled, #tailscale-up:disabled, #share-publish:disabled, #share-enable:disabled, .share-card:disabled { opacity: 0.6; cursor: wait; }
+#docker-install-row { margin-top: 8px; }
+#docker-install-hint { max-width: 640px; }
 #tailscale-setup { margin: 4px 0 10px; }
 #tailscale-setup #tailscale-up { margin-top: 6px; }
 #tailscale-login-link { display: inline-block; margin: 8px 0 0 10px; vertical-align: middle; }

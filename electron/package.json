@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.40-preview.18",
+  "version": "0.1.40-preview.19",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",
@@ -73,6 +73,30 @@
       {
         "from": "packaging/hog-miner.sudoers",
         "to": "hog-miner.sudoers"
+      },
+      {
+        "from": "../packaging/hog-docker-engine-install",
+        "to": "hog-docker-engine-install"
+      },
+      {
+        "from": "../packaging/hog-docker-desktop-install",
+        "to": "hog-docker-desktop-install"
+      },
+      {
+        "from": "../packaging/hog-nvidia-toolkit-install",
+        "to": "hog-nvidia-toolkit-install"
+      },
+      {
+        "from": "packaging/org.hog.BrowserChromiumPreview.docker-engine-install.policy",
+        "to": "hog-docker-engine-install.policy"
+      },
+      {
+        "from": "packaging/org.hog.BrowserChromiumPreview.docker-desktop-install.policy",
+        "to": "hog-docker-desktop-install.policy"
+      },
+      {
+        "from": "packaging/org.hog.BrowserChromiumPreview.nvidia-toolkit-install.policy",
+        "to": "hog-nvidia-toolkit-install.policy"
       }
     ],
     "asar": true,

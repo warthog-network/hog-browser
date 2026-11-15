@@ -1,0 +1,104 @@
+#!/bin/sh
+# Install Docker Desktop for Linux from Docker's published package.
+# Invoked only as: pkexec /usr/libexec/hog-docker-desktop-install
+# or pkexec /opt/hog-browser/libexec/hog-docker-desktop-install
+# Takes no arguments. Does not configure the NVIDIA runtime.
+# Docker Desktop runs a virtual machine and cannot pass through an NVIDIA GPU.
+set -eu
+
+if [ "$#" -ne 0 ]; then
+  echo "This helper takes no arguments." >&2
+  exit 2
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "This helper must run as root via pkexec." >&2
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+if [ ! -c /dev/kvm ]; then
+  echo "KVM is not available (/dev/kvm is missing). Docker Desktop runs containers in a virtual machine and needs KVM. GPU passthrough uses Docker Engine on this computer instead." >&2
+  exit 1
+fi
+
+if [ ! -r /etc/os-release ]; then
+  echo "Could not read /etc/os-release." >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1091
+. /etc/os-release
+ident="$(printf '%s' "${ID:-ubuntu}" | tr '[:upper:]' '[:lower:]')"
+if [ "$ident" != "ubuntu" ] && [ "$ident" != "debian" ]; then
+  echo "Docker Desktop's deb package is published for Ubuntu and Debian. This computer is ${ident}." >&2
+  exit 1
+fi
+if [ "$ident" = "debian" ]; then
+  distro="debian"
+  codename="${VERSION_CODENAME:-}"
+else
+  distro="ubuntu"
+  codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+fi
+if [ -z "$codename" ]; then
+  echo "Could not read this distribution's version codename from /etc/os-release." >&2
+  exit 1
+fi
+
+arch="$(dpkg --print-architecture)"
+case "$arch" in
+  amd64|arm64) ;;
+  *)
+    echo "Docker Desktop publishes packages for amd64 and arm64. This computer is ${arch}." >&2
+    exit 1
+    ;;
+esac
+
+echo "Installing prerequisites…"
+apt-get update
+apt-get install -y ca-certificates curl
+
+echo "Adding Docker's apt repository…"
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL --proto '=https' --tlsv1.2 -o /etc/apt/keyrings/docker.asc \
+  "https://download.docker.com/linux/${distro}/gpg"
+chmod a+r /etc/apt/keyrings/docker.asc
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+  "$arch" "$distro" "$codename" > /etc/apt/sources.list.d/docker.list
+chmod a+r /etc/apt/sources.list.d/docker.list
+apt-get update
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+url="https://desktop.docker.com/linux/main/${arch}/docker-desktop-${arch}.deb"
+echo "Downloading Docker Desktop…"
+curl -fL --proto '=https' --tlsv1.2 --retry 3 --max-redirs 5 \
+  -o "$work/docker-desktop.deb" "$url"
+pkg="$(dpkg-deb -f "$work/docker-desktop.deb" Package 2>/dev/null || true)"
+if [ "$pkg" != "docker-desktop" ]; then
+  echo "The downloaded file was not the Docker Desktop package." >&2
+  exit 1
+fi
+
+echo "Installing Docker Desktop. The NVIDIA runtime is not changed."
+if ! apt-get install -y "$work/docker-desktop.deb"; then
+  if dpkg-query -W -f='${Status}' docker-desktop 2>/dev/null | grep -q 'install ok installed'; then
+    echo "Docker Desktop is installed."
+  else
+    exit 1
+  fi
+fi
+
+uid="${PKEXEC_UID:-}"
+if [ -n "$uid" ]; then
+  user="$(id -nu "$uid" 2>/dev/null || true)"
+  if [ -n "$user" ] && [ "$user" != "root" ]; then
+    echo "Adding ${user} to the kvm group…"
+    usermod -aG kvm "$user" || true
+  fi
+fi
+
+echo "Docker Desktop is installed. It runs containers in a virtual machine, so it cannot pass through an NVIDIA GPU. Use Docker Engine for GPU acceleration. Log out and back in if Hog just added you to the kvm group, then press Start Docker."

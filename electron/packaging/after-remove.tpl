@@ -30,3 +30,9 @@ rm -f /usr/libexec/hog-preview-self-update
 rm -f /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.self-update.policy
 rm -f /usr/libexec/hog-miner-ctl
 rm -f /etc/sudoers.d/hog-miner
+rm -f /usr/libexec/hog-docker-engine-install
+rm -f /usr/libexec/hog-docker-desktop-install
+rm -f /usr/libexec/hog-nvidia-toolkit-install
+rm -f /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.docker-engine-install.policy
+rm -f /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.docker-desktop-install.policy
+rm -f /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.nvidia-toolkit-install.policy

@@ -24,8 +24,12 @@ from guard import (
     assign_share_port,
     canonical_command,
     compose_run,
+    DOCKER_DESKTOP_HELPER,
+    DOCKER_ENGINE_HELPER,
     NVIDIA_TOOLKIT_HELPER,
     docker_engine_install_commands,
+    first_trusted_helper,
+    privileged_argv,
     docker_offline,
     docker_volume_data,
     folder_problem,
@@ -1696,8 +1700,10 @@ class ToolkitInstallTest(unittest.TestCase):
             guard.run_argv = run_argv
             payload = guard.handle("jellyfin-gpu-install")
             self.assertTrue(payload["ok"], payload)
-            self.assertIn((["pkexec", "/opt/hog-browser/libexec/hog-nvidia-toolkit-install"], 600), calls)
-            self.assertEqual(sum(1 for item in calls if item[0][:1] == ["pkexec"]), 1)
+            self.assertEqual(calls[0][0], privileged_argv(NVIDIA_TOOLKIT_HELPER))
+            self.assertEqual(calls[0][0][-2:], ["/usr/bin/pkexec", "/opt/hog-browser/libexec/hog-nvidia-toolkit-install"])
+            self.assertEqual(calls[0][1], 600)
+            self.assertEqual(sum(1 for item in calls if len(item[0]) >= 2 and str(item[0][-2]).endswith("pkexec") and item[0][-1].endswith("hog-nvidia-toolkit-install")), 1)
             self.assertIn("installed and configured", payload["notice"])
             self.assertIn("NVIDIA Container Toolkit is installed", payload["jellyfinGpuInstallLog"])
             self.assertTrue(any(item["id"] == "toolkit" and item["ok"] for item in payload["jellyfinGpuChecks"]))
@@ -1719,6 +1725,154 @@ class ToolkitInstallTest(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("dismissed", payload["error"].lower())
             self.assertIn("Request dismissed", payload["jellyfinGpuInstallLog"])
+
+    def test_privileged_argv_leaves_hog_and_rejects_spaced_env(self):
+        with tempfile.TemporaryDirectory() as folder:
+            systemd = Path(folder) / "systemd-run"
+            systemd.write_text("#!/bin/sh\n", encoding="utf-8")
+            systemd.chmod(0o755)
+            argv = privileged_argv(
+                DOCKER_ENGINE_HELPER,
+                env={
+                    "DISPLAY": ":0",
+                    "WAYLAND_DISPLAY": "wayland-0",
+                    "XDG_RUNTIME_DIR": "/run/user/1000",
+                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+                    "XDG_CURRENT_DESKTOP": "ubuntu:GNOME",
+                },
+                systemd_run=str(systemd),
+                pkexec="/usr/bin/pkexec",
+            )
+            self.assertEqual(argv[0], str(systemd))
+            self.assertIn("--user", argv)
+            self.assertIn("--setenv=DISPLAY=:0", argv)
+            self.assertIn("--setenv=XDG_RUNTIME_DIR=/run/user/1000", argv)
+            spaced = privileged_argv(
+                DOCKER_ENGINE_HELPER,
+                env={"DISPLAY": ":0 bad", "WAYLAND_DISPLAY": "way land"},
+                systemd_run=str(systemd),
+                pkexec="/usr/bin/pkexec",
+            )
+            self.assertFalse(any(part.startswith("--setenv=DISPLAY=") for part in spaced))
+            self.assertFalse(any(" " in part for part in spaced))
+            self.assertEqual(spaced[-2:], ["/usr/bin/pkexec", str(DOCKER_ENGINE_HELPER)])
+            bare = privileged_argv(
+                "/tmp/hog-helper",
+                env={"DISPLAY": ":0"},
+                systemd_run=str(Path(folder) / "missing"),
+                pkexec="/usr/bin/pkexec",
+            )
+            self.assertEqual(bare, ["/usr/bin/pkexec", "/tmp/hog-helper"])
+
+    def test_helper_search_reports_a_missing_deb(self):
+        path, reason = first_trusted_helper(
+            "hog-docker-engine-install",
+            roots=["/tmp/hog-missing-preview-libexec", "/tmp/hog-missing-webkit-libexec"],
+        )
+        self.assertIsNone(path)
+        self.assertIn(".deb", reason)
+
+    def test_docker_install_helpers_are_fixed_and_separate(self):
+        root = Path(__file__).resolve().parents[1]
+        engine = (root / "packaging" / "hog-docker-engine-install").read_text(encoding="utf-8")
+        desktop = (root / "packaging" / "hog-docker-desktop-install").read_text(encoding="utf-8")
+        self.assertIn("#!/bin/sh", engine)
+        self.assertIn("This helper takes no arguments", engine)
+        self.assertIn("must run as root via pkexec", engine)
+        self.assertIn("https://download.docker.com/linux/${distro}/gpg", engine)
+        self.assertIn("docker-ce", engine)
+        self.assertIn("usermod -aG docker", engine)
+        self.assertNotIn("desktop.docker.com", engine)
+        self.assertNotIn("nvidia-ctk", engine)
+        self.assertIn("https://desktop.docker.com/linux/main/${arch}/docker-desktop-${arch}.deb", desktop)
+        self.assertIn('pkg" != "docker-desktop"', desktop)
+        self.assertIn("/dev/kvm", desktop)
+        self.assertNotIn("nvidia-ctk", desktop)
+        self.assertNotIn("nvidia-container-toolkit", desktop)
+        for name in ("hog-docker-engine-install", "hog-docker-desktop-install"):
+            script = root / "packaging" / name
+            extra = subprocess.run([str(script), "extra"], capture_output=True, text=True, check=False)
+            self.assertEqual(extra.returncode, 2, extra.stderr)
+            self.assertIn("no arguments", extra.stderr)
+            plain = subprocess.run([str(script)], capture_output=True, text=True, check=False)
+            self.assertEqual(plain.returncode, 1)
+            self.assertIn("pkexec", plain.stderr)
+        policy = (root / "packaging" / "org.hog.Browser.docker-engine-install.policy").read_text(encoding="utf-8")
+        self.assertIn("/opt/hog-browser/libexec/hog-docker-engine-install", policy)
+        preview = (root / "electron" / "packaging" / "org.hog.BrowserChromiumPreview.docker-desktop-install.policy").read_text(encoding="utf-8")
+        self.assertIn("/usr/libexec/hog-docker-desktop-install", preview)
+        deb = (root / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+        self.assertIn("${APP}/libexec/hog-docker-engine-install", deb)
+        self.assertIn("${APP}/libexec/hog-docker-desktop-install", deb)
+        package = (root / "electron" / "package.json").read_text(encoding="utf-8")
+        self.assertIn("../packaging/hog-docker-engine-install", package)
+        self.assertIn("../packaging/hog-docker-desktop-install", package)
+        self.assertIn("../packaging/hog-nvidia-toolkit-install", package)
+
+    def _quiet_guard(self, folder):
+        guard = Guard(folder, docker="docker")
+        guard.docker_running = lambda: True
+        guard.items = lambda: []
+        guard.media_view = lambda: ("", [])
+        guard.engine_runtime_status = lambda: {"ok": False, "available": False}
+        guard.desktop_status = lambda: {"ok": False, "available": False, "detail": "missing"}
+        guard.wireguard_module_loaded = lambda: False
+        return guard
+
+    def test_engine_install_uses_the_fixed_helper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = self._quiet_guard(folder)
+            calls = []
+
+            def run_argv(args, timeout=8):
+                calls.append((list(args), timeout))
+                return subprocess.CompletedProcess(args, 0, "Docker Engine is installed.\n", "")
+
+            guard.docker_engine_helper_status = lambda: (True, "")
+            guard.docker_engine_helper_path = lambda: DOCKER_ENGINE_HELPER
+            guard.run_argv = run_argv
+            payload = guard.handle("docker-engine-install")
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(calls[0][0][-2:], ["/usr/bin/pkexec", str(DOCKER_ENGINE_HELPER)])
+            self.assertEqual(calls[0][1], 900)
+            self.assertEqual(len(calls[0][0]) >= 2 and calls[0][0][-1], str(DOCKER_ENGINE_HELPER))
+            self.assertNotIn("apt-get", " ".join(calls[0][0]))
+            self.assertIn("Log out and back in", payload["notice"])
+
+    def test_desktop_install_does_not_run_without_the_helper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = self._quiet_guard(folder)
+            calls = []
+            guard.docker_desktop_helper_status = lambda: (False, "Install a Hog .deb to use this button. Until then, copy the commands below.")
+            guard.run_argv = lambda args, timeout=8: calls.append(list(args))
+            payload = guard.handle("docker-desktop-install")
+            self.assertFalse(payload["ok"])
+            self.assertIn(".deb", payload["error"])
+            self.assertEqual(calls, [])
+
+    def test_engine_install_skips_when_engine_is_running(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = self._quiet_guard(folder)
+            calls = []
+            guard.engine_runtime_status = lambda: {"ok": True, "available": True}
+            guard.run_argv = lambda args, timeout=8: calls.append(list(args))
+            payload = guard.handle("docker-engine-install")
+            self.assertTrue(payload["ok"], payload)
+            self.assertIn("already installed", payload["notice"])
+            self.assertEqual(calls, [])
+
+    def test_desktop_install_reports_a_dismissed_prompt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = self._quiet_guard(folder)
+            guard.docker_desktop_helper_status = lambda: (True, "")
+            guard.docker_desktop_helper_path = lambda: DOCKER_DESKTOP_HELPER
+            guard.run_argv = lambda args, timeout=8: subprocess.CompletedProcess(
+                args, 126, "", "pkexec must be setuid root\n"
+            )
+            payload = guard.handle("docker-desktop-install")
+            self.assertFalse(payload["ok"])
+            self.assertIn("cannot start from inside Hog", payload["error"])
+            self.assertEqual(payload.get("dockerInstallLog", "").strip(), "pkexec must be setuid root")
 
 
 

@@ -428,6 +428,12 @@
             <p id="docker-state" class="note">Checking whether Docker is running…</p>
             <button type="button" id="start-docker">Start Docker</button>
           </div>
+          <div id="docker-install-row" class="gpu-install-row" hidden>
+            <button type="button" id="docker-engine-install" hidden>Install Docker Engine</button>
+            <button type="button" id="docker-desktop-install" hidden>Install Docker Desktop</button>
+          </div>
+          <p id="docker-install-hint" class="note" hidden>Ubuntu will ask for your password. Hog never stores that password.</p>
+          <pre id="docker-install-log" class="mono gpu-install-log" hidden></pre>
           <details class="settings-block" id="container-images" open>
             <summary>Images</summary>
             <div class="picker">

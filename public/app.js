@@ -4237,10 +4237,10 @@ function paintJellyfinGpu(payload) {
     status.textContent = "Jellyfin runs on Docker Engine with the NVIDIA GPU. Turn this off to keep it on Docker Engine without the GPU. Login and libraries do not carry over from Docker Desktop; ~/hog-shares stays the same. Use the runtime control to move it to Docker Desktop.";
   } else if (ready) {
     status.textContent = "This computer is ready. Turn this on to recreate Jellyfin on Docker Engine with --gpus all. Docker Desktop settings will not carry over.";
-  } else if (payload.jellyfinGpuCanInstall) {
-    status.textContent = "GPU transcoding needs the three checks below. If the NVIDIA toolkit is missing, press Install NVIDIA toolkit. Ubuntu will ask for your password. Hog never stores that password.";
+  } else if (payload.dockerEngineCanInstall || payload.dockerDesktopCanInstall || payload.jellyfinGpuCanInstall) {
+    status.textContent = "GPU transcoding needs the three checks below. Install Docker Engine, Install Docker Desktop, and Install NVIDIA toolkit run a fixed installer and Ubuntu asks for your password. Hog never stores that password. Docker Desktop cannot pass through the GPU.";
   } else {
-    status.textContent = "GPU transcoding needs the three checks below. Copy the install commands when a check is missing. Installing the hog-browser .deb enables the Install NVIDIA toolkit button.";
+    status.textContent = "GPU transcoding needs the three checks below. Copy the install commands when a check is missing. Installing Hog enables the install buttons.";
   }
   if (Object.prototype.hasOwnProperty.call(payload, "error") && (payload.jellyfinGpu === true || payload.jellyfinGpu === false || payload.jellyfinGpuChecks)) {
     error.textContent = payload.error || "";
@@ -4349,8 +4349,47 @@ function paintDocker(payload) {
   if (engine.ok) parts.push("Docker Engine is running.");
   else if (engine.detail) parts.push(engine.detail);
   if (desktop.ok || payload.docker) parts.push("Docker Desktop is running.");
-  else parts.push("Docker Desktop is not running. Start it here if you want Desktop containers.");
+  else if (desktop.available) parts.push("Docker Desktop is not running. Start it here if you want Desktop containers.");
+  else parts.push("Docker Desktop is not installed.");
   state.textContent = parts.join(" ");
+  const engineBtn = $("docker-engine-install");
+  const desktopBtn = $("docker-desktop-install");
+  const row = $("docker-install-row");
+  const hint = $("docker-install-hint");
+  const log = $("docker-install-log");
+  const showEngine = Boolean(payload.dockerEngineCanInstall) && !engine.ok && !engine.available;
+  const showDesktop = Boolean(payload.dockerDesktopCanInstall) && !desktop.available && !desktop.ok;
+  if (log && Object.prototype.hasOwnProperty.call(payload, "dockerInstallLog")) {
+    const textLog = typeof payload.dockerInstallLog === "string" ? payload.dockerInstallLog : "";
+    log.hidden = !textLog;
+    log.textContent = textLog;
+    if (textLog) log.scrollTop = log.scrollHeight;
+    if (payload.ok === true || payload.ok === false) {
+      for (const installBtn of [engineBtn, desktopBtn]) {
+        if (installBtn && installBtn.dataset.busy === "1") delete installBtn.dataset.busy;
+      }
+    }
+  }
+  const engineBusy = Boolean(engineBtn && engineBtn.dataset.busy === "1");
+  const desktopBusy = Boolean(desktopBtn && desktopBtn.dataset.busy === "1");
+  if (engineBtn && !engineBusy) {
+    engineBtn.hidden = !showEngine;
+    engineBtn.disabled = !showEngine;
+    engineBtn.textContent = "Install Docker Engine";
+  }
+  if (desktopBtn && !desktopBusy) {
+    desktopBtn.hidden = !showDesktop;
+    desktopBtn.disabled = !showDesktop;
+    desktopBtn.textContent = "Install Docker Desktop";
+  }
+  if (row) row.hidden = !(showEngine || showDesktop || engineBusy || desktopBusy);
+  if (hint) {
+    const notes = [];
+    if (showEngine || engineBusy) notes.push("Install Docker Engine adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. GPU passthrough uses Engine.");
+    if (showDesktop || desktopBusy) notes.push("Install Docker Desktop puts containers in a virtual machine. That virtual machine cannot pass through the NVIDIA GPU.");
+    hint.hidden = !notes.length;
+    if (notes.length) hint.textContent = notes.join(" ");
+  }
 }
 
 function paintUpdate(payload) {
@@ -8162,6 +8201,40 @@ function bind() {
     $("container-error").textContent = "";
     desktopCommand("containers:engine-start");
   });
+  const bindDockerInstall = (id, action, confirmText, waiting) => {
+    const button = $(id);
+    if (!button) return;
+    button.addEventListener("click", () => {
+      if (button.dataset.busy === "1") return;
+      if (!window.confirm(confirmText)) return;
+      button.dataset.busy = "1";
+      button.disabled = true;
+      button.textContent = "Waiting for approval…";
+      const row = $("docker-install-row");
+      if (row) row.hidden = false;
+      const error = $("container-error");
+      const log = $("docker-install-log");
+      if (error) error.textContent = "";
+      if (log) {
+        log.hidden = true;
+        log.textContent = "";
+      }
+      $("docker-state").textContent = waiting;
+      desktopCommand(action);
+    });
+  };
+  bindDockerInstall(
+    "docker-engine-install",
+    "containers:docker-engine-install",
+    "Install Docker Engine on this computer? Ubuntu will ask for your password. Hog adds docker-ce beside Docker Desktop and puts you in the docker group. Log out and back in after it finishes. Docker Desktop is not removed.",
+    "Ubuntu will ask for your password. Hog is installing Docker Engine. Docker Desktop is not removed.",
+  );
+  bindDockerInstall(
+    "docker-desktop-install",
+    "containers:docker-desktop-install",
+    "Install Docker Desktop on this computer? Ubuntu will ask for your password. Docker Desktop runs containers in a virtual machine and cannot pass through the NVIDIA GPU.",
+    "Ubuntu will ask for your password. Hog is installing Docker Desktop. GPU passthrough stays on Docker Engine.",
+  );
   $("node-btn").addEventListener("click", () => openUrl("https://browser-node.netlify.app/"));
   $("clear-history").addEventListener("click", () => {
     localStorage.setItem(HISTORY_KEY, "[]");

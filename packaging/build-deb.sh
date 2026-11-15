@@ -76,10 +76,18 @@ install -m 644 "${ROOT}/packaging/99-hog-tailscale.conf" \
   "${STAGE}/etc/sysctl.d/99-hog-tailscale.conf"
 install -m 755 "${ROOT}/packaging/hog-nvidia-toolkit-install" \
   "${APP}/libexec/hog-nvidia-toolkit-install"
+install -m 755 "${ROOT}/packaging/hog-docker-engine-install" \
+  "${APP}/libexec/hog-docker-engine-install"
+install -m 755 "${ROOT}/packaging/hog-docker-desktop-install" \
+  "${APP}/libexec/hog-docker-desktop-install"
 install -m 755 "${ROOT}/packaging/hog-self-update" \
   "${APP}/libexec/hog-self-update"
 install -m 644 "${ROOT}/packaging/org.hog.Browser.nvidia-toolkit-install.policy" \
   "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.nvidia-toolkit-install.policy"
+install -m 644 "${ROOT}/packaging/org.hog.Browser.docker-engine-install.policy" \
+  "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.docker-engine-install.policy"
+install -m 644 "${ROOT}/packaging/org.hog.Browser.docker-desktop-install.policy" \
+  "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.docker-desktop-install.policy"
 install -m 644 "${ROOT}/packaging/org.hog.Browser.self-update.policy" \
   "${STAGE}/usr/share/polkit-1/actions/org.hog.Browser.self-update.policy"
 

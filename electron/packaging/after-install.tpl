@@ -80,3 +80,27 @@ if [ -f "$MINER_SRC" ] && [ -f "$SUDOERS_SRC" ]; then
     echo "Hog preview: miner sudoers file was rejected and was not installed." >&2
   fi
 fi
+
+# Settings → Containers install buttons. Each helper takes no arguments.
+# Ubuntu's own password dialog runs them. Hog never sees the password.
+RES='/opt/${sanitizedProductName}/resources'
+install_fixed() {
+  src="$1"
+  dest="$2"
+  policy_src="$3"
+  policy_dest="$4"
+  if [ -f "$src" ] && [ -f "$policy_src" ]; then
+    install -d /usr/libexec /usr/share/polkit-1/actions
+    install -m 755 "$src" "$dest"
+    install -m 644 "$policy_src" "$policy_dest"
+  fi
+}
+install_fixed "$RES/hog-docker-engine-install" /usr/libexec/hog-docker-engine-install \
+  "$RES/hog-docker-engine-install.policy" \
+  /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.docker-engine-install.policy
+install_fixed "$RES/hog-docker-desktop-install" /usr/libexec/hog-docker-desktop-install \
+  "$RES/hog-docker-desktop-install.policy" \
+  /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.docker-desktop-install.policy
+install_fixed "$RES/hog-nvidia-toolkit-install" /usr/libexec/hog-nvidia-toolkit-install \
+  "$RES/hog-nvidia-toolkit-install.policy" \
+  /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.nvidia-toolkit-install.policy

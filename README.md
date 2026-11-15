@@ -125,7 +125,13 @@ On **Settings → Containers**, the **GPU acceleration (NVIDIA)** card checks th
 2. Native Docker Engine, separate from Docker Desktop, with this user in the `docker` group.
 3. The NVIDIA Container Toolkit, configured for that engine (`nvidia-ctk runtime configure --runtime=docker` and a restart of `docker.service`).
 
-If check 3 is missing and you installed the hog-browser `.deb`, press **Install NVIDIA toolkit**. That runs a packaged root helper at `/opt/hog-browser/libexec/hog-nvidia-toolkit-install` through `pkexec`, so Ubuntu can ask for your password in a system prompt. Hog never stores or types that password, and the helper takes no arguments. It installs the toolkit, configures Docker Engine, and restarts `docker.service` only — Docker Desktop is not changed. The same helper is safe to run more than once. If you are running Hog from source, or `pkexec` is missing, the button is hidden and you can copy the commands instead. Installing Docker Engine itself still uses those copyable commands.
+If a check is missing and you installed Hog, the page can run a fixed root helper through `pkexec`. Ubuntu asks for your password in its own dialog. Hog never stores or types that password, and none of the helpers take arguments.
+
+- **Install Docker Engine** installs docker-ce beside Docker Desktop, starts `docker.service`, and adds you to the `docker` group. Log out and back in after it finishes. GPU passthrough uses this engine.
+- **Install Docker Desktop** installs Docker's official Desktop package. Desktop runs a virtual machine, so it cannot pass through an NVIDIA GPU. It needs KVM (`/dev/kvm`).
+- **Install NVIDIA toolkit** installs the NVIDIA Container Toolkit, configures the Engine runtime, and restarts `docker.service` only. Docker Desktop is not changed.
+
+The same helpers are safe to run more than once. If you are running Hog from source, or `pkexec` is missing, the buttons are hidden and you can copy the commands instead. The NVIDIA driver check stays as copyable commands: replacing a working driver can change the display and needs a reboot. Hog does not install the driver from a button.
 
 When all three are ready, turn the toggle on to recreate Jellyfin on Docker Engine. Named volumes `hog-jellyfin-config` and `hog-jellyfin-cache` hold that engine's login and libraries. Docker Desktop volumes do not carry over. `~/hog-shares` is still mounted at `/media`. After it starts, in Jellyfin go to **Dashboard → Playback → Transcoding** and pick **NVIDIA NVENC**. Turn the toggle off to keep Jellyfin on Docker Engine without the GPU. Use the runtime control to move it back to Docker Desktop and reuse the Desktop volumes if they were kept.
 
