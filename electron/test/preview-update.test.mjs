@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -99,17 +100,30 @@ test("one-click update: SHA256SUMS, package check, pkexec hand-off", async () =>
   await assert.rejects(up.checkDebFields("/x.deb", "0.1.40-preview.5", fields("Package: hog-chromium-preview\nVersion: 0.1.40~preview.4\n")), /expected/);
 
   const calls = [];
-  const fakeSpawn = (code) => (cmd, args) => {
+  const fakeSpawn = (code, stderr = "") => (cmd, args) => {
     calls.push([cmd, ...args]);
     const child = new EventEmitter();
     child.stderr = new EventEmitter();
-    setImmediate(() => child.emit("close", code));
+    child.stdout = new EventEmitter();
+    setImmediate(() => {
+      if (stderr) child.stderr.emit("data", Buffer.from(stderr));
+      child.emit("close", code);
+    });
     return child;
   };
-  assert.deepEqual(await up.installDeb("/tmp/d/x.deb", fakeSpawn(0)), { ok: true });
-  assert.deepEqual(calls[0], ["/usr/bin/pkexec", "/usr/bin/apt-get", "install", "-y", "--no-install-recommends", "/tmp/d/x.deb"]);
-  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126))).error, /cancelled/);
-  assert.equal((await up.installDeb("x.deb", fakeSpawn(0))).ok, false);
+  const helperThere = () => true;
+  assert.deepEqual(await up.installDeb("/tmp/d/x.deb", fakeSpawn(0), helperThere), { ok: true });
+  assert.deepEqual(calls[0], ["/usr/bin/pkexec", up.UPDATE_HELPER, "/tmp/d/x.deb"]);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(126), helperThere)).error, /cancelled/);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(127, "Error executing command as another user: Not authorized\n"), helperThere)).error, /Not authorized/);
+  assert.match((await up.installDeb("/tmp/d/x.deb", fakeSpawn(0), () => false)).error, /helper is not installed/);
+  assert.equal((await up.installDeb("x.deb", fakeSpawn(0), helperThere)).ok, false);
+  assert.equal(up.canInstallDeb({
+    isPackaged: true,
+    execPath: "/opt/Hog (Chromium preview)/hog-chromium-preview",
+    env: {},
+    exists: (p) => p !== up.UPDATE_HELPER,
+  }).ok, false);
 });
 
 test("pickUpdate carries the download and SHA256SUMS links", () => {
@@ -167,4 +181,15 @@ test("regular Updates section payload: idle, available, busy, installed", () => 
   const fail = up.uiPayload({ version, error: "GitHub answered 500", canInstall: { ok: true, why: "" } });
   assert.equal(fail.ok, false);
   assert.equal(fail.error, "GitHub answered 500");
+});
+
+test("preview self-update helper refuses unexpected paths before it can run apt", () => {
+  const helper = path.join(path.dirname(new URL(import.meta.url).pathname), "../packaging/hog-preview-self-update");
+  const bad = spawnSync(helper, ["/tmp/evil.deb"], { encoding: "utf8" });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /expected updates folder/);
+  const shaped = "/home/someone/.local/share/hog-chromium-preview/updates/hog-chromium-preview_0.1.40-preview.15_amd64.deb";
+  const blocked = spawnSync(helper, [shaped], { encoding: "utf8" });
+  assert.notEqual(blocked.status, 0);
+  assert.match(blocked.stderr, /must run as root/);
 });

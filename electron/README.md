@@ -103,8 +103,10 @@ views stacked above the page view:
 - **Preview updates** check GitHub pre-releases tagged `preview-*` that carry a
   `hog-chromium-preview_<version>_amd64.deb` and a `SHA256SUMS`. **Install
   update** (installed .deb only) downloads both, checks the hash and the
-  package name and version, then runs `pkexec apt-get install` on the file,
-  which shows the system password prompt; **Restart now** relaunches. The
+  package name and version, then steps the window aside and runs
+  `pkexec /usr/libexec/hog-preview-self-update` on the file. That helper is
+  the only command its polkit policy allows, and Ubuntu asks for the password
+  in the system prompt. **Restart now** relaunches. The
   WebKit Hog's updater reads `/releases/latest`, which never includes
   pre-releases, so it cannot be affected. Checks are off by default; nothing is
   found until a preview pre-release is published.

@@ -2015,10 +2015,14 @@ async function runUpdateInstall() {
   preview.updateError = "";
   preview.updateStatus = `Downloading ${found.deb}…`;
   emitUpdateUi();
-  let dir = "";
+  let debFile = "";
   try {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), "hog-preview-update-"));
-    fs.chmodSync(dir, 0o755); // apt's _apt user reads the file
+    const dir = path.join(PREVIEW_DATA, "updates");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    for (const name of fs.readdirSync(dir)) {
+      if (name.endsWith(".deb")) fs.rmSync(path.join(dir, name), { force: true });
+    }
     let lastPct = -1;
     const file = await previewUpdate.downloadVerified(found, dir, {
       onProgress: (got, total) => {
@@ -2031,20 +2035,39 @@ async function runUpdateInstall() {
       },
     });
     await previewUpdate.checkDebFields(file, found.version);
-    preview.updateStatus = "Checked against SHA256SUMS. Enter your password in the system prompt to install…";
+    preview.updateStatus = "Checked against SHA256SUMS. Hog will step aside so Ubuntu can ask for your password…";
     emitUpdateUi();
-    const result = await previewUpdate.installDeb(file);
+    const result = await withPasswordPromptVisible(() => previewUpdate.installDeb(file));
     if (!result.ok) throw new Error(result.error);
+    debFile = file;
     preview.updateInstalled = true;
     preview.updateStatus = `Preview ${found.version} is installed. Restart the preview to use it.`;
   } catch (error) {
     preview.updateStatus = "";
     preview.updateError = `Update failed: ${error.message}`;
+    log(preview.updateError);
   } finally {
     preview.updateBusy = false;
-    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    if (debFile) fs.rmSync(debFile, { force: true });
     emitUpdateUi();
   }
+}
+
+/** GNOME dismisses the password dialog while this window stays in front. */
+function withPasswordPromptVisible(job) {
+  if (!win || win.isDestroyed()) return job();
+  const full = win.isFullScreen();
+  const minimized = win.isMinimized();
+  if (full) win.setFullScreen(false);
+  if (!minimized) win.minimize();
+  return Promise.resolve()
+    .then(job)
+    .finally(() => {
+      if (!win || win.isDestroyed()) return;
+      if (!minimized) win.restore();
+      if (full) win.setFullScreen(true);
+      win.focus();
+    });
 }
 
 function scheduleUpdateChecks() {

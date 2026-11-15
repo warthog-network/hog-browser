@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.40-preview.14",
+  "version": "0.1.40-preview.15",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",
@@ -56,6 +56,14 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "packaging/hog-preview-self-update",
+        "to": "hog-preview-self-update"
+      },
+      {
+        "from": "packaging/org.hog.BrowserChromiumPreview.self-update.policy",
+        "to": "hog-preview-self-update.policy"
       }
     ],
     "asar": true,
@@ -97,7 +105,9 @@
       "recommends": [
         "python3-gi",
         "geoclue-2.0"
-      ]
+      ],
+      "afterInstall": "packaging/after-install.tpl",
+      "afterRemove": "packaging/after-remove.tpl"
     },
     "win": {
       "target": [

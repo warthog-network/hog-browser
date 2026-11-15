@@ -7,10 +7,12 @@
 // pre-releases, so publishing preview builds this way cannot reach it.
 // "Install update" (only on the user's click) downloads the .deb and the
 // release's SHA256SUMS, checks the hash and the package name/version, then
-// hands the file to `pkexec apt-get install` (the system password prompt).
+// hands the file to `pkexec /usr/libexec/hog-preview-self-update` (Ubuntu's
+// password prompt). The helper is the only command the polkit policy allows.
 const RELEASES_URL = "https://api.github.com/repos/warthog-network/hog-browser/releases?per_page=30";
 const DEB_RE = /^hog-chromium-preview_(\d+\.\d+\.\d+(?:-preview\.\d+)?)_amd64\.deb$/;
 const DOWNLOAD_PREFIX = "https://github.com/warthog-network/hog-browser/releases/download/";
+const UPDATE_HELPER = "/usr/libexec/hog-preview-self-update";
 const MAX_DEB = 400 * 1024 * 1024;
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -82,6 +84,7 @@ function canInstallDeb({ isPackaged, execPath, env = process.env, exists = fs.ex
   if (!isPackaged || env.APPIMAGE) return { ok: false, why: "Only the installed .deb can update itself. Download the new build from the release page." };
   if (!String(execPath || "").startsWith("/opt/Hog (Chromium preview)/")) return { ok: false, why: "This copy was not installed from the .deb." };
   if (!exists("/usr/bin/pkexec") || !exists("/usr/bin/apt-get")) return { ok: false, why: "pkexec and apt-get are needed to install updates." };
+  if (!exists(UPDATE_HELPER)) return { ok: false, why: "The update helper is not installed yet. Install this build once from the release page, then later updates can use the password prompt." };
   return { ok: true, why: "" };
 }
 
@@ -146,19 +149,32 @@ async function checkDebFields(file, version, runner = run) {
   if (fields.Version !== debianVersion(version)) throw new Error(`The .deb is version ${fields.Version}, expected ${debianVersion(version)}.`);
 }
 
-/** pkexec shows the system password prompt; apt-get installs the local file. */
-function installDeb(file, spawnImpl = spawn) {
+function promptFailure(code, output) {
+  const text = String(output || "");
+  if (/Request dismissed/i.test(text) || code === 126) return "The password prompt was cancelled.";
+  if (/No authentication agent/i.test(text) || /textual authentication agent/i.test(text)) {
+    return "Ubuntu could not show the password prompt. Install the .deb from the release page in a terminal.";
+  }
+  const last = text.trim().split("\n").filter((l) => l && !/^W:/.test(l)).pop();
+  if (last) return last.slice(0, 200);
+  if (code === 127) return "The password prompt was not authorized.";
+  return `The updater exited with ${code}`;
+}
+
+/** pkexec shows Ubuntu's password prompt; the helper installs the checked .deb. */
+function installDeb(file, spawnImpl = spawn, exists = fs.existsSync) {
   return new Promise((resolve) => {
     if (!path.isAbsolute(file) || !file.endsWith(".deb")) return resolve({ ok: false, error: "Bad package path." });
-    let err = "";
-    const child = spawnImpl("/usr/bin/pkexec", ["/usr/bin/apt-get", "install", "-y", "--no-install-recommends", file], { stdio: ["ignore", "ignore", "pipe"] });
-    if (child.stderr) child.stderr.on("data", (d) => (err = (err + d).slice(-2000)));
+    if (!exists(UPDATE_HELPER)) return resolve({ ok: false, error: "The update helper is not installed. Download the .deb from the release page and install it with apt." });
+    let output = "";
+    const child = spawnImpl("/usr/bin/pkexec", [UPDATE_HELPER, file], { stdio: ["ignore", "pipe", "pipe"] });
+    const take = (d) => (output = (output + d).slice(-2000));
+    if (child.stdout) child.stdout.on("data", take);
+    if (child.stderr) child.stderr.on("data", take);
     child.on("error", (error) => resolve({ ok: false, error: error.message }));
     child.on("close", (code) => {
       if (code === 0) return resolve({ ok: true });
-      if (code === 126 || code === 127) return resolve({ ok: false, error: "The password prompt was cancelled." });
-      const last = err.trim().split("\n").filter((l) => !/^W:/.test(l)).pop() || `apt-get exited with ${code}`;
-      resolve({ ok: false, error: last.slice(0, 200) });
+      resolve({ ok: false, error: promptFailure(code, output) });
     });
   });
 }
@@ -205,6 +221,7 @@ module.exports = {
   RELEASES_URL,
   RELEASES_PAGE,
   DOWNLOAD_PREFIX,
+  UPDATE_HELPER,
   parseVersion,
   compareVersions,
   pickUpdate,
