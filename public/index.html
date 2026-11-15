@@ -1281,17 +1281,76 @@
 
             <div id="wpage-activity" hidden>
               <p class="w-k">Activity</p>
-              <ul id="activity" class="activity"></ul>
-              <p id="activity-empty" class="note">No WART transfers on this page of history.</p>
-              <div id="wart-activity-extra">
-                <p class="w-k">Pending</p>
-                <ul id="pending" class="activity"></ul>
-                <p id="pending-empty" class="note">No pending transactions.</p>
-                <p class="w-k">Open orders</p>
-                <ul id="orders" class="activity"></ul>
-                <p id="orders-empty" class="note">No open limit orders.</p>
-                <p id="orders-error" class="error" role="status"></p>
+              <div id="activity-wart">
+                <div class="defi-subtabs" id="activity-wart-tabs">
+                  <button type="button" class="defi-compact-btn defi-compact-btn-active" data-activity-tab="history">History</button>
+                  <button type="button" class="defi-compact-btn" data-activity-tab="pending">Pending</button>
+                  <button type="button" class="defi-compact-btn" data-activity-tab="orders" id="activity-orders-tab" hidden>Open orders</button>
+                </div>
+                <p id="orders-error" class="tx-error" role="status"></p>
+                <div id="activity-history">
+                  <p class="tx-section-label">Blocks Mined</p>
+                  <div class="tx-reward-row">
+                    <span class="tx-reward-pill" id="activity-mined-24">24h: 0</span>
+                    <span class="tx-reward-pill" id="activity-mined-week">Week: 0</span>
+                    <span class="tx-reward-pill" id="activity-mined-month">Month: 0</span>
+                  </div>
+                  <div class="tx-title-row">
+                    <h3 class="tx-section-title">Transaction History</h3>
+                    <span class="tx-source-pill" id="activity-source" hidden></span>
+                  </div>
+                  <p class="tx-network-note" id="activity-note"></p>
+                  <div class="tx-filter-dropdown">
+                    <button type="button" class="tx-filter-summary" id="activity-filter-toggle" aria-expanded="false" aria-controls="activity-filter-body">
+                      <span class="tx-filter-summary-left">
+                        <span class="tx-filter-chevron" id="activity-filter-chevron" aria-hidden="true">▶</span>
+                        <span class="tx-filter-summary-text">
+                          <span class="tx-filter-title">Filter</span>
+                          <span class="tx-filter-subtitle">Type and direction</span>
+                        </span>
+                      </span>
+                      <span class="tx-action-btn tx-action-btn-active tx-filter-active-chip" id="activity-filter-chip">All</span>
+                    </button>
+                    <div id="activity-filter-body" class="tx-filter-body" hidden role="listbox" aria-label="History filter"></div>
+                  </div>
+                  <div class="tx-btn-row">
+                    <button type="button" class="tx-action-btn" id="activity-refresh">Refresh</button>
+                    <button type="button" class="tx-action-btn tx-action-btn-active" id="activity-hide">Hide Transactions</button>
+                  </div>
+                  <p id="activity-error" class="tx-error" role="status"></p>
+                  <div id="activity-list-wrap">
+                    <p id="activity-empty" class="tx-empty" hidden></p>
+                    <div id="activity" class="tx-history-list"></div>
+                    <button type="button" class="tx-show-more" id="activity-more" hidden>Show More</button>
+                  </div>
+                </div>
+                <div id="activity-pending" hidden>
+                  <p id="pending-empty" class="tx-empty">No pending transactions</p>
+                  <div id="pending" class="tx-history-list"></div>
+                </div>
+                <div id="activity-orders" hidden>
+                  <button type="button" class="defi-compact-btn" id="orders-refresh">Refresh orders</button>
+                  <p id="orders-empty" class="tx-empty">No open orders</p>
+                  <div id="orders" class="tx-history-list"></div>
+                </div>
               </div>
+              <div id="activity-chain" hidden>
+                <div class="tx-chain-bar">
+                  <button type="button" class="tx-chip is-on" data-chain-tab="transfers">Transfers</button>
+                  <button type="button" class="tx-chip" data-chain-tab="tunnels">Tunnels</button>
+                  <button type="button" class="tx-chain-refresh" id="activity-chain-refresh">Refresh</button>
+                  <button type="button" class="tx-chain-explorer" id="activity-explorer" hidden>Explorer</button>
+                </div>
+                <p id="activity-chain-note" class="tx-empty" hidden></p>
+                <div id="activity-chain-list" class="tx-history-list"></div>
+              </div>
+            </div>
+
+            <div id="wpage-activity-detail" hidden>
+              <button type="button" class="w-back" data-back="activity">Activity</button>
+              <h3 id="activity-detail-title">Activity</h3>
+              <p id="activity-detail-empty" class="tx-empty">Open a transaction from History.</p>
+              <div id="activity-detail-rows"></div>
             </div>
 
             <div id="wpage-settings" hidden>

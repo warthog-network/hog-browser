@@ -128,6 +128,8 @@ test("activity rows keep native transfers, bitcoin net, and solana signatures", 
   ], [], "ethereum");
   assert.equal(evm.length, 1);
   assert.equal(evm[0].incoming, true);
+  assert.equal(evm[0].hash, "0x2");
+  assert.equal(evm[0].tone, "in");
   assert.match(evm[0].url, /etherscan\.io\/tx\/0x2/);
   const btc = rowsFromBitcoin("bc1q", [{
     txid: "ab",
@@ -136,9 +138,12 @@ test("activity rows keep native transfers, bitcoin net, and solana signatures", 
     vout: [{ scriptpubkey_address: "bc1q", value: 15000 }],
   }]);
   assert.equal(btc[0].incoming, true);
+  assert.equal(btc[0].hash, "ab");
+  assert.equal(btc[0].symbol, "BTC");
   assert.match(btc[0].amount, /0\.0001 BTC/);
   const sol = rowsFromSolana([{ signature: "sig", err: null }]);
   assert.equal(sol[0].title, "Solana transaction");
+  assert.equal(sol[0].hash, "sig");
   assert.match(sol[0].url, /solscan\.io\/tx\/sig/);
 });
 

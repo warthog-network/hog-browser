@@ -29,6 +29,36 @@ async function scan(base, action, address, fetchImpl) {
   return [];
 }
 
+function evmFee(tx) {
+  try {
+    const gas = BigInt(tx.gasUsed || "0");
+    const price = BigInt(tx.gasPrice || "0");
+    if (gas <= 0n || price <= 0n) return "";
+    return `${formatUnits(gas * price, 18)} ETH`;
+  } catch {
+    return "";
+  }
+}
+
+function evmWhen(tx) {
+  const n = Number(tx.timeStamp || 0);
+  return n > 0 ? n * 1000 : 0;
+}
+
+function chainFields(tx, { hash, incoming, failed, symbol, fee = "" }) {
+  return {
+    hash: hash || "",
+    from: tx.from || "",
+    to: tx.to || "",
+    fee,
+    time: evmWhen(tx),
+    height: Number(tx.blockNumber) || 0,
+    status: failed ? "Failed" : "Confirmed",
+    tone: failed ? "fail" : incoming ? "in" : "out",
+    symbol,
+  };
+}
+
 export function rowsFromEvm(address, txs, tokens, network) {
   const me = String(address || "").toLowerCase();
   const explorer = network === "hemi" ? "https://explorer.hemi.xyz/tx/" : "https://etherscan.io/tx/";
@@ -47,6 +77,7 @@ export function rowsFromEvm(address, txs, tokens, network) {
       incoming,
       failed,
       url: `${explorer}${tx.hash}`,
+      ...chainFields(tx, { hash: tx.hash, incoming, failed, symbol: native, fee: evmFee(tx) }),
     });
   }
   for (const tx of tokens) {
@@ -64,6 +95,7 @@ export function rowsFromEvm(address, txs, tokens, network) {
       incoming,
       failed: false,
       url: `${explorer}${tx.hash}`,
+      ...chainFields(tx, { hash: tx.hash, incoming, failed: false, symbol }),
     });
   }
   return rows.slice(0, 40);
@@ -80,6 +112,14 @@ export function rowsFromBitcoin(address, txs) {
     }
     const incoming = net > 0n;
     const txid = tx.txid || "";
+    const otherIn = (tx.vin || []).find((input) => input.prevout?.scriptpubkey_address && input.prevout.scriptpubkey_address !== address);
+    const otherOut = (tx.vout || []).find((output) => output.scriptpubkey_address && output.scriptpubkey_address !== address);
+    let fee = "";
+    try {
+      if (tx.fee != null) fee = `${formatUnits(BigInt(Math.trunc(Number(tx.fee))), 8)} BTC`;
+    } catch {
+      fee = "";
+    }
     return {
       id: txid,
       title: tx.status?.confirmed === false ? "Bitcoin pending" : incoming ? "Received BTC" : "Sent BTC",
@@ -87,6 +127,15 @@ export function rowsFromBitcoin(address, txs) {
       incoming,
       failed: false,
       url: txid ? `https://mempool.space/tx/${txid}` : "",
+      hash: txid,
+      from: incoming ? (otherIn?.prevout?.scriptpubkey_address || "") : address,
+      to: incoming ? address : (otherOut?.scriptpubkey_address || ""),
+      fee,
+      time: Number(tx.status?.block_time || 0) * 1000,
+      height: Number(tx.status?.block_height || 0),
+      status: tx.status?.confirmed === false ? "Pending" : "Confirmed",
+      tone: incoming ? "in" : "out",
+      symbol: "BTC",
     };
   });
 }
@@ -99,7 +148,44 @@ export function rowsFromSolana(rows) {
     incoming: false,
     failed: Boolean(row.err),
     url: row.signature ? `https://solscan.io/tx/${row.signature}` : "",
+    hash: row.signature || "",
+    symbol: "SOL",
+    status: row.err ? "Failed" : "Confirmed",
+    tone: row.err ? "fail" : "",
+    time: row.blockTime ? Number(row.blockTime) * 1000 : 0,
   }));
+}
+
+async function solanaTransfer(address, signature, fetchImpl) {
+  const response = await fetchImpl(SOLANA_RPC, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getTransaction",
+      params: [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) return null;
+  const body = await response.json();
+  const tx = body?.result;
+  if (!tx?.meta) return null;
+  const keys = tx.transaction?.message?.accountKeys || [];
+  const index = keys.findIndex((key) => (key?.pubkey || key) === address);
+  if (index < 0) return null;
+  const pre = BigInt(tx.meta.preBalances?.[index] ?? 0);
+  const post = BigInt(tx.meta.postBalances?.[index] ?? 0);
+  const delta = post - pre;
+  const abs = delta < 0n ? -delta : delta;
+  return {
+    incoming: delta > 0n,
+    amount: `${delta > 0n ? "+" : "−"} ${formatUnits(abs, 9)} SOL`,
+    fee: tx.meta.fee != null ? `${formatUnits(BigInt(tx.meta.fee), 9)} SOL` : "",
+    time: Number(tx.blockTime || 0) * 1000,
+    height: Number(tx.slot || 0),
+  };
 }
 
 export async function readChainActivity(chain, address, fetchImpl = globalThis.fetch) {
@@ -131,7 +217,23 @@ export async function readChainActivity(chain, address, fetchImpl = globalThis.f
     if (!response.ok) throw new Error("Solana activity is unavailable.");
     const body = await response.json();
     if (body.error) throw new Error(body.error.message || "Solana activity is unavailable.");
-    return rowsFromSolana(body.result);
+    const rows = rowsFromSolana(body.result);
+    return Promise.all(rows.map(async (row) => {
+      if (!row.hash) return row;
+      try {
+        const extra = await solanaTransfer(address, row.hash, fetchImpl);
+        if (!extra) return row;
+        return {
+          ...row,
+          ...extra,
+          title: row.failed ? row.title : extra.incoming ? "Received SOL" : "Sent SOL",
+          tone: row.failed ? "fail" : extra.incoming ? "in" : "out",
+          incoming: extra.incoming,
+        };
+      } catch {
+        return row;
+      }
+    }));
   }
   return [];
 }

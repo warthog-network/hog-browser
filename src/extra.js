@@ -4,6 +4,14 @@ export {
   rowsFromEvm,
   rowsFromSolana,
 } from "./chain-activity.js";
+export {
+  fetchIndexerHistory,
+  historyFilters,
+  historyItemsFromNode,
+  matchesHistoryFilter,
+  normalizeIndexerTransaction,
+  rewardWindowCounts,
+} from "./wart-history.js";
 export { decryptWalletFile, encryptWalletFile } from "./wallet-file.js";
 export {
   SAFE_MARKETS,

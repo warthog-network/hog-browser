@@ -37,7 +37,12 @@ import {
   rateToPercent,
   safeBorrowHeadroomValue,
   usdOf,
+  fetchIndexerHistory,
+  historyFilters,
+  historyItemsFromNode,
+  matchesHistoryFilter,
   readChainActivity,
+  rewardWindowCounts,
   safeBalances,
   safeCancelOrder,
   safeLimitOrder,
@@ -144,7 +149,7 @@ const NODE_ORIGIN = "https://browser-node.netlify.app";
 const DDG_HOME = "https://duckduckgo.com/";
 const WALLET_PAGES = [
   "home", "send", "receive", "trade", "swap", "liquidity", "mint",
-  "safetrade", "aave", "activity", "settings", "account", "accounts", "key",
+  "safetrade", "aave", "activity", "activity-detail", "settings", "account", "accounts", "key",
   "phrase", "autolock", "display", "nodes", "ledger", "sites",
 ];
 const TRADE_PAGES = new Set(["trade", "swap", "liquidity", "mint", "safetrade", "aave"]);
@@ -269,6 +274,7 @@ function dropSession() {
   vaultCall("lock", {}).catch(() => {});
   session = null;
   balance = null;
+  clearActivityState();
   paintLockLeft();
 }
 
@@ -292,6 +298,30 @@ let balance = null;
 let refreshGen = 0;
 let wartUsd = 0;
 let wartUsdAt = 0;
+let activityIdentity = "";
+let activityFetch = 0;
+let activityTab = "history";
+let chainTab = "transfers";
+let historyAll = [];
+let historyMode = null;
+let historyFilter = "all";
+let historyVisible = 7;
+let historyError = "";
+let historyLoading = false;
+let historyOpen = true;
+let historyHasMore = false;
+let historyNextPage = 2;
+let historyFromId = null;
+let historyLoadingMore = false;
+let historyFilterOpen = false;
+let activityDetail = null;
+let chainRows = [];
+let chainError = "";
+let chainLoading = false;
+let pendingItems = [];
+let orderGroups = [];
+let ordersError = "";
+let ordersLoading = false;
 let reviewing = false;
 let pendingAccount = null;
 
@@ -3076,7 +3106,7 @@ function setTabsOpen(open) {
 
 function navFor(page) {
   if (TRADE_PAGES.has(page)) return "trade";
-  if (page === "activity") return "activity";
+  if (page === "activity" || page === "activity-detail") return "activity";
   if (SETTINGS_PAGES.has(page)) return "settings";
   return "home";
 }
@@ -3097,6 +3127,8 @@ function showWalletPage(name) {
   if (page === "account") paintPasskey();
   if (page === "aave") void loadAavePage();
   if (page === "safetrade") void paintSafePage();
+  if (page === "activity") paintActivity();
+  if (page === "activity-detail") paintActivityDetail();
   if (page !== "phrase" && $("revealed-phrase")) {
     $("revealed-phrase").value = "";
     $("revealed-phrase").hidden = true;
@@ -5174,70 +5206,6 @@ function renderBalance() {
   }
 }
 
-function renderActivity(items) {
-  const list = $("activity");
-  list.replaceChildren();
-  $("activity-empty").hidden = items.length > 0;
-  for (const item of items) {
-    const li = document.createElement("li");
-    const dir = document.createElement("div");
-    dir.className = item.incoming ? "in" : "out";
-    dir.textContent = `${item.incoming ? "In" : "Out"} ${item.amount} WART`;
-    const meta = document.createElement("div");
-    meta.className = "sub";
-    meta.textContent = `block ${item.height} · ${(item.peer || "").slice(0, 12)}…`;
-    li.append(dir, meta);
-    list.append(li);
-  }
-}
-
-function renderChainActivity(items) {
-  const list = $("activity");
-  list.replaceChildren();
-  $("activity-empty").hidden = items.length > 0;
-  for (const item of items) {
-    const li = document.createElement("li");
-    if (item.url) li.setAttribute("role", "link");
-    const dir = document.createElement("div");
-    dir.className = item.failed ? "out" : item.incoming ? "in" : "out";
-    dir.textContent = item.title;
-    const meta = document.createElement("div");
-    meta.className = "sub";
-    meta.textContent = item.amount;
-    li.append(dir, meta);
-    if (item.url) {
-      const open = () => openUrl(item.url);
-      li.addEventListener("click", open);
-      li.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") open();
-      });
-      li.tabIndex = 0;
-    }
-    list.append(li);
-  }
-}
-
-function transfersFrom(data, address) {
-  const items = [];
-  for (const block of data?.perBlock || []) {
-    const moves = block.body?.wartTransfer || [];
-    for (const entry of moves) {
-      const tx = entry.transaction || entry;
-      const to = String(tx.data?.toAddress || "").toLowerCase();
-      const from = String(tx.signedCommon?.originAddress || "").toLowerCase();
-      if (to !== address && from !== address) continue;
-      const amount = tx.data?.amount?.str || formatE8(e8Of(tx.data?.amount));
-      items.push({
-        height: block.height,
-        amount,
-        incoming: to === address,
-        peer: to === address ? from : to,
-      });
-    }
-  }
-  return items.slice(0, 8);
-}
-
 async function jsonRpc(url, method, params) {
   const response = await fetch(url, {
     method: "POST",
@@ -5336,6 +5304,7 @@ async function refreshWartUsd(gen) {
   wartUsd = price;
   wartUsdAt = Date.now();
   renderBalance();
+  paintActivity();
 }
 
 async function refreshWallet() {
@@ -5345,6 +5314,10 @@ async function refreshWallet() {
   setRefreshBusy(true);
   setSendError("");
   try {
+  noteActivityIdentity();
+  if (isWartChain(chain)) historyLoading = true;
+  else chainLoading = true;
+  paintActivity();
   if (!isWartChain(chain)) {
     const spec = CHAIN_VIEW[chain];
     $("chain-line").textContent = spec.label;
@@ -5368,29 +5341,9 @@ async function refreshWallet() {
       $("chain-line").textContent = error.message;
     }
     renderBalance();
-    const extra = $("wart-activity-extra");
-    if (extra) extra.hidden = true;
-    try {
-      const rows = activeAddress() ? await readChainActivity(chain, activeAddress()) : [];
-      if (gen !== refreshGen) return;
-      renderChainActivity(rows);
-      if (!rows.length) {
-        $("activity-empty").hidden = false;
-        $("activity-empty").textContent = activeAddress()
-          ? `No ${spec.label} transfers on this page.`
-          : `${spec.label} needs an address before activity can load.`;
-      }
-    } catch (error) {
-      if (gen !== refreshGen) return;
-      renderChainActivity([]);
-      $("activity-empty").hidden = false;
-      $("activity-empty").textContent = error.message;
-    }
+    await loadChainActivity(gen);
     return;
   }
-  const extra = $("wart-activity-extra");
-  if (extra) extra.hidden = false;
-  $("activity-empty").textContent = "No WART transfers on this page of history.";
   $("chain-line").textContent = "Reading the chain…";
   try {
     const head = await nodeGet("chain/head");
@@ -5416,59 +5369,905 @@ async function refreshWallet() {
     renderBalance();
     setSendError(error.message);
   }
-  try {
-    const history = await nodeGet(`account/${session.address}/history/4294967295`);
-    if (gen !== refreshGen) return;
-    renderActivity(transfersFrom(history, session.address));
-  } catch {
-    if (gen === refreshGen) renderActivity([]);
-  }
+  if (gen !== refreshGen) return;
+  await loadWartHistory({ append: false, gen });
+  if (gen !== refreshGen) return;
   await refreshOrders();
+  if (gen !== refreshGen) return;
   await refreshPending();
   } finally {
     if (gen === refreshGen) setRefreshBusy(false);
   }
 }
 
-function ordersFrom(data) {
-  const rows = Array.isArray(data) ? data : data?.orders || data?.openOrders || [];
-  const items = [];
-  for (const entry of rows) {
-    if (!entry || typeof entry !== "object") continue;
-    const tx = entry.transaction || entry;
-    const body = tx.data || entry;
-    const txHash = String(entry.txHash || tx.hash || entry.hash || "").toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(txHash)) continue;
-    const isBuy = entry.isBuy === true || body.isBuy === true || String(entry.side || body.side || "").toLowerCase() === "buy";
-    items.push({
-      txHash,
-      side: isBuy ? "Buy" : "Sell",
-      amount: body.amount?.str || entry.amount || "?",
-      price: body.limit?.doubleAdjusted || body.limit?.hex || body.limit || "—",
-    });
-  }
-  return items.slice(0, 8);
+const TX_IN = "#34d399";
+const TX_OUT = "#fb7185";
+const WART_EXPLORER = "https://explorer.warthog.network";
+
+function clearActivityState() {
+  activityFetch += 1;
+  activityIdentity = "";
+  activityTab = "history";
+  chainTab = "transfers";
+  historyAll = [];
+  historyMode = null;
+  historyFilter = "all";
+  historyVisible = 7;
+  historyError = "";
+  historyLoading = false;
+  historyOpen = true;
+  historyHasMore = false;
+  historyNextPage = 2;
+  historyFromId = null;
+  historyLoadingMore = false;
+  historyFilterOpen = false;
+  activityDetail = null;
+  chainRows = [];
+  chainError = "";
+  chainLoading = false;
+  pendingItems = [];
+  orderGroups = [];
+  ordersError = "";
+  ordersLoading = false;
 }
 
-function renderOrders(items) {
-  const list = $("orders");
-  list.replaceChildren();
-  $("orders-empty").hidden = items.length > 0;
-  for (const item of items) {
-    const li = document.createElement("li");
-    const line = document.createElement("div");
-    line.textContent = `${item.side} ${item.amount}`;
-    const meta = document.createElement("div");
-    meta.className = "sub";
-    meta.textContent = `limit ${item.price}`;
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "tiny";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => cancelOrder(item));
-    li.append(line, meta, cancel);
-    list.append(li);
+function noteActivityIdentity() {
+  const id = `${selectedChain()}|${session?.address || ""}|${activeAddress()}`;
+  if (id === activityIdentity) return;
+  activityIdentity = id;
+  activityTab = "history";
+  chainTab = "transfers";
+  historyFilter = "all";
+  historyVisible = 7;
+  historyFilterOpen = false;
+  historyAll = [];
+  historyMode = null;
+  historyError = "";
+  historyHasMore = false;
+  historyNextPage = 2;
+  historyFromId = null;
+  chainRows = [];
+  chainError = "";
+  pendingItems = [];
+  orderGroups = [];
+  ordersError = "";
+}
+
+function abbreviateMiddle(value, tail = 4) {
+  const text = String(value || "");
+  if (!text) return "N/A";
+  const limit = tail === 6 ? 14 : 12;
+  if (text.length <= limit) return text;
+  return `${text.slice(0, 6)}…${text.slice(-tail)}`;
+}
+
+function copyText(text) {
+  const value = String(text || "");
+  if (!value) return;
+  const clipboard = navigator.clipboard;
+  if (clipboard?.writeText) {
+    clipboard.writeText(value).catch(() => {});
+    return;
   }
+}
+
+function toneColor(tone) {
+  if (tone === "in") return TX_IN;
+  if (tone === "out" || tone === "fail") return TX_OUT;
+  if (tone === "swap") return "#fdb913";
+  return "rgba(255,255,255,0.9)";
+}
+
+function wartBadge(type, isReward) {
+  const kind = String(type || "").toLowerCase();
+  if (isReward || kind === "reward") return { label: "REWARD", bg: "#166534", color: "#86efac" };
+  if (kind === "wart_transfer" || kind === "transfer") return { label: "TRANSFER", bg: "#1e3a8a", color: "#93c5fd" };
+  if (kind === "token_transfer") return { label: "TOKEN", bg: "#312e81", color: "#a5b4fc" };
+  if (kind === "limit_swap") return { label: "LIMIT SWAP", bg: "#581c87", color: "#d8b4fe" };
+  if (kind.includes("liquidity")) return { label: kind.replace(/_/g, " ").toUpperCase(), bg: "#134e4b", color: "#5eead4" };
+  if (kind === "asset_creation") return { label: "CREATE ASSET", bg: "#854d0e", color: "#fde047" };
+  if (kind === "match") return { label: "MATCH", bg: "#701a75", color: "#f0abfc" };
+  if (kind === "cancelation" || kind.includes("cancel")) return { label: "CANCEL", bg: "#7f1d1d", color: "#fca5a5" };
+  return { label: (type || "TX").replace(/_/g, " ").toUpperCase(), bg: "#3f3f46", color: "#e4e4e7" };
+}
+
+function chainBadge(row) {
+  if (row.tone === "fail" || row.failed) return { label: "FAILED", bg: "#7f1d1d", color: "#fca5a5" };
+  if (/^approved|^cleared/i.test(row.title || "")) return { label: "APPROVE", bg: "#854d0e", color: "#fde047" };
+  if (row.tone === "swap") return { label: "SWAP", bg: "#581c87", color: "#d8b4fe" };
+  if (row.tone === "in") return { label: "RECEIVED", bg: "#166534", color: "#86efac" };
+  if (!row.tone) return { label: "TX", bg: "#3f3f46", color: "#e4e4e7" };
+  return { label: "SENT", bg: "#1e3a8a", color: "#93c5fd" };
+}
+
+function chainDirection(row) {
+  if (row.tone === "fail" || row.failed) return "Failed";
+  if (/^approved/i.test(row.title || "")) return "Approved";
+  if (/^cleared/i.test(row.title || "")) return "Cleared";
+  if (row.tone === "swap") return "Swap";
+  if (row.tone === "in") return "Received";
+  if (!row.tone) return "Activity";
+  return "Sent";
+}
+
+function chainWhen(time) {
+  const n = Number(time || 0);
+  if (!n) return "Pending";
+  return new Date(n).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function chainExplorer(chain, address) {
+  if (!address) return "";
+  if (chain === "ethereum") return `https://etherscan.io/address/${address}`;
+  if (chain === "hemi") return `https://explorer.hemi.xyz/address/${address}`;
+  if (chain === "bitcoin") return `https://mempool.space/address/${address}`;
+  if (chain === "solana") return `https://solscan.io/account/${address}`;
+  return "";
+}
+
+function txLine(label, value, opts = {}) {
+  const line = document.createElement("div");
+  line.className = "tx-row";
+  const lab = document.createElement("span");
+  lab.className = "tx-label";
+  lab.textContent = label;
+  line.append(lab);
+  if (opts.copy) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tx-value tx-link";
+    button.dataset.copy = opts.copy;
+    button.title = opts.copy;
+    button.textContent = opts.display || value;
+    line.append(button);
+  } else {
+    const span = document.createElement("span");
+    span.className = opts.muted ? "tx-value tx-muted" : "tx-value";
+    if (opts.color) span.style.color = opts.color;
+    span.textContent = value;
+    line.append(span);
+  }
+  return line;
+}
+
+function badgeSpan(badge) {
+  const span = document.createElement("span");
+  span.className = "tx-type-badge";
+  span.style.background = badge.bg;
+  span.style.color = badge.color;
+  span.textContent = badge.label;
+  return span;
+}
+
+function displayedHistory() {
+  if (historyMode === "indexer") return historyAll;
+  const account = String(session?.address || "").toLowerCase();
+  return historyAll.filter((tx) => matchesHistoryFilter(tx, historyFilter, account));
+}
+
+function pricedHistory() {
+  const price = selectedChain() === "mainnet" && wartUsd > 0 ? wartUsd : 0;
+  return displayedHistory().map((item) => {
+    const asset = String(item.asset || "WART").toUpperCase();
+    if (!(price > 0) || (asset !== "WART" && !item.isReward)) return { ...item, usdAmount: "" };
+    const numeric = Math.abs(parseFloat(String(item.amountRaw || item.amount || "0").replace(/[^\d.-]/g, ""))) || 0;
+    return { ...item, usdAmount: `$${(numeric * price).toFixed(2)}` };
+  });
+}
+
+function visibleHistory() {
+  return pricedHistory().slice(0, historyVisible);
+}
+
+function showWartFee(item) {
+  const fee = String(item.fee || "");
+  if (!fee || item.isReward || fee === "0" || fee === "0.00000000") return false;
+  return true;
+}
+
+function feeLabel(item) {
+  const fee = String(item.fee || "");
+  if (/[A-Za-z]/.test(fee)) return fee;
+  return `${fee} WART`;
+}
+
+function paintWartCard(item, index, account) {
+  const incoming = item.isIncoming != null ? item.isIncoming : item.direction === "in" || Boolean(item.isReward);
+  const outgoing = item.direction === "out" || Boolean(!incoming && item.fromAddress && account && item.fromAddress.toLowerCase() === account);
+  const color = incoming ? TX_IN : outgoing ? TX_OUT : "rgba(255,255,255,0.9)";
+  const dirLabel = item.isReward ? "Reward" : incoming ? "Received" : outgoing ? "Sent" : "Activity";
+  const card = document.createElement("div");
+  card.className = "tx-card";
+  card.dataset.historyIndex = String(index);
+  card.role = "button";
+  card.tabIndex = 0;
+  const head = document.createElement("div");
+  head.className = "tx-card-head";
+  head.append(badgeSpan(wartBadge(item.type, item.isReward)));
+  const hash = document.createElement("button");
+  hash.type = "button";
+  hash.className = "tx-value tx-link";
+  hash.title = item.txHash || "N/A";
+  if (item.txHash) hash.dataset.copy = item.txHash;
+  hash.textContent = abbreviateMiddle(item.txHash, 6);
+  head.append(hash);
+  card.append(head);
+  if (item.description) {
+    const desc = document.createElement("div");
+    desc.className = "tx-desc-block";
+    desc.textContent = item.description;
+    card.append(desc);
+  }
+  if (item.fromAddress || item.isReward) {
+    card.append(txLine("From", item.isReward || !item.fromAddress ? "System / Reward" : abbreviateMiddle(item.fromAddress), {
+      copy: item.isReward ? "" : item.fromAddress,
+      display: item.isReward || !item.fromAddress ? "System / Reward" : abbreviateMiddle(item.fromAddress),
+    }));
+  }
+  if (item.toAddress && item.type !== "limit_swap") {
+    card.append(txLine("To", abbreviateMiddle(item.toAddress), { copy: item.toAddress, display: abbreviateMiddle(item.toAddress) }));
+  }
+  const amount = document.createElement("div");
+  amount.className = "tx-row";
+  const amountLabel = document.createElement("span");
+  amountLabel.className = "tx-label";
+  amountLabel.textContent = "Amount";
+  const amountValue = document.createElement("span");
+  amountValue.className = "tx-value";
+  amountValue.style.color = color;
+  amountValue.append(`${item.amountRaw ?? item.amount} `);
+  const unit = item.asset || "WART";
+  if (item.assetHash && item.assetName && unit === item.assetName) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "tx-asset-chip";
+    chip.dataset.copy = item.assetHash;
+    chip.title = `Copy asset id: ${item.assetHash}`;
+    chip.textContent = unit;
+    amountValue.append(chip);
+  } else {
+    const muted = document.createElement("span");
+    muted.className = "tx-muted";
+    muted.textContent = unit;
+    amountValue.append(muted);
+  }
+  if (item.amountSecondary) {
+    const extra = document.createElement("span");
+    extra.className = "tx-muted";
+    extra.textContent = ` · ${item.amountSecondary}`;
+    amountValue.append(extra);
+  }
+  amount.append(amountLabel, amountValue);
+  card.append(amount);
+  if (item.assetHash && item.assetName && unit !== item.assetName) {
+    card.append(txLine("Asset", item.assetName, { copy: item.assetHash, display: item.assetName }));
+  }
+  if (showWartFee(item)) card.append(txLine("Fee", feeLabel(item), { muted: true }));
+  card.append(txLine("Direction", dirLabel, { color }));
+  const foot = document.createElement("div");
+  foot.className = "tx-card-foot";
+  for (const text of [
+    `Conf: ${item.confirmations ?? "—"}`,
+    `H: ${item.height ?? "—"}`,
+    item.confirmations === 0 ? "Pending" : (item.date || "N/A"),
+  ]) {
+    const span = document.createElement("span");
+    span.textContent = text;
+    if (text === item.date || text === "Pending" || text === "N/A") span.className = "tx-muted";
+    foot.append(span);
+  }
+  card.append(foot);
+  if (item.usdAmount && item.usdAmount !== "N/A") card.append(txLine("USD", item.usdAmount, { muted: true }));
+  return card;
+}
+
+function paintChainCard(row, chainName) {
+  const kind = chainBadge(row);
+  const color = toneColor(row.tone || (row.failed ? "fail" : ""));
+  const card = document.createElement("div");
+  card.className = "tx-card";
+  if (row.url) {
+    card.dataset.chainUrl = row.url;
+    card.role = "button";
+    card.tabIndex = 0;
+  }
+  const head = document.createElement("div");
+  head.className = "tx-card-head";
+  const left = document.createElement("span");
+  left.className = "tx-head-left";
+  const mark = document.createElement("span");
+  mark.className = "tx-mark";
+  mark.textContent = String(row.symbol || chainName).slice(0, 4);
+  left.append(mark, badgeSpan(kind));
+  head.append(left);
+  if (row.hash) {
+    const hash = document.createElement("button");
+    hash.type = "button";
+    hash.className = "tx-value tx-link";
+    hash.title = row.hash;
+    hash.dataset.copy = row.hash;
+    hash.textContent = abbreviateMiddle(row.hash, 6);
+    head.append(hash);
+  } else {
+    const title = document.createElement("span");
+    title.className = "tx-value tx-muted";
+    title.textContent = row.title || "";
+    head.append(title);
+  }
+  card.append(head);
+  if (row.from) card.append(txLine("From", abbreviateMiddle(row.from), { copy: row.from, display: abbreviateMiddle(row.from) }));
+  if (row.to) card.append(txLine("To", abbreviateMiddle(row.to), { copy: row.to, display: abbreviateMiddle(row.to) }));
+  card.append(txLine("Amount", row.amount || "", { color: /^approved|^cleared/i.test(row.title || "") ? "#e4e4e7" : color }));
+  if (row.fee) card.append(txLine("Fee", row.fee, { muted: true }));
+  card.append(txLine("Direction", chainDirection(row), { color }));
+  const foot = document.createElement("div");
+  foot.className = "tx-card-foot";
+  const height = row.height ? (/^\d+$/.test(String(row.height)) ? `H: ${row.height}` : String(row.height)) : chainName;
+  for (const text of [row.status || chainName, height, chainWhen(row.time)]) {
+    const span = document.createElement("span");
+    span.textContent = text;
+    foot.append(span);
+  }
+  card.append(foot);
+  return card;
+}
+
+function pendingLabel(type, data) {
+  const amount = data?.amount?.str || "?";
+  switch (type) {
+    case "wartTransfer": return `Send ${amount} WART`;
+    case "tokenTransfer": return `Send ${amount} ${data?.asset?.name || "?"}`;
+    case "assetCreation": return `Create ${data?.name || "?"}`;
+    case "cancelation": return "Cancel Order";
+    case "liquidityDeposit": return `Add ${data?.baseAsset?.name || "?"} Liquidity`;
+    case "liquidityWithdrawal": return `Remove ${data?.baseAsset?.name || "?"} Liquidity`;
+    case "limitSwap": return data?.buy ? "Buy Limit" : "Sell Limit";
+    case "reward": return "Block Reward";
+    case "match": return "Swap Match";
+    default: return type || "Pending";
+  }
+}
+
+function pendingColors(type) {
+  if (type === "wartTransfer" || type === "tokenTransfer") return { bg: "rgba(59,130,246,0.2)", color: "#60a5fa" };
+  if (type === "assetCreation") return { bg: "rgba(34,197,94,0.2)", color: "#4ade80" };
+  return { bg: "rgba(168,85,247,0.2)", color: "#c084fc" };
+}
+
+function pendingMark(type) {
+  const marks = {
+    wartTransfer: "WART",
+    tokenTransfer: "TKN",
+    assetCreation: "NEW",
+    cancelation: "CXL",
+    liquidityDeposit: "LP+",
+    liquidityWithdrawal: "LP−",
+    limitSwap: "LMT",
+    reward: "RWD",
+    match: "MAT",
+  };
+  return marks[type] || "TX";
+}
+
+function paintFilters() {
+  const body = $("activity-filter-body");
+  const toggle = $("activity-filter-toggle");
+  if (!body || !toggle) return;
+  const filters = historyFilters(networkId() === "defi");
+  const current = filters.find((item) => item.id === historyFilter) || filters[0];
+  body.hidden = !historyFilterOpen;
+  toggle.setAttribute("aria-expanded", historyFilterOpen ? "true" : "false");
+  $("activity-filter-chevron").textContent = historyFilterOpen ? "▼" : "▶";
+  $("activity-filter-chip").textContent = current.label;
+  body.replaceChildren();
+  const row = document.createElement("div");
+  row.className = "tx-filter-row";
+  for (const filter of filters) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `tx-action-btn${filter.id === historyFilter ? " tx-action-btn-active" : ""}`;
+    button.dataset.historyFilter = filter.id;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", filter.id === historyFilter ? "true" : "false");
+    button.textContent = filter.label;
+    row.append(button);
+  }
+  body.append(row);
+}
+
+function paintHistory() {
+  const list = $("activity");
+  const empty = $("activity-empty");
+  const more = $("activity-more");
+  const wrap = $("activity-list-wrap");
+  if (!list || !empty || !more || !wrap) return;
+  const defi = networkId() === "defi";
+  const mined = rewardWindowCounts(historyAll);
+  $("activity-mined-24").textContent = `24h: ${mined.h24}`;
+  $("activity-mined-week").textContent = `Week: ${mined.week}`;
+  $("activity-mined-month").textContent = `Month: ${mined.month}`;
+  const source = $("activity-source");
+  source.hidden = !historyMode;
+  source.textContent = historyMode === "indexer" ? "Indexer" : historyMode === "node" ? "Node" : "";
+  $("activity-note").textContent = defi
+    ? (historyMode === "indexer"
+      ? "DeFi testnet — indexer history with rich DEX cards"
+      : historyMode === "node"
+        ? "DeFi testnet — node history (indexer unavailable)"
+        : "DeFi testnet")
+    : "Mainnet — WART transfers and block rewards";
+  paintFilters();
+  const refresh = $("activity-refresh");
+  refresh.disabled = historyLoading && !historyLoadingMore;
+  refresh.textContent = historyLoading && !historyLoadingMore ? "Refreshing…" : "Refresh";
+  const hide = $("activity-hide");
+  hide.classList.toggle("tx-action-btn-active", historyOpen);
+  hide.textContent = historyOpen ? "Hide Transactions" : "Show Transactions";
+  $("activity-error").textContent = historyLoading ? "" : historyError;
+  wrap.hidden = !historyOpen;
+  const rows = visibleHistory();
+  const filtered = displayedHistory();
+  list.replaceChildren();
+  const filters = historyFilters(defi);
+  const label = (filters.find((item) => item.id === historyFilter)?.label || "matching").toLowerCase();
+  if (historyLoading && historyAll.length === 0) {
+    empty.hidden = false;
+    empty.textContent = defi ? "Loading from indexer…" : "Loading transaction history…";
+  } else if (!historyLoading && !historyError && filtered.length === 0) {
+    empty.hidden = false;
+    empty.textContent = historyFilter === "all" ? "No transactions yet" : `No ${label} transactions found.`;
+  } else {
+    empty.hidden = true;
+  }
+  const account = String(session?.address || "").toLowerCase();
+  rows.forEach((item, index) => list.append(paintWartCard(item, index, account)));
+  const canMore = historyOpen && (filtered.length > historyVisible || historyHasMore);
+  more.hidden = !canMore;
+  more.disabled = historyLoading || historyLoadingMore;
+  more.textContent = historyLoadingMore ? "Loading…" : "Show More";
+}
+
+function paintPendingList() {
+  const list = $("pending");
+  const empty = $("pending-empty");
+  if (!list || !empty) return;
+  list.replaceChildren();
+  empty.hidden = pendingItems.length > 0;
+  for (const item of pendingItems) {
+    const row = document.createElement("div");
+    row.className = "tx-pending";
+    const mark = badgeSpan({ label: pendingMark(item.type), ...pendingColors(item.type) });
+    const body = document.createElement("div");
+    body.className = "tx-pending-body";
+    const title = document.createElement("div");
+    title.className = "tx-pending-title";
+    title.textContent = pendingLabel(item.type, item.data);
+    const state = document.createElement("div");
+    state.className = "tx-pending-state";
+    state.textContent = "Pending";
+    body.append(title, state);
+    row.append(mark, body);
+    if (item.hash) {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "tx-value tx-link";
+      link.dataset.openUrl = `${WART_EXPLORER}/tx/${item.hash}`;
+      link.textContent = `${item.hash.slice(0, 8)}...`;
+      row.append(link);
+    }
+    if (item.type === "limitSwap" && item.hash && networkId() === "defi") {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "tx-cancel";
+      cancel.title = "Cancel";
+      cancel.dataset.cancelOrder = item.hash;
+      cancel.textContent = "Cancel";
+      row.append(cancel);
+    }
+    list.append(row);
+  }
+}
+
+function paintOrderList() {
+  const list = $("orders");
+  const empty = $("orders-empty");
+  const refresh = $("orders-refresh");
+  if (!list || !empty || !refresh) return;
+  const count = orderGroups.reduce((sum, group) => sum + group.orders.length, 0);
+  empty.hidden = ordersLoading || Boolean(ordersError) || count > 0;
+  empty.textContent = "No open orders";
+  refresh.disabled = ordersLoading;
+  refresh.textContent = ordersLoading ? "Loading…" : "Refresh orders";
+  if ($("orders-error")) $("orders-error").textContent = ordersError;
+  list.replaceChildren();
+  for (const group of orderGroups) {
+    const card = document.createElement("div");
+    card.className = "tx-card tx-card-static";
+    const title = document.createElement("h3");
+    title.className = "tx-order-title";
+    title.textContent = group.name || "Asset";
+    card.append(title);
+    for (const order of group.orders) {
+      const line = document.createElement("div");
+      line.className = "tx-order";
+      const head = document.createElement("div");
+      head.className = "tx-row";
+      const side = document.createElement("span");
+      side.style.color = order.side === "Sell" ? TX_OUT : TX_IN;
+      side.textContent = `${order.side} ${order.amount}`;
+      const price = document.createElement("span");
+      price.className = "tx-value";
+      price.textContent = `${order.price} WART`;
+      head.append(side, price);
+      const filled = document.createElement("p");
+      filled.className = "tx-order-filled";
+      filled.textContent = `Filled: ${order.filled}`;
+      line.append(head, filled);
+      if (order.txHash) {
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "defi-compact-btn";
+        cancel.dataset.cancelOrder = order.txHash;
+        cancel.textContent = "Cancel order";
+        line.append(cancel);
+      }
+      card.append(line);
+    }
+    list.append(card);
+  }
+}
+
+function paintChainActivity() {
+  const note = $("activity-chain-note");
+  const list = $("activity-chain-list");
+  const chain = selectedChain();
+  const spec = CHAIN_VIEW[chain] || { label: "Chain" };
+  if (!note || !list) return;
+  for (const button of document.querySelectorAll("#activity-chain [data-chain-tab]")) {
+    button.classList.toggle("is-on", button.dataset.chainTab === chainTab);
+  }
+  const refresh = $("activity-chain-refresh");
+  refresh.disabled = chainLoading;
+  refresh.textContent = chainLoading ? "Loading…" : "Refresh";
+  const explorer = $("activity-explorer");
+  const url = chainExplorer(chain, activeAddress());
+  explorer.hidden = !url;
+  list.replaceChildren();
+  if (!activeAddress()) {
+    note.hidden = false;
+    note.textContent = `${spec.label} needs an address before activity can load.`;
+    return;
+  }
+  if (chainTab === "tunnels") {
+    note.hidden = false;
+    note.textContent = "No tunnels from this wallet yet.";
+    return;
+  }
+  if (chainError) {
+    note.hidden = false;
+    note.textContent = chainError;
+    return;
+  }
+  if (chainLoading && chainRows.length === 0) {
+    note.hidden = false;
+    note.textContent = "Loading…";
+    return;
+  }
+  if (!chainRows.length) {
+    note.hidden = false;
+    note.textContent = `No ${spec.label} transactions yet.`;
+    return;
+  }
+  note.hidden = true;
+  for (const row of chainRows) list.append(paintChainCard(row, spec.label));
+}
+
+function paintActivity() {
+  if (!$("activity") || !$("activity-wart")) return;
+  const wart = isWartChain();
+  $("activity-wart").hidden = !wart;
+  $("activity-chain").hidden = wart;
+  if (!wart) {
+    paintChainActivity();
+    return;
+  }
+  const ordersTab = $("activity-orders-tab");
+  ordersTab.hidden = networkId() !== "defi";
+  if (activityTab === "orders" && ordersTab.hidden) activityTab = "history";
+  for (const button of $("activity-wart-tabs").querySelectorAll("[data-activity-tab]")) {
+    button.classList.toggle("defi-compact-btn-active", button.dataset.activityTab === activityTab);
+  }
+  $("activity-history").hidden = activityTab !== "history";
+  $("activity-pending").hidden = activityTab !== "pending";
+  $("activity-orders").hidden = activityTab !== "orders";
+  paintHistory();
+  paintPendingList();
+  paintOrderList();
+}
+
+function paintActivityDetail() {
+  const rows = $("activity-detail-rows");
+  const empty = $("activity-detail-empty");
+  const title = $("activity-detail-title");
+  if (!rows || !empty || !title) return;
+  const item = activityDetail;
+  if (!item) {
+    title.textContent = "Activity";
+    empty.hidden = false;
+    rows.replaceChildren();
+    return;
+  }
+  empty.hidden = true;
+  title.textContent = item.action || "Activity";
+  const pairs = [
+    ["When", item.date],
+    ["Action", item.action],
+    ["Amount", item.amount],
+    item.usdAmount && item.usdAmount !== "N/A" ? ["Value", item.usdAmount] : null,
+    item.description ? ["Detail", item.description] : null,
+    item.assetName ? ["Asset", item.assetName] : null,
+    item.fee ? ["Fee", feeLabel(item)] : null,
+    item.fromAddress ? ["From", item.fromAddress] : null,
+    item.toAddress ? ["To", item.toAddress] : null,
+    item.height != null ? ["Block", String(item.height)] : null,
+    item.confirmations != null ? ["Confirmations", String(item.confirmations)] : null,
+    item.txHash ? ["Transaction", item.txHash] : null,
+  ].filter((row) => row && row[1]);
+  rows.replaceChildren();
+  for (const [label, value] of pairs) rows.append(txLine(label, value));
+}
+
+function openActivityDetail(item) {
+  activityDetail = item;
+  paintActivityDetail();
+  showWalletPage("activity-detail");
+}
+
+async function loadWartHistory({ append = false, gen = refreshGen } = {}) {
+  if (!session || !isWartChain()) return;
+  const ticket = ++activityFetch;
+  const address = session.address;
+  const defi = networkId() === "defi";
+  const filter = historyFilter;
+  const stale = () => ticket !== activityFetch || gen !== refreshGen;
+  if (append) historyLoadingMore = true;
+  else {
+    historyLoading = true;
+    historyError = "";
+    historyVisible = 7;
+  }
+  paintActivity();
+  try {
+    let loaded = false;
+    if (defi && !(append && historyMode === "node")) {
+      try {
+        const page = append && historyMode === "indexer" ? historyNextPage : 1;
+        const result = await fetchIndexerHistory(address, { page, filter });
+        if (stale()) return;
+        historyMode = "indexer";
+        historyHasMore = Boolean(result.hasMore);
+        historyNextPage = result.nextPage || page + 1;
+        historyFromId = null;
+        historyAll = append ? historyAll.concat(result.items) : result.items;
+        historyError = "";
+        loaded = true;
+      } catch (error) {
+        if (append && historyMode === "indexer") throw error;
+      }
+    }
+    if (!loaded) {
+      const before = append && historyFromId != null ? historyFromId : 4294967295;
+      let data;
+      try {
+        data = await nodeGet(`account/${address}/history/${before}`);
+      } catch (error) {
+        if (!append && /not found/i.test(error.message || "")) data = { perBlock: [] };
+        else throw error;
+      }
+      if (stale()) return;
+      const items = historyItemsFromNode(data, address);
+      historyMode = "node";
+      historyAll = append ? historyAll.concat(items) : items;
+      const fromId = typeof data?.fromId === "number" && data.fromId > 0 ? data.fromId : null;
+      historyFromId = fromId;
+      historyHasMore = items.length > 0 && fromId != null;
+      historyError = "";
+    }
+  } catch (error) {
+    if (stale()) return;
+    historyError = error.message || "History unavailable on this node";
+    if (!append) {
+      historyAll = [];
+      historyHasMore = false;
+    }
+  } finally {
+    if (!stale()) {
+      historyLoading = false;
+      historyLoadingMore = false;
+      paintActivity();
+    }
+  }
+}
+
+async function loadChainActivity(gen = refreshGen) {
+  const ticket = ++activityFetch;
+  const chain = selectedChain();
+  const address = activeAddress();
+  const stale = () => ticket !== activityFetch || gen !== refreshGen;
+  chainLoading = true;
+  chainError = "";
+  paintActivity();
+  if (!address) {
+    if (stale()) return;
+    chainRows = [];
+    chainLoading = false;
+    paintActivity();
+    return;
+  }
+  try {
+    const rows = await readChainActivity(chain, address);
+    if (stale()) return;
+    chainRows = rows;
+    chainError = "";
+  } catch (error) {
+    if (stale()) return;
+    chainRows = [];
+    chainError = error.message || "Activity is unavailable.";
+  } finally {
+    if (!stale()) {
+      chainLoading = false;
+      paintActivity();
+    }
+  }
+}
+
+function showMoreHistory() {
+  const filtered = displayedHistory();
+  if (filtered.length > historyVisible) {
+    historyVisible += 7;
+    paintActivity();
+    return;
+  }
+  if (historyHasMore && !historyLoadingMore && !historyLoading) {
+    historyVisible += 7;
+    void loadWartHistory({ append: true });
+  }
+}
+
+function chooseHistoryFilter(id) {
+  historyFilterOpen = false;
+  if (id === historyFilter) {
+    paintActivity();
+    return;
+  }
+  historyFilter = id;
+  historyVisible = 7;
+  if (historyMode === "node") {
+    paintActivity();
+    return;
+  }
+  historyAll = [];
+  historyHasMore = false;
+  void loadWartHistory({ append: false });
+}
+
+function onActivityClick(event) {
+  const copy = event.target.closest("[data-copy]");
+  if (copy) {
+    event.stopPropagation();
+    copyText(copy.dataset.copy || "");
+    return;
+  }
+  const open = event.target.closest("[data-open-url]");
+  if (open) {
+    event.stopPropagation();
+    openUrl(open.dataset.openUrl);
+    return;
+  }
+  const cancel = event.target.closest("[data-cancel-order]");
+  if (cancel) {
+    event.stopPropagation();
+    void cancelOrder({ txHash: cancel.dataset.cancelOrder });
+    return;
+  }
+  const tab = event.target.closest("[data-activity-tab]");
+  if (tab) {
+    activityTab = tab.dataset.activityTab;
+    paintActivity();
+    return;
+  }
+  const chain = event.target.closest("[data-chain-tab]");
+  if (chain) {
+    chainTab = chain.dataset.chainTab;
+    paintActivity();
+    return;
+  }
+  const filter = event.target.closest("[data-history-filter]");
+  if (filter) {
+    chooseHistoryFilter(filter.dataset.historyFilter);
+    return;
+  }
+  if (event.target.closest("#activity-filter-toggle")) {
+    historyFilterOpen = !historyFilterOpen;
+    paintActivity();
+    return;
+  }
+  if (event.target.closest("#activity-refresh")) {
+    void loadWartHistory({ append: false });
+    return;
+  }
+  if (event.target.closest("#activity-hide")) {
+    historyOpen = !historyOpen;
+    paintActivity();
+    return;
+  }
+  if (event.target.closest("#activity-more")) {
+    showMoreHistory();
+    return;
+  }
+  if (event.target.closest("#activity-chain-refresh")) {
+    void loadChainActivity();
+    return;
+  }
+  if (event.target.closest("#activity-explorer")) {
+    const url = chainExplorer(selectedChain(), activeAddress());
+    if (url) openUrl(url);
+    return;
+  }
+  if (event.target.closest("#orders-refresh")) {
+    void refreshOrders();
+    return;
+  }
+  const card = event.target.closest("[data-history-index]");
+  if (card) {
+    const item = visibleHistory()[Number(card.dataset.historyIndex)];
+    if (item) openActivityDetail(item);
+    return;
+  }
+  const chainCard = event.target.closest("[data-chain-url]");
+  if (chainCard?.dataset.chainUrl) openUrl(chainCard.dataset.chainUrl);
+}
+
+function onActivityKey(event) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = event.target.closest("[data-history-index], [data-chain-url]");
+  if (!card || event.target.closest("button")) return;
+  event.preventDefault();
+  card.click();
+}
+
+function orderRecord(order, side) {
+  const tx = order?.transaction || order || {};
+  const body = tx.data || order || {};
+  const txHash = String(order?.txHash || tx.hash || order?.hash || "").toLowerCase();
+  const isBuy = side ? side === "Buy" : (order?.isBuy === true || body.isBuy === true || body.buy === true || String(order?.side || body.side || "").toLowerCase() === "buy");
+  return {
+    txHash,
+    side: isBuy ? "Buy" : "Sell",
+    amount: order?.amount?.str || body.amount?.str || order?.amount || "?",
+    price: order?.formattedLimitPrice ?? order?.limit?.doubleAdjusted ?? body.limit?.doubleAdjusted ?? body.limit?.hex ?? body.limit ?? "?",
+    filled: order?.filled?.str || "0",
+  };
+}
+
+function ordersFrom(data) {
+  const rows = Array.isArray(data) ? data : data?.orders || data?.openOrders || [];
+  if (rows.some((row) => row && (row.baseAsset || row.wartToAssetSwaps || row.assetToWartSwaps))) {
+    return rows.map((group) => ({
+      name: group.baseAsset?.name || "Asset",
+      orders: [
+        ...(Array.isArray(group.wartToAssetSwaps) ? group.wartToAssetSwaps : []).map((order) => orderRecord(order, "Buy")),
+        ...(Array.isArray(group.assetToWartSwaps) ? group.assetToWartSwaps : []).map((order) => orderRecord(order, "Sell")),
+      ].filter((order) => /^[0-9a-f]{64}$/.test(order.txHash)),
+    })).filter((group) => group.orders.length);
+  }
+  const orders = [];
+  for (const entry of rows) {
+    if (!entry || typeof entry !== "object") continue;
+    const order = orderRecord(entry);
+    if (/^[0-9a-f]{64}$/.test(order.txHash)) orders.push(order);
+  }
+  return orders.length ? [{ name: "Orders", orders }] : [];
 }
 
 function pendingFrom(data) {
@@ -5477,55 +6276,50 @@ function pendingFrom(data) {
   for (const entry of rows) {
     if (!entry || typeof entry !== "object") continue;
     const tx = entry.transaction || entry;
-    const type = String(entry.type || tx.type || "Pending");
-    const hash = String(tx.hash || entry.hash || "");
-    items.push({ type, hash });
+    items.push({
+      type: String(entry.type || tx.type || "Pending"),
+      hash: String(tx.hash || entry.hash || ""),
+      data: tx.data || entry.data || {},
+    });
   }
-  return items.slice(0, 8);
-}
-
-function renderPending(items) {
-  const list = $("pending");
-  list.replaceChildren();
-  $("pending-empty").hidden = items.length > 0;
-  for (const item of items) {
-    const li = document.createElement("li");
-    const line = document.createElement("div");
-    line.textContent = item.type;
-    const meta = document.createElement("div");
-    meta.className = "sub";
-    meta.textContent = item.hash ? `${item.hash.slice(0, 16)}…` : "In the mempool";
-    li.append(line, meta);
-    list.append(li);
-  }
+  return items;
 }
 
 async function refreshPending() {
   if (!$("pending") || !session || !isWartChain()) {
-    if ($("pending")) renderPending([]);
+    pendingItems = [];
+    paintActivity();
     return;
   }
   try {
-    renderPending(pendingFrom(await nodeGet(`account/${session.address}/mempool`)));
-  } catch {
-    renderPending([]);
+    pendingItems = pendingFrom(await nodeGet(`account/${session.address}/mempool`));
+  } catch (error) {
+    pendingItems = [];
+    if (error?.message && !/not found/i.test(error.message)) ordersError = ordersError || "";
   }
+  paintActivity();
 }
 
 async function refreshOrders() {
   if (!$("orders")) return;
-  $("orders-error").textContent = "";
   if (!session || networkId() !== "defi") {
-    renderOrders([]);
-    $("orders-empty").hidden = false;
-    $("orders-empty").textContent = "Open orders are on the DeFi testnet.";
+    orderGroups = [];
+    ordersLoading = false;
+    paintActivity();
     return;
   }
-  $("orders-empty").textContent = "No open limit orders.";
+  ordersLoading = true;
+  ordersError = "";
+  paintActivity();
   try {
-    renderOrders(ordersFrom(await nodeGet(`account/${session.address}/open_orders`)));
-  } catch {
-    renderOrders([]);
+    orderGroups = ordersFrom(await nodeGet(`account/${session.address}/open_orders`));
+    ordersError = "";
+  } catch (error) {
+    orderGroups = [];
+    ordersError = /not found/i.test(error.message || "") ? "" : (error.message || "Orders unavailable");
+  } finally {
+    ordersLoading = false;
+    paintActivity();
   }
 }
 
@@ -5540,7 +6334,8 @@ async function liveBalance() {
 
 async function cancelOrder(item) {
   if (!session) return;
-  $("orders-error").textContent = "";
+  ordersError = "";
+  if ($("orders-error")) $("orders-error").textContent = "";
   try {
     const lookup = await nodeGet(`transaction/lookup/${item.txHash}`);
     const signed = lookup?.transaction?.signedCommon || lookup?.signedCommon || {};
@@ -5562,10 +6357,13 @@ async function cancelOrder(item) {
       cancelNonceId: signed.nonceId,
     });
     const result = await nodePost("transaction/add", tx);
-    $("orders-error").textContent = `Cancel submitted ${result?.txHash || result?.hash || ""}`.trim();
+    const submitted = `Cancel submitted ${result?.txHash || result?.hash || ""}`.trim();
     await refreshWallet();
+    ordersError = submitted;
+    if ($("orders-error")) $("orders-error").textContent = ordersError;
   } catch (error) {
-    $("orders-error").textContent = error.message;
+    ordersError = error.message;
+    if ($("orders-error")) $("orders-error").textContent = ordersError;
   }
 }
 
@@ -7458,6 +8256,11 @@ function bind() {
   document.querySelectorAll("[data-back]").forEach((button) => {
     button.addEventListener("click", () => showWalletPage(button.dataset.back || "home"));
   });
+  const activityPage = $("wpage-activity");
+  if (activityPage) {
+    activityPage.addEventListener("click", onActivityClick);
+    activityPage.addEventListener("keydown", onActivityKey);
+  }
   $("go-send").addEventListener("click", () => showWalletPage("send"));
   $("go-receive").addEventListener("click", () => showWalletPage("receive"));
   $("go-receive-defi").addEventListener("click", () => showWalletPage("receive"));
