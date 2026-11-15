@@ -15,6 +15,7 @@ import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs
 import { createFilesService, handleFilesRequest } from "./files.mjs";
 import { execFile } from "node:child_process";
 import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
+import { createLocalMiner, defaultMinerScript } from "./miner-local.mjs";
 import { canPrompt, changeFirewall, createLanForwarder, createLanState, lanAddresses, lanStatus, runUfw, ufwEnabled } from "./jellyfin-lan.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
@@ -153,6 +154,7 @@ const MOBILE_API = createMobileApi({
   state: MOBILE_STATE,
   files: FILES,
   mining: () => miningStatus(miningEnabled),
+  miningAction: (action) => mobileMiningAction(action),
   containers: (action, name) => mobileContainers(action, name),
   info: mobileHogInfo,
 });
@@ -409,7 +411,13 @@ function miningStatus(enabled) {
       dnsName: tailnetDnsName,
     }),
     error: miningError,
+    ...localMinerFields(),
   };
+}
+
+function localMinerFields() {
+  const local = LOCAL_MINER.status();
+  return { localMiner: local.state, localMinerError: local.error };
 }
 
 async function setMining(enabled) {
@@ -438,6 +446,56 @@ async function setMining(enabled) {
 }
 let miningEnabled = false;
 let miningAddress = "";
+let persistMining = false;
+
+function configuredMinerScript() {
+  const fromEnv = process.env.HOG_MINER_SCRIPT;
+  if (typeof fromEnv === "string" && fromEnv.trim()) return fromEnv.trim();
+  try {
+    const saved = JSON.parse(readFileSync(join(HOG_DATA_DIR, "miner.json"), "utf8"));
+    if (typeof saved?.script === "string" && saved.script.trim()) return saved.script.trim();
+  } catch {
+    // No miner.json: use the BzMiner folder in Downloads.
+  }
+  return defaultMinerScript();
+}
+
+const LOCAL_MINER = createLocalMiner({
+  home: homedir(),
+  logFile: join(HOG_DATA_DIR, "miner.log"),
+  scriptPath: configuredMinerScript,
+  port: () => {
+    try { return stratumPort(); } catch { return 3456; }
+  },
+  rootHelper: process.env.HOG_MINER_HELPER || "/usr/libexec/hog-miner-ctl",
+});
+
+function miningActionResult(result) {
+  const status = miningStatus(miningEnabled);
+  if (!result.ok) status.localMinerError = result.error || status.localMinerError;
+  return { ...status, ok: result.ok, error: result.ok ? "" : (result.error || status.localMinerError || "") };
+}
+
+/** Phone start/stop. Turns Solo mining on if it is off, then launches BzMiner. */
+async function mobileMiningAction(action) {
+  if (action === "start") {
+    if (!miningEnabled || !STRATUM.status().stratumListening) {
+      miningEnabled = true;
+      await setMining(true);
+      if (persistMining) saveMiningState({ enabled: miningEnabled, address: miningAddress, network: miningNetworkSetting, tailnet: miningTailnet });
+    }
+    if (!STRATUM.status().stratumListening) {
+      return { ...miningStatus(miningEnabled), ok: false, error: miningError || "Solo mining is not listening, so BzMiner was not started." };
+    }
+    const result = await LOCAL_MINER.start();
+    return miningActionResult(result);
+  }
+  if (action === "stop") {
+    const result = await LOCAL_MINER.stop();
+    return miningActionResult(result);
+  }
+  throw Object.assign(new Error("action must be start or stop"), { status: 400 });
+}
 
 const NETWORKS = {
   defi: "https://warthog-defitestnet.duckdns.org",
@@ -2517,6 +2575,7 @@ async function handle(req, res, runtime) {
 }
 
 export function startServer(port = PORT, { persistSites = false } = {}) {
+  persistMining = Boolean(persistSites);
   const runtime = createRuntime({ persistSites });
   const server = createServer((req, res) => {
     handle(req, res, runtime).catch((error) => {

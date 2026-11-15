@@ -65,3 +65,18 @@ if [ -f "$HELPER_SRC" ] && [ -f "$POLICY_SRC" ]; then
   install -m 755 "$HELPER_SRC" /usr/libexec/hog-preview-self-update
   install -m 644 "$POLICY_SRC" /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.self-update.policy
 fi
+
+# Phone start/stop of BzMiner. The helper only runs start_warthog.sh, and
+# sudoers allows that one program with no password so a paired phone can
+# reach it while nobody is at the computer.
+MINER_SRC='/opt/${sanitizedProductName}/resources/hog-miner-ctl'
+SUDOERS_SRC='/opt/${sanitizedProductName}/resources/hog-miner.sudoers'
+if [ -f "$MINER_SRC" ] && [ -f "$SUDOERS_SRC" ]; then
+  install -d /usr/libexec /etc/sudoers.d
+  install -m 755 "$MINER_SRC" /usr/libexec/hog-miner-ctl
+  if visudo -cf "$SUDOERS_SRC" >/dev/null; then
+    install -m 440 "$SUDOERS_SRC" /etc/sudoers.d/hog-miner
+  else
+    echo "Hog preview: miner sudoers file was rejected and was not installed." >&2
+  fi
+fi

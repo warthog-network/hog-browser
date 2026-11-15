@@ -38,6 +38,7 @@ cp -a \
   "${ROOT}/tailnet.mjs" \
   "${ROOT}/files.mjs" \
   "${ROOT}/mobile.mjs" \
+  "${ROOT}/miner-local.mjs" \
   "${ROOT}/jellyfin-lan.mjs" \
   "${ROOT}/opfs-polyfill.js" \
   "${ROOT}/package.json" \

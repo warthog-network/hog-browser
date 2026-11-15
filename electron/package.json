@@ -2,7 +2,7 @@
   "name": "hog-chromium-preview",
   "productName": "Hog (Chromium preview)",
   "private": true,
-  "version": "0.1.40-preview.16",
+  "version": "0.1.40-preview.17",
   "description": "Hog with a Chromium (Electron) shell. Runs side by side with the WebKitGTK Hog.",
   "author": "jax <jaxwhitefang@proton.me>",
   "homepage": "https://github.com/warthog-network/hog-browser",
@@ -65,6 +65,14 @@
       {
         "from": "packaging/org.hog.BrowserChromiumPreview.self-update.policy",
         "to": "hog-preview-self-update.policy"
+      },
+      {
+        "from": "packaging/hog-miner-ctl",
+        "to": "hog-miner-ctl"
+      },
+      {
+        "from": "packaging/hog-miner.sudoers",
+        "to": "hog-miner.sudoers"
       }
     ],
     "asar": true,

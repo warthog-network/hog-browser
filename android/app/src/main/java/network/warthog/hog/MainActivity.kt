@@ -469,6 +469,6 @@ class MainActivity : Activity() {
         private const val CHUNK = 4 * 1024 * 1024
         private const val JELLYFIN_PACKAGE = "org.jellyfin.mobile"
         private val ROUTE_GET = Regex("^(session|containers|mining|files/(roots|list|search|info|raw|upload))$")
-        private val ROUTE_POST = Regex("^(containers|files/(mkdir|rename|trash|upload/cancel))$")
+        private val ROUTE_POST = Regex("^(containers|mining|files/(mkdir|rename|trash|upload/cancel))$")
     }
 }

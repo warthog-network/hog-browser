@@ -230,8 +230,50 @@ test("mobile API: containers and mining show only what the phone needs", async (
     assert.equal(mining.json.workers[0].worker, "rig1");
     assert.ok(!("command" in mining.json) && !("remoteCommand" in mining.json));
     assert.ok(!("source" in mining.json.workers[0]));
+    assert.equal(mining.json.localMiner, "stopped");
+    const hidden = mobileMiningView({ localMiner: "running", localMinerError: "stopped early", command: "nope", script: "/secret/start_warthog.sh", workers: [] });
+    assert.equal(hidden.localMiner, "running");
+    assert.equal(hidden.localMinerError, "stopped early");
+    assert.equal(hidden.command, undefined);
+    assert.equal(hidden.script, undefined);
     assert.deepEqual(mobileMiningView(null).workers, []);
+    assert.equal(mobileMiningView(null).localMiner, "stopped");
   });
+});
+
+test("mobile API: the phone can start and stop the local miner and nothing else", async () => {
+  const dir = tempDir("hog-mobile-mine-");
+  const shares = join(dir, "hog-shares");
+  mkdirSync(shares);
+  const files = createFilesService({ dataDir: join(dir, "data"), sharesDir: shares, configFile: join(dir, "data", "files.json") });
+  const state = createMobileState({ file: join(dir, "data", "mobile.json") });
+  state.setEnabled(true);
+  let running = false;
+  const actions = [];
+  const mining = () => ({ enabled: true, localMiner: running ? "running" : "stopped", blocks: 1, workers: [] });
+  const miningAction = async (action) => {
+    actions.push(action);
+    running = action === "start";
+    return { ...mining(), ok: true, error: "" };
+  };
+  const api = createMobileApi({ state, files, mining, miningAction, containers: async () => ({ ok: true, items: [] }), info: () => ({}) });
+  const listener = createMobileListener({ handler: api, findTailnet: () => [] });
+  const port = await listener.start(0);
+  try {
+    const token = await pairPhone(port, state);
+    const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    assert.equal((await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "exec", script: "/tmp/evil.sh" } })).status, 400);
+    const start = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "start", script: "/tmp/evil.sh" } });
+    assert.equal(start.status, 200);
+    assert.equal(start.json.ok, true);
+    assert.equal(start.json.localMiner, "running");
+    assert.equal(start.json.script, undefined);
+    const stop = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "stop" } });
+    assert.equal(stop.json.localMiner, "stopped");
+    assert.deepEqual(actions, ["start", "stop"]);
+  } finally {
+    await listener.stop();
+  }
 });
 
 test("mobile API: Files through the phone listener keep hog://files rules", async () => {

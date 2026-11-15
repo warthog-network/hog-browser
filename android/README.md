@@ -1,7 +1,8 @@
 # Hog phone app (Android)
 
 A small companion app for hog over Tailscale: container status and
-start/stop/restart, Jellyfin, mining stats (read-only) and Files.
+start/stop/restart, Jellyfin, mining stats, start/stop of this computer's
+BzMiner (`start_warthog.sh`), and Files.
 
 - Kotlin + one WebView. The UI is bundled in `app/src/main/assets/web/`
   (plain HTML/CSS/JS, no build step) and served from

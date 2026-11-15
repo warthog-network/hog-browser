@@ -28,3 +28,5 @@ fi
 
 rm -f /usr/libexec/hog-preview-self-update
 rm -f /usr/share/polkit-1/actions/org.hog.BrowserChromiumPreview.self-update.policy
+rm -f /usr/libexec/hog-miner-ctl
+rm -f /etc/sudoers.d/hog-miner

@@ -8,10 +8,11 @@
 // SHA-256, lists paired phones in Settings, and can revoke each one.
 //
 // The API exposes only: hog-managed containers (status, start/stop/restart),
-// the Jellyfin link, mining stats (read-only) and Files (browse, preview,
-// download, chunked upload, new folder, rename, delete to Trash) through the
-// same Files service and rules as hog://files. Nothing else in hog (wallet,
-// node, browse proxy, keys) is reachable from it.
+// the Jellyfin link, mining stats plus start/stop of the computer's BzMiner,
+// and Files (browse, preview, download, chunked upload, new folder, rename,
+// delete to Trash) through the same Files service and rules as hog://files.
+// Nothing else in hog (wallet, node, browse proxy, keys) is reachable from it.
+// The phone cannot choose which program starts: Hog launches start_warthog.sh.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -349,6 +350,8 @@ export function mobileMiningView(status) {
     lastResult: String(s.lastResult || "").slice(0, 200),
     lastError: String(s.lastError || s.error || "").slice(0, 300),
     allowTailnet: Boolean(s.allowTailnet),
+    localMiner: s.localMiner === "running" || s.localMiner === "missing" ? s.localMiner : "stopped",
+    localMinerError: String(s.localMinerError || "").slice(0, 300),
     workers: Array.isArray(s.workers)
       ? s.workers.slice(0, 64).map((w) => ({
         worker: String(w.worker || ""),
@@ -367,9 +370,10 @@ export function mobileMiningView(status) {
 /**
  * The mobile API request handler.
  * @param {{ state: ReturnType<typeof createMobileState>, files: any, mining: () => any,
+ *   miningAction?: (action: "start" | "stop") => Promise<any>,
  *   containers: (action: string, name?: string) => Promise<any>, info?: () => any }} deps
  */
-export function createMobileApi({ state, files, mining, containers, info = () => ({}) }) {
+export function createMobileApi({ state, files, mining, miningAction, containers, info = () => ({}) }) {
   return async function handle(req, res) {
     const problem = mobileRequestProblem(req);
     if (problem === "peer") {
@@ -403,6 +407,18 @@ export function createMobileApi({ state, files, mining, containers, info = () =>
 
       if (route === "session" && method === "GET") return sendJson(res, 200, { ok: true, device: auth.device, hog: info() });
       if (route === "mining" && method === "GET") return sendJson(res, 200, mobileMiningView(mining()));
+      if (route === "mining" && method === "POST") {
+        if (typeof miningAction !== "function") return sendJson(res, 404, { ok: false, error: "Not available from the phone." });
+        const body = await readJson(req);
+        const action = String(body.action || "");
+        if (action !== "start" && action !== "stop") return sendJson(res, 400, { ok: false, error: "action must be start or stop" });
+        const status = await miningAction(action);
+        const view = mobileMiningView(status);
+        if (status && status.ok === false) {
+          return sendJson(res, 200, { ...view, ok: false, error: String(status.error || view.localMinerError || "Could not change the miner.").slice(0, 300) });
+        }
+        return sendJson(res, 200, view);
+      }
       if (route === "containers" && method === "GET") return sendJson(res, 200, await containers("list"));
       if (route === "containers" && method === "POST") {
         const body = await readJson(req);

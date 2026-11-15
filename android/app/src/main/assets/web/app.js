@@ -248,16 +248,25 @@ async function loadJellyfin() {
 }
 
 // ---------- mining ----------
-async function loadMining() {
-  const m = await apiGet("mining");
-  const on = m.enabled && m.stratumListening;
-  const sync = !m.enabled ? "Turn on Solo mining in hog." : !m.nodeTabConnected ? "Waiting for hog's node tab." : m.synced ? `Synced at ${m.nodeHeight || m.height}` : `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
+function paintMining(m) {
+  const sync = !m.enabled ? "Solo mining is off. Start turns it on." : !m.nodeTabConnected ? "Waiting for hog's node tab." : m.synced ? `Synced at ${m.nodeHeight || m.height}` : `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
+  const rig = m.localMiner === "running" ? "BzMiner is running on this computer." : m.localMiner === "missing" ? (m.localMinerError || "Hog could not find BzMiner on this computer.") : "BzMiner is off.";
+  const network = m.networkLabel || m.network || "";
   $("mining-status").replaceChildren(
-    el("span", { class: `status-dot${on ? " on" : ""}` }),
+    el("span", { class: `status-dot${m.localMiner === "running" ? " on" : ""}` }),
     el("div", { class: "status-text" },
-      el("b", { text: on ? `Mining · ${m.networkLabel || m.network || "?"}` : m.enabled ? "Starting…" : "Mining is off" }),
+      el("b", { text: m.localMiner === "running" ? `BzMiner${network ? ` · ${network}` : ""}` : "BzMiner is off" }),
+      el("span", { text: rig }),
       el("span", { text: sync }),
+      m.localMinerError && m.localMiner !== "missing" ? el("span", { class: "error", text: m.localMinerError }) : null,
       m.lastError ? el("span", { class: "error", text: m.lastError }) : null));
+  const actions = $("mining-actions");
+  actions.replaceChildren();
+  if (m.localMiner === "running") {
+    actions.append(el("button", { class: "danger", type: "button", text: "Stop miner", onclick: () => confirmSheet("Stop BzMiner on this computer?", "Stop", () => miningAct("stop")) }));
+  } else if (m.localMiner !== "missing") {
+    actions.append(el("button", { class: "primary", type: "button", text: "Start miner", onclick: () => miningAct("start") }));
+  }
   const stat = (label, value, cls = "") => el("div", { class: `stat ${cls}` }, el("b", { text: String(value) }), el("span", { text: label }));
   $("mining-stats").replaceChildren(
     stat("Blocks", m.blocks, "gold"), stat("Shares", m.shares), stat("Miners", m.miners, "blue"),
@@ -270,6 +279,23 @@ async function loadMining() {
     workers.append(el("div", { class: "card" },
       el("div", { class: "ct-head" }, el("span", { class: "ct-name", text: w.worker || "(no name)" }), el("span", { class: `badge ${w.connected ? "running" : ""}`, text: w.connected ? (w.remote ? "tailnet" : "this PC") : "offline" })),
       el("div", { class: "ct-meta", text: `${w.blocks} blocks · ${w.shares} shares · ${w.rejected} rejected${w.lastShareAt ? ` · last ${when(w.lastShareAt)}` : ""}` })));
+  }
+}
+
+async function loadMining() {
+  paintMining(await apiGet("mining"));
+}
+
+async function miningAct(action) {
+  for (const button of $("mining-actions").querySelectorAll("button")) button.disabled = true;
+  try {
+    const next = await apiPost("mining", { action });
+    paintMining(next);
+    const started = action === "start" && next.localMiner === "running";
+    toast(next.ok ? (started ? "BzMiner is running on this computer." : action === "stop" ? "BzMiner is stopping." : "Done.") : (next.error || "That did not work."), !next.ok);
+  } catch (error) {
+    toast(error.message, true);
+    loadMining().catch(() => {});
   }
 }
 
@@ -488,6 +514,7 @@ function wire() {
 const demo = (() => {
   const params = new URLSearchParams(location.search);
   let paired = params.get("demo") !== "pair";
+  let demoMiner = "stopped";
   const now = Date.now();
   const entries = {
     "": [
@@ -517,7 +544,7 @@ const demo = (() => {
         ] };
       }
       if (route === "mining") {
-        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, lastError: "", workers: [
+        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, lastError: "", localMiner: demoMiner, localMinerError: "", workers: [
           { worker: "hog-mainnet", remote: false, connected: 1, shares: 80, blocks: 55, rejected: 6, lastShareAt: now - 42e3 },
           { worker: "rig2-mainnet", remote: true, connected: 1, shares: 12, blocks: 6, rejected: 1, lastShareAt: now - 6e5 },
         ] };
@@ -530,6 +557,11 @@ const demo = (() => {
       if (route === "containers") {
         const data = await this.get("containers");
         return { ok: true, status: 200, body: { ...data, ok: true } };
+      }
+      if (route === "mining") {
+        if (body.action === "start") demoMiner = "running";
+        if (body.action === "stop") demoMiner = "stopped";
+        return { ok: true, status: 200, body: await this.get("mining") };
       }
       return { ok: true, status: 200, body: { ok: true } };
     },

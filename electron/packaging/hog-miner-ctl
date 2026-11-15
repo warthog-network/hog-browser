@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Start or stop this computer's BzMiner. Invoked only as:
+
+    sudo -n /usr/libexec/hog-miner-ctl start
+    sudo -n /usr/libexec/hog-miner-ctl stop
+
+The phone never chooses the program. This runs start_warthog.sh inside the
+caller's home, as root, so the clock locks in that script apply. Stop signals
+only processes that are that launcher or bzminer on Hog's local stratum.
+"""
+import json
+import os
+import pwd
+import signal
+import sys
+import time
+from pathlib import Path
+
+POOL = "127.0.0.1:3456"
+NAME = "start_warthog.sh"
+
+
+def die(message, code=1):
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def caller_home():
+    if os.geteuid() != 0:
+        die("This helper must run as root via sudo.")
+    user = os.environ.get("SUDO_USER", "")
+    if not user or user == "root":
+        die("Run this through sudo from your user.")
+    try:
+        return Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        die("Hog could not find the user account.")
+
+
+def script_for(home):
+    config = home / ".local" / "share" / "hog-browser" / "miner.json"
+    try:
+        saved = json.loads(config.read_text(encoding="utf-8"))
+        picked = saved.get("script")
+        if isinstance(picked, str) and picked.strip():
+            return picked.strip()
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        pass
+    return str(home / "Downloads" / "bzminer_v100.02b6_linux" / NAME)
+
+
+def validated_script(script, home):
+    if Path(script).name != NAME:
+        die("Hog only starts start_warthog.sh in your home folder.")
+    home_real = home.resolve()
+    try:
+        real = Path(script).resolve(strict=True)
+    except OSError:
+        die("Hog could not find start_warthog.sh.")
+    if real != home_real and home_real not in real.parents:
+        die("The miner launcher has to stay in your home folder.")
+    if not real.is_file():
+        die("Hog could not find start_warthog.sh.")
+    if not os.access(real, os.X_OK):
+        die("start_warthog.sh is not executable.")
+    return real
+
+
+def processes():
+    found = []
+    proc = Path("/proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            raw = (entry / "cmdline").read_bytes().split(b"\0")
+            args = [part.decode("utf-8", "replace") for part in raw if part]
+            if not args:
+                continue
+            ppid = 0
+            for line in (entry / "status").read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("PPid:"):
+                    ppid = int(line.split()[1])
+                    break
+            cwd = os.path.realpath(entry / "cwd")
+        except (OSError, IndexError, ValueError):
+            continue
+        found.append({"pid": pid, "ppid": ppid, "args": args, "cwd": cwd})
+    return found
+
+
+def is_target(proc, script):
+    args = proc["args"]
+    base = args[0].rsplit("/", 1)[-1]
+    is_bz = base == "bzminer" or any(arg == "./bzminer" or arg.endswith("/bzminer") for arg in args)
+    if is_bz and "warthog" in args and any(POOL in arg for arg in args):
+        return True
+    if str(script) in args:
+        return True
+    if NAME in args or f"./{NAME}" in args:
+        return proc["cwd"] == str(script.parent)
+    return False
+
+
+def targets(script):
+    skip = {os.getpid(), os.getppid(), 1}
+    all_procs = processes()
+    seeds = [proc["pid"] for proc in all_procs if proc["pid"] not in skip and is_target(proc, script)]
+    keep = set(seeds)
+    grew = True
+    while grew:
+        grew = False
+        for proc in all_procs:
+            if proc["ppid"] in keep and proc["pid"] not in keep and proc["pid"] not in skip:
+                keep.add(proc["pid"])
+                grew = True
+    return [pid for pid in keep if pid not in skip]
+
+
+def launch(script, home):
+    log = home / ".local" / "share" / "hog-browser" / "miner.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.fork()
+    if pid != 0:
+        return
+    os.setsid()
+    os.chdir(script.parent)
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    if fd > 2:
+        os.close(fd)
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    if null > 2:
+        os.close(null)
+    os.execv(script, [str(script)])
+
+
+def signal_all(pids, sig):
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ("start", "stop"):
+        die("usage: hog-miner-ctl start|stop", 2)
+    home = caller_home()
+    script = validated_script(script_for(home), home)
+    action = sys.argv[1]
+    if action == "start":
+        if targets(script):
+            return
+        launch(script, home)
+        time.sleep(1.2)
+        if not targets(script):
+            die("BzMiner stopped right away.")
+        return
+    pids = targets(script)
+    if not pids:
+        return
+    signal_all(pids, signal.SIGTERM)
+    time.sleep(0.8)
+    signal_all([pid for pid in pids if pid_alive(pid)], signal.SIGKILL)
+    time.sleep(0.1)
+    if targets(script):
+        die("BzMiner is still running.")
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+if __name__ == "__main__":
+    main()

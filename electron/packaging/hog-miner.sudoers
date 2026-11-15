@@ -1,0 +1,3 @@
+# Hog's phone app starts and stops BzMiner through this helper only.
+# The helper accepts "start" or "stop" and does not take a program path.
+ALL ALL=(root) NOPASSWD: /usr/libexec/hog-miner-ctl start, /usr/libexec/hog-miner-ctl stop
