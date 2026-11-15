@@ -182,6 +182,27 @@ export function formatHealth(wad) {
   return n.toFixed(2);
 }
 
+/** Extra debt value that still leaves the health factor at 1.5. Ignores pool caps. */
+export function safeBorrowHeadroomValue(market) {
+  const account = market.account;
+  const weighted = account.totalCollateralValue * account.avgCollateralFactorWad;
+  const allowedDebtRay = weighted * RAY / MIN_SAFE_WAD;
+  if (allowedDebtRay <= account.totalDebtValueRay) return 0n;
+  return (allowedDebtRay - account.totalDebtValueRay) / RAY;
+}
+
+/** Approximate annual percentage of the Hub drawn rate. */
+export function rateToPercent(rateRay) {
+  const bps = BigInt(rateRay) * 10_000n / RAY;
+  return `${(Number(bps) / 100).toFixed(2)}%`;
+}
+
+/** USD number for an amount at an oracle price. */
+export function usdOf(amount, price, decimals, priceDecimals) {
+  const scaled = BigInt(amount) * BigInt(price) / 10n ** BigInt(decimals);
+  return Number(scaled) / 10 ** Number(priceDecimals);
+}
+
 export function maxWrappableEth(market) {
   return market.ethBalance > market.ethGasReserve ? market.ethBalance - market.ethGasReserve : 0n;
 }

@@ -137,9 +137,8 @@ function base58Encode(bytes) {
 }
 
 /**
- * Addresses for one raw Warthog key.
- * Ethereum and Hemi share that key. Bitcoin is the same key as native segwit.
- * Solana is a different curve, so a raw key has no Solana account.
+ * A raw Warthog key, matching the extension.
+ * Ethereum, Hemi, Bitcoin, and Solana are derived from a recovery phrase.
  */
 export function chainAccountsFromPrivateKey(privateKeyHex) {
   const account = accountFromPrivateKey(privateKeyHex);
@@ -147,9 +146,9 @@ export function chainAccountsFromPrivateKey(privateKeyHex) {
     privateKey: account.privateKey,
     publicKey: account.publicKey,
     address: account.address,
-    evmAddress: account.evmAddress,
-    evmKey: account.privateKey,
-    btcAddress: btcAddressFromCompressed(account.publicKey),
+    evmAddress: "",
+    evmKey: "",
+    btcAddress: "",
     solAddress: "",
     phrase: "",
   };
@@ -223,12 +222,15 @@ async function evmCall(rpc, method, params, fetchImpl) {
 }
 
 export async function readNativeBalance(chain, address, fetchImpl = globalThis.fetch) {
-  if (chain === "solana" && !address) {
+  if (!address && (chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || chain === "solana")) {
+    const symbol = chain === "bitcoin" ? "BTC" : chain === "solana" ? "SOL" : "ETH";
+    const decimals = chain === "bitcoin" ? 8 : chain === "solana" ? 9 : 18;
+    const name = chain === "bitcoin" ? "Bitcoin" : chain === "solana" ? "Solana" : chain === "hemi" ? "Hemi" : "Ethereum";
     return {
-      symbol: "SOL",
-      decimals: 9,
+      symbol,
+      decimals,
       amount: 0n,
-      missing: "This key has no Solana account. Restore a 12 or 24 word phrase to open one.",
+      missing: `This key has no ${name} account. Restore a 12 or 24 word phrase to open one.`,
     };
   }
   if (chain === "ethereum" || chain === "hemi") {
@@ -389,7 +391,7 @@ export function btcKeyFromPhrase(phrase) {
   return btcKeyFromPrivateKey(node.privateKey);
 }
 
-/** Same key Hog already shows as the Bitcoin address, including a raw-key wallet. */
+/** Native-segwit key for one secp256k1 private key. Phrase wallets pass the Bitcoin child. */
 export function btcKeyFromPrivateKey(privateKeyHex) {
   const account = accountFromPrivateKey(privateKeyHex);
   return {

@@ -15,8 +15,15 @@ import {
   decryptWalletFile,
   fetchBtcFeeRate,
   fetchBtcUtxos,
+  AAVE_CORE_HUB,
+  AAVE_MAIN_SPOKE,
   formatHealth,
+  healthAfterBorrow,
+  healthAfterRepay,
+  healthAfterWithdraw,
+  healthToNumber,
   loadAaveMarket,
+  maxSafeBorrow,
   maxSafeWithdraw,
   maxSendableBtc,
   maxSendableSol,
@@ -27,6 +34,9 @@ import {
   planRepay,
   planSupply,
   planWithdraw,
+  rateToPercent,
+  safeBorrowHeadroomValue,
+  usdOf,
   readChainActivity,
   safeBalances,
   safeCancelOrder,
@@ -163,6 +173,23 @@ let lockDeadline = 0;
 let safeCreds = null;
 let safeRows = [];
 let aaveMarket = null;
+let aaveAction = "supply";
+let aaveAssetKey = "eth";
+let aaveFull = false;
+let aavePending = null;
+let aavePlanning = false;
+let aaveLoadNote = "";
+const AAVE_MARKS = {
+  ETH: "#627eea",
+  WETH: "#627eea",
+  wstETH: "#00a3ff",
+  weETH: "#8c7bff",
+  WBTC: "#f7931a",
+  cbBTC: "#f7931a",
+  USDC: "#2775ca",
+  USDT: "#26a17b",
+  GHO: "#b6509e",
+};
 let vaultWorker = null;
 let vaultSeq = 0;
 const vaultPending = new Map();
@@ -2702,18 +2729,22 @@ function paintChain() {
     $("w-addr-short").textContent = address ? shortAddress(address) : "No account";
     drawIdenticon(address || session.address);
     if (chain === "ethereum" && session.evmAddress) $("evm-line").textContent = `Sites see ${shortEvm(session.evmAddress)}`;
-    else if (chain === "hemi") $("evm-line").textContent = "Same address as Ethereum. Gas is ETH on Hemi.";
-    else if (chain === "solana" && !address) $("evm-line").textContent = "Restore a recovery phrase to open Solana.";
+    else if (chain === "hemi" && session.evmAddress) $("evm-line").textContent = "Same address as Ethereum. Gas is ETH on Hemi.";
+    else if ((chain === "ethereum" || chain === "hemi") && !session.evmAddress) $("evm-line").textContent = "Restore a 12 or 24 word phrase to open Ethereum and Hemi.";
+    else if (chain === "bitcoin" && !address) $("evm-line").textContent = "Restore a 12 or 24 word phrase to open Bitcoin.";
+    else if (chain === "solana" && !address) $("evm-line").textContent = "Restore a 12 or 24 word phrase to open Solana.";
     else if (chain === "solana") $("evm-line").textContent = "SOL on this address. Other tokens show here once they have a balance.";
     else $("evm-line").textContent = "";
   }
   if (session) $("address-line").textContent = session.address;
-  $("receive-address").textContent = address || "No address on this network.";
+  $("receive-address").textContent = address || (session ? "No address on this network." : "Not unlocked");
+  const missingName = chain === "bitcoin" ? "Bitcoin" : chain === "solana" ? "Solana" : chain === "hemi" ? "Hemi" : "Ethereum";
   $("receive-note").textContent = address
     ? `Send ${spec.symbol} to this address on ${spec.label}.`
-    : "Restore a 12 or 24 word phrase to open a Solana account.";
-  const solReady = chain === "solana" && Boolean(address);
-  const spend = isWartChain(chain) || chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || solReady;
+    : session && (chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || chain === "solana")
+      ? `Restore a 12 or 24 word phrase to open a ${missingName} account.`
+      : "";
+  const spend = Boolean(address) && (isWartChain(chain) || chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || chain === "solana");
   $("send-to-label").hidden = !spend;
   $("send-amount-label").hidden = !spend;
   $("send-fee-label").hidden = !isWartChain(chain);
@@ -2725,18 +2756,22 @@ function paintChain() {
       : chain === "solana"
         ? "Solana address"
         : "0x address";
-  $("send-chain-note").hidden = chain !== "bitcoin" && chain !== "solana";
-  if (chain === "bitcoin") {
+  const missingAccount = session && !address && (chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || chain === "solana");
+  $("send-chain-note").hidden = !missingAccount && chain !== "bitcoin" && chain !== "solana";
+  if (missingAccount) {
+    const name = chain === "bitcoin" ? "Bitcoin" : chain === "solana" ? "Solana" : chain === "hemi" ? "Hemi" : "Ethereum";
+    $("send-chain-note").textContent = `This key has no ${name} account. Restore a 12 or 24 word phrase to open one.`;
+  } else if (chain === "bitcoin") {
     $("send-chain-note").textContent = "The miner fee comes out of the Bitcoin balance. Max leaves that fee and the dust limit. Coins that are still confirming stay out of Max.";
   } else if (chain === "solana") {
-    $("send-chain-note").textContent = address
-      ? "Max leaves the network fee and the rent-exempt minimum in the account."
-      : "This key has no Solana account. Restore a 12 or 24 word phrase to open one.";
+    $("send-chain-note").textContent = "Max leaves the network fee and the rent-exempt minimum in the account.";
+  } else {
+    $("send-chain-note").textContent = "";
   }
   if ($("phrase-note") && session) {
     $("phrase-note").textContent = session.hasPhrase
       ? "These 12 or 24 words back up every Warthog account from this phrase, plus Ethereum, Bitcoin, Hemi, and Solana. Enter the password to show them."
-      : "This wallet is one private key. Ethereum and Hemi share its address, and Bitcoin uses the same key. Solana needs a recovery phrase.";
+      : "This wallet is one private key. It spends Warthog only. Ethereum, Hemi, Bitcoin, and Solana need a recovery phrase.";
   }
   const reveal = $("phrase-reveal-form");
   if (reveal) reveal.hidden = !(session && session.hasPhrase);
@@ -5218,7 +5253,7 @@ async function jsonRpc(url, method, params) {
 
 async function loadHoldings(chain, address) {
   const tokens = HOLDINGS[chain] || [];
-  if (chain === "solana" && !address) {
+  if (!address && (chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || chain === "solana")) {
     return { failed: false, error: "", rows: tokens.filter((token) => token.native).map((token) => ({ ...token, amount: null })) };
   }
   if (chain === "bitcoin") {
@@ -6021,6 +6056,11 @@ function insufficientMessage(live) {
 async function reviewOrSendEvm(event, chain) {
   event.preventDefault();
   if (!session) return;
+  if (!session.evmAddress) {
+    setSendError(chain === "hemi" ? "Hemi needs a recovery phrase." : "Ethereum needs a recovery phrase.");
+    clearReview();
+    return;
+  }
   setSendError("");
   const to = $("send-to").value.trim();
   if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
@@ -6081,7 +6121,12 @@ async function reviewOrSendEvm(event, chain) {
 
 async function reviewOrSendBtc(event) {
   event.preventDefault();
-  if (!session || !session.btcAddress) return;
+  if (!session) return;
+  if (!session.btcAddress) {
+    setSendError("Bitcoin needs a recovery phrase.");
+    clearReview();
+    return;
+  }
   setSendError("");
   let to;
   try {
@@ -6294,6 +6339,7 @@ async function fillMax() {
   const chain = selectedChain();
   try {
     if (chain === "ethereum" || chain === "hemi") {
+      if (!session.evmAddress) throw new Error(chain === "hemi" ? "Hemi needs a recovery phrase." : "Ethereum needs a recovery phrase.");
       if (!balance || balance.chain !== chain) await refreshWallet();
       const reserve = await evmTransferReserve(chain);
       const have = balance && balance.kind === "native" ? balance.amount : 0n;
@@ -6303,6 +6349,7 @@ async function fillMax() {
       return;
     }
     if (chain === "bitcoin") {
+      if (!session.btcAddress) throw new Error("Bitcoin needs a recovery phrase.");
       const [utxos, rate] = await Promise.all([fetchBtcUtxos(session.btcAddress), fetchBtcFeeRate()]);
       const max = maxSendableBtc(utxos.filter((row) => row.confirmed !== false), rate);
       $("send-amount").value = formatUnits(max, 8);
@@ -6712,9 +6759,14 @@ function emitDapp(origin, event, payload) {
 
 async function handleDapp(request) {
   if (!request || typeof request.origin !== "string" || typeof request.method !== "string") return;
-  if (!session || !session.evmAddress) {
+  if (!session) {
     if (wallet.classList.contains("is-hidden")) setWalletOpen(true);
     replyDapp(request, false, { code: 4100, message: "Unlock the wallet first." });
+    return;
+  }
+  if (!session.evmAddress) {
+    if (wallet.classList.contains("is-hidden")) setWalletOpen(true);
+    replyDapp(request, false, { code: 4100, message: "Ethereum needs a recovery phrase." });
     return;
   }
   const record = siteRecord(request.origin);
@@ -7731,13 +7783,38 @@ function bind() {
     const note = $("passkey-note");
     if (note) note.textContent = "Passkey removed. The password still unlocks this wallet.";
   });
-  $("aave-reserve").addEventListener("change", () => paintAave());
-  $("aave-from-eth").addEventListener("change", () => paintAave());
+  for (const button of document.querySelectorAll("#wpage-aave [data-aave-action]")) {
+    button.addEventListener("click", () => {
+      aaveAction = button.dataset.aaveAction || "supply";
+      aaveAssetKey = "";
+      aaveFull = false;
+      $("aave-amount").value = "";
+      clearAaveActionError();
+      clearAaveReview();
+      paintAave();
+    });
+  }
+  $("aave-amount").addEventListener("input", () => {
+    const field = $("aave-amount");
+    const cleaned = field.value.replace(/[^0-9.]/g, "");
+    if (cleaned !== field.value) field.value = cleaned;
+    aaveFull = false;
+    clearAaveActionError();
+    clearAaveReview();
+    paintAaveLive();
+  });
   $("aave-max").addEventListener("click", () => fillAaveMax());
-  $("aave-supply").addEventListener("click", () => runAave("supply"));
-  $("aave-borrow").addEventListener("click", () => runAave("borrow"));
-  $("aave-repay").addEventListener("click", () => runAave("repay"));
-  $("aave-withdraw").addEventListener("click", () => runAave("withdraw"));
+  $("aave-refresh").addEventListener("click", () => loadAavePage());
+  $("aave-unwrap").addEventListener("change", () => {
+    clearAaveReview();
+    paintAaveLive();
+  });
+  $("aave-go").addEventListener("click", () => reviewAave());
+  $("aave-review-cancel").addEventListener("click", () => {
+    clearAaveReview();
+    paintAaveLive();
+  });
+  $("aave-review-go").addEventListener("click", () => runAave());
   $("safe-key-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const apiKey = $("safe-key").value.trim();
@@ -7933,95 +8010,672 @@ async function enterWallet(privateKeyIn, phraseIn) {
   }
 }
 
-function selectedAaveReserve() {
-  if (!aaveMarket) return null;
-  const id = Number($("aave-reserve").value);
-  return aaveMarket.reserves.find((row) => row.id === id) || null;
+function aaveUsd(value) {
+  if (!Number.isFinite(value)) return "—";
+  return `$${value.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
+}
+
+function aaveAmount(raw, decimals, places = 6) {
+  const text = formatUnits(raw, decimals);
+  const dot = text.indexOf(".");
+  if (dot < 0) return text;
+  const frac = text.slice(dot + 1, dot + 1 + places).replace(/0+$/, "");
+  return frac ? `${text.slice(0, dot)}.${frac}` : text.slice(0, dot);
+}
+
+function aaveNoCap(value) {
+  return value >= 2n ** 255n;
+}
+
+function aaveHealthClass(wad) {
+  const n = healthToNumber(wad);
+  if (n == null || !Number.isFinite(n)) return "is-none";
+  if (n < 1.2) return "is-bad";
+  if (n < 1.5) return "is-mid";
+  return "is-ok";
+}
+
+function aaveBadge(wad) {
+  const n = healthToNumber(wad);
+  if (n == null || !Number.isFinite(n)) return { label: "No debt", cls: "is-none" };
+  if (n < 1.2) return { label: "At risk", cls: "is-bad" };
+  if (n < 1.5) return { label: "Caution", cls: "is-mid" };
+  return { label: "Healthy", cls: "is-ok" };
+}
+
+function aaveMark(symbol) {
+  const el = document.createElement("span");
+  el.className = "aave-mark";
+  el.style.background = AAVE_MARKS[symbol] || "#3f3f46";
+  el.textContent = String(symbol || "").slice(0, 3);
+  return el;
+}
+
+function aaveHeading(text) {
+  const p = document.createElement("p");
+  p.className = "aave-k aave-sec";
+  p.textContent = text;
+  return p;
+}
+
+function aaveEmpty(text) {
+  const p = document.createElement("p");
+  p.className = "aave-empty";
+  p.textContent = text;
+  return p;
+}
+
+function showAaveProblem(text) {
+  aaveLoadNote = text || "";
+  const error = $("aave-error");
+  if (error) error.textContent = aaveLoadNote;
+}
+
+function clearAaveActionError() {
+  const error = $("aave-error");
+  if (error) error.textContent = aaveLoadNote;
+}
+
+function clearAaveReview() {
+  aavePending = null;
+  const review = $("aave-review");
+  if (review) review.hidden = true;
+  const go = $("aave-go");
+  if (go) go.hidden = false;
+}
+
+function aaveChoices() {
+  const market = aaveMarket;
+  if (!market) return [];
+  const reserves = market.reserves;
+  const weth = reserves.find((row) => row.id === 0);
+  if (aaveAction === "supply") {
+    const list = reserves.filter((row) => row.collateral && row.collateralFactorBps > 0 && !row.frozen && !row.paused);
+    return [
+      ...(weth ? [{ key: "eth", symbol: "ETH", sub: "wraps to WETH", reserve: weth }] : []),
+      ...list.map((row) => ({
+        key: String(row.id),
+        symbol: row.symbol,
+        sub: `LTV ${(row.collateralFactorBps / 100).toFixed(0)}%`,
+        reserve: row,
+      })),
+    ];
+  }
+  if (aaveAction === "withdraw") {
+    return reserves
+      .filter((row) => row.collateral && (row.collateralFactorBps > 0 || row.supplied > 0n))
+      .map((row) => ({
+        key: String(row.id),
+        symbol: row.symbol,
+        sub: `${aaveAmount(row.supplied, row.decimals, 4)} supplied`,
+        reserve: row,
+      }));
+  }
+  if (aaveAction === "borrow") {
+    return reserves.filter((row) => row.canBorrow).map((row) => ({
+      key: String(row.id),
+      symbol: row.symbol,
+      sub: `~${rateToPercent(row.drawnRateRay)} APR${row.id === 0 ? " · or ETH" : ""}`,
+      reserve: row,
+    }));
+  }
+  return reserves.filter((row) => row.debt > 0n).map((row) => ({
+    key: String(row.id),
+    symbol: row.symbol,
+    sub: `owe ${aaveAmount(row.debt, row.decimals, 4)}`,
+    reserve: row,
+  }));
+}
+
+function aaveSelection() {
+  const choices = aaveChoices();
+  const found = choices.find((row) => row.key === aaveAssetKey) || choices[0] || null;
+  if (found) aaveAssetKey = found.key;
+  return { choices, selected: found };
+}
+
+function aaveRoomLabel(row) {
+  return aaveNoCap(row.borrowRoom) ? "no cap" : `${aaveAmount(row.borrowRoom, row.decimals, 2)} ${row.symbol}`;
+}
+
+function aaveRoom(market, reserve, fromEth) {
+  if (!market || !reserve) return "";
+  if (aaveAction === "supply") {
+    if (fromEth) {
+      return `ETH in wallet ${aaveAmount(market.ethBalance, 18)} · keeps ${aaveAmount(market.ethGasReserve, 18, 4)} ETH for gas · most you can supply ${aaveAmount(maxWrappableEth(market), 18)}`;
+    }
+    const room = aaveNoCap(reserve.supplyRoom) ? "no cap" : aaveAmount(reserve.supplyRoom, reserve.decimals, 2);
+    return `In wallet ${aaveAmount(reserve.walletBalance, reserve.decimals)} ${reserve.symbol} · supply room ${room}`;
+  }
+  if (aaveAction === "withdraw") {
+    return `Supplied ${aaveAmount(reserve.supplied, reserve.decimals)} ${reserve.symbol} · safe to withdraw ${aaveAmount(maxSafeWithdraw(market, reserve), reserve.decimals)}`;
+  }
+  if (aaveAction === "borrow") {
+    return `Safe to borrow now ${aaveAmount(maxSafeBorrow(market, reserve), reserve.decimals)} ${reserve.symbol} (keeps health factor ≥ 1.5) · room under Aave's limits ${aaveRoomLabel(reserve)}`;
+  }
+  const base = `Debt ${aaveAmount(reserve.debt, reserve.decimals, 8)} ${reserve.symbol} · in wallet ${aaveAmount(reserve.walletBalance, reserve.decimals)}`;
+  return reserve.id === 0 ? `${base} · ETH ${aaveAmount(market.ethBalance, 18)} can be wrapped to cover a shortfall` : base;
+}
+
+function aaveProjected(market, reserve) {
+  if (!market || !reserve || aaveAction === "supply") return null;
+  const text = ($("aave-amount").value || "").trim();
+  if (!text) return null;
+  let parsed;
+  try {
+    parsed = parseAaveAmount(text, reserve.decimals);
+  } catch {
+    return null;
+  }
+  if (aaveAction === "borrow") {
+    const wad = healthAfterBorrow(market, reserve, parsed);
+    return { text: formatHealth(wad), wad };
+  }
+  if (aaveAction === "repay") {
+    const sent = parsed > reserve.debt ? reserve.debt : parsed;
+    const wad = healthAfterRepay(market, reserve, sent);
+    return { text: formatHealth(wad), wad };
+  }
+  const wad = healthAfterWithdraw(market, reserve, parsed);
+  return { text: formatHealth(wad), wad };
+}
+
+function paintAaveAmountMark(symbol) {
+  const row = document.querySelector("#wpage-aave .aave-amount");
+  if (!row) return;
+  const current = row.querySelector(".aave-mark");
+  if (!symbol) {
+    if (current) current.remove();
+    return;
+  }
+  if (!current) {
+    row.prepend(aaveMark(symbol));
+    return;
+  }
+  current.style.background = AAVE_MARKS[symbol] || "#3f3f46";
+  current.textContent = symbol.slice(0, 3);
+}
+
+function paintAaveLive() {
+  const market = aaveMarket;
+  const { selected } = aaveSelection();
+  const reserve = selected ? selected.reserve : null;
+  const fromEth = aaveAction === "supply" && selected && selected.key === "eth";
+  const symbolShown = fromEth ? "ETH" : reserve ? reserve.symbol : "";
+  const amountInput = $("aave-amount");
+  if (amountInput) amountInput.placeholder = symbolShown ? `Amount of ${symbolShown}` : "Amount";
+  paintAaveAmountMark(symbolShown);
+  const unwrapRow = $("aave-unwrap-row");
+  if (unwrapRow) {
+    const show = Boolean(reserve && reserve.id === 0 && (aaveAction === "borrow" || aaveAction === "withdraw"));
+    unwrapRow.hidden = !show;
+    const label = $("aave-unwrap-label");
+    if (label) {
+      label.textContent = `Unwrap to ETH after ${aaveAction === "borrow" ? "borrowing" : "withdrawing"} (one extra transaction)`;
+    }
+  }
+  const room = $("aave-room");
+  if (room) room.textContent = aaveRoom(market, reserve, fromEth);
+  const after = $("aave-after");
+  const afterValue = $("aave-after-value");
+  const afterBlock = $("aave-after-block");
+  if (after && afterValue) {
+    const projected = aaveProjected(market, reserve);
+    after.hidden = !projected;
+    after.classList.remove("is-ok", "is-mid", "is-bad", "is-none");
+    if (projected) {
+      after.classList.add(aaveHealthClass(projected.wad));
+      afterValue.textContent = projected.text;
+      const blocked = (aaveAction === "borrow" || aaveAction === "withdraw")
+        && projected.wad != null
+        && (healthToNumber(projected.wad) ?? Infinity) < 1.5;
+      if (afterBlock) afterBlock.hidden = !blocked;
+    }
+  }
+  const max = $("aave-max");
+  if (max) max.disabled = !market || !reserve;
+  const go = $("aave-go");
+  if (go && !aavePending) {
+    const verb = aaveAction === "repay" ? "repayment" : aaveAction === "withdraw" ? "withdrawal" : aaveAction;
+    const amount = (amountInput && amountInput.value || "").trim();
+    let label = `Review ${verb}`;
+    let disabled = false;
+    if (aavePlanning) {
+      label = "Checking…";
+      disabled = true;
+    } else if (!market) {
+      label = aaveLoadNote ? "Aave unavailable" : "Loading Aave…";
+      disabled = true;
+    } else if (!reserve) {
+      label = aaveAction === "repay" ? "No debt to repay" : "Nothing to choose";
+      disabled = true;
+    } else if (!amount) {
+      label = "Enter an amount";
+      disabled = true;
+    }
+    go.textContent = label;
+    go.disabled = disabled;
+  }
+}
+
+function aavePos(symbol, value, sub, badge, onClick) {
+  const row = document.createElement(onClick ? "button" : "div");
+  row.className = "aave-pos";
+  if (onClick) {
+    row.type = "button";
+    row.addEventListener("click", onClick);
+  }
+  row.append(aaveMark(symbol));
+  const grow = document.createElement("span");
+  grow.className = "grow";
+  const name = document.createElement("strong");
+  name.textContent = symbol;
+  grow.append(name);
+  if (sub) {
+    const small = document.createElement("small");
+    small.textContent = sub;
+    grow.append(small);
+  }
+  const val = document.createElement("span");
+  val.className = "val";
+  const strong = document.createElement("strong");
+  strong.textContent = value;
+  val.append(strong);
+  if (badge) {
+    const note = document.createElement("small");
+    note.textContent = badge;
+    val.append(note);
+  }
+  row.append(grow, val);
+  return row;
+}
+
+function pickAaveAsset(action, id) {
+  aaveAction = action;
+  aaveAssetKey = String(id);
+  aaveFull = false;
+  const amount = $("aave-amount");
+  if (amount) amount.value = "";
+  clearAaveActionError();
+  clearAaveReview();
+  paintAave();
+}
+
+function paintAavePositions(market, priceDecimals) {
+  const pos = $("aave-positions");
+  const hint = $("aave-pos-hint");
+  if (!pos) return;
+  const suppliedRows = market ? market.reserves.filter((row) => row.supplied > 0n) : [];
+  const debtRows = market ? market.reserves.filter((row) => row.debt > 0n) : [];
+  if (hint) {
+    hint.textContent = market
+      ? `${suppliedRows.length} supplied · ${debtRows.length} borrowed`
+      : (aaveLoadNote ? "" : "Loading…");
+  }
+  pos.replaceChildren();
+  if (!market) {
+    pos.append(aaveEmpty(aaveLoadNote ? "Aave is not loaded." : "Reading Aave…"));
+    return;
+  }
+  pos.append(aaveHeading("Supplied"));
+  if (!suppliedRows.length) pos.append(aaveEmpty("Nothing supplied yet."));
+  for (const row of suppliedRows) {
+    pos.append(aavePos(
+      row.symbol,
+      aaveAmount(row.supplied, row.decimals, 6),
+      `≈ ${aaveUsd(usdOf(row.supplied, row.price, row.decimals, priceDecimals))}`,
+      row.enabledAsCollateral ? "Collateral on" : "Collateral off",
+      () => pickAaveAsset("withdraw", row.id),
+    ));
+  }
+  pos.append(aaveHeading("Borrowed"));
+  if (!debtRows.length) pos.append(aaveEmpty("No debt."));
+  for (const row of debtRows) {
+    pos.append(aavePos(
+      row.symbol,
+      aaveAmount(row.debt, row.decimals, 6),
+      `~${rateToPercent(row.drawnRateRay)} APR`,
+      `≈ ${aaveUsd(usdOf(row.debt, row.price, row.decimals, priceDecimals))}`,
+      () => pickAaveAsset("repay", row.id),
+    ));
+  }
+  pos.append(aaveHeading("In this wallet"));
+  pos.append(aavePos("ETH", aaveAmount(market.ethBalance, 18), "Plain ETH", "", null));
+  for (const row of market.reserves.filter((item) => item.walletBalance > 0n)) {
+    const click = row.collateral && row.collateralFactorBps > 0 ? () => pickAaveAsset("supply", row.id) : null;
+    pos.append(aavePos(
+      row.symbol,
+      aaveAmount(row.walletBalance, row.decimals, 6),
+      row.id === 0 ? "Wrapped ETH" : "",
+      "",
+      click,
+    ));
+  }
+}
+
+function paintAaveMarkets(market) {
+  const box = $("aave-markets");
+  const hint = $("aave-market-hint");
+  if (!box) return;
+  const borrowList = market ? market.reserves.filter((row) => row.canBorrow) : [];
+  if (hint) hint.textContent = market ? `${borrowList.length} assets you can borrow` : "";
+  box.replaceChildren();
+  if (!market) {
+    box.append(aaveEmpty(aaveLoadNote ? "Aave is not loaded." : "Reading Aave…"));
+    return;
+  }
+  for (const row of borrowList) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "aave-market";
+    button.append(aaveMark(row.symbol));
+    const copy = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = row.symbol;
+    const rate = document.createElement("small");
+    rate.textContent = `${rateToPercent(row.drawnRateRay)} · ${aaveRoomLabel(row)}`;
+    copy.append(name, rate);
+    button.append(copy);
+    button.addEventListener("click", () => pickAaveAsset("borrow", row.id));
+    box.append(button);
+  }
+}
+
+function paintAaveRisk(market) {
+  const box = $("aave-risk");
+  if (!box) return;
+  box.replaceChildren();
+  const warn = document.createElement("div");
+  warn.className = "aave-warn";
+  const title = document.createElement("p");
+  title.className = "aave-k";
+  title.textContent = "Liquidation risk";
+  const first = document.createElement("p");
+  first.textContent = "If the health factor falls below 1.00 your collateral can be liquidated, with a penalty. Prices move, interest accrues every block, and your rate can change. Borrowing a volatile asset (WETH, WBTC, cbBTC) against other collateral adds price risk both ways.";
+  const second = document.createElement("p");
+  second.textContent = "This wallet blocks a borrow or withdrawal that would leave the health factor under 1.5, and offers at most 90% of the remaining borrow cap or pool liquidity. Staying safe afterwards is up to you. Every step is a separate Ethereum transaction and pays gas. This has not been tested with real funds, so start small.";
+  warn.append(title, first, second);
+  const explain = document.createElement("p");
+  explain.className = "aave-fine";
+  explain.textContent = "Health factor is your collateral, weighted by each asset's collateral factor, divided by your debt. 1.00 is the liquidation line. Higher is safer.";
+  box.append(warn, explain);
+  if (!market) return;
+  box.append(aaveDetail("Risk premium on borrows", `+${(market.account.riskPremiumBps / 100).toFixed(2)}%`));
+  box.append(aaveHeading("Collateral factors and supply room"));
+  for (const row of market.reserves.filter((item) => item.collateral && (item.collateralFactorBps > 0 || item.supplied > 0n))) {
+    const room = aaveNoCap(row.supplyRoom) ? "no cap" : aaveAmount(row.supplyRoom, row.decimals, 2);
+    box.append(aaveDetail(row.symbol, `${(row.collateralFactorBps / 100).toFixed(0)}% · room ${room}`));
+  }
+  box.append(aaveHeading("Borrow limits"));
+  for (const row of market.reserves.filter((item) => item.canBorrow)) {
+    box.append(aaveDetail(row.symbol, `${aaveRoomLabel(row)} · ~${rateToPercent(row.drawnRateRay)} APR`));
+  }
+}
+
+function aaveDetail(label, value) {
+  const row = document.createElement("p");
+  row.className = "aave-row";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const strong = document.createElement("strong");
+  strong.textContent = value;
+  row.append(name, strong);
+  return row;
 }
 
 function paintAave() {
-  const select = $("aave-reserve");
-  if (!select || !aaveMarket) return;
-  const current = select.value;
-  select.replaceChildren();
-  for (const reserve of aaveMarket.reserves) {
-    const option = document.createElement("option");
-    option.value = String(reserve.id);
-    option.textContent = `${reserve.symbol} · wallet ${formatUnits(reserve.walletBalance, reserve.decimals)} · supplied ${formatUnits(reserve.supplied, reserve.decimals)} · debt ${formatUnits(reserve.debt, reserve.decimals)}`;
-    select.append(option);
+  if (!$("aave-assets") || !$("aave-health")) return;
+  const market = aaveMarket;
+  for (const button of document.querySelectorAll("#wpage-aave [data-aave-action]")) {
+    button.setAttribute("aria-selected", button.dataset.aaveAction === aaveAction ? "true" : "false");
   }
-  if (current && [...select.options].some((option) => option.value === current)) select.value = current;
-  $("aave-health").textContent = `Health factor ${formatHealth(aaveMarket.account.healthFactorWad)}. Borrows and withdrawals stop at 1.5.`;
-  const reserve = selectedAaveReserve();
-  const weth = Boolean(reserve && reserve.id === 0);
-  $("aave-eth-row").hidden = !weth;
-  $("aave-unwrap-row").hidden = !weth;
-  if (!weth) {
-    $("aave-from-eth").checked = false;
-    $("aave-unwrap").checked = false;
+  const { choices } = aaveSelection();
+  const assets = $("aave-assets");
+  assets.replaceChildren();
+  if (!choices.length) {
+    assets.append(aaveEmpty(!market
+      ? (aaveLoadNote ? "Nothing available yet." : "Loading assets…")
+      : aaveAction === "repay" ? "You have no debt on this Spoke." : "Nothing available yet."));
+  } else {
+    for (const choice of choices) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "aave-asset";
+      button.setAttribute("role", "option");
+      button.dataset.key = choice.key;
+      button.setAttribute("aria-selected", choice.key === aaveAssetKey ? "true" : "false");
+      button.append(aaveMark(choice.symbol));
+      const copy = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = choice.symbol;
+      const sub = document.createElement("small");
+      sub.textContent = choice.sub;
+      copy.append(name, sub);
+      button.append(copy);
+      button.addEventListener("click", () => {
+        aaveAssetKey = choice.key;
+        aaveFull = false;
+        $("aave-amount").value = "";
+        clearAaveActionError();
+        clearAaveReview();
+        paintAave();
+      });
+      assets.append(button);
+    }
   }
+  const hf = market ? market.account.healthFactorWad : null;
+  const health = $("aave-health");
+  health.textContent = market ? formatHealth(hf) : "—";
+  health.classList.remove("is-ok", "is-mid", "is-bad", "is-none");
+  health.classList.add(market ? aaveHealthClass(hf) : "is-none");
+  const badge = $("aave-badge");
+  if (badge) {
+    const info = market ? aaveBadge(hf) : { label: "No debt", cls: "is-none" };
+    badge.textContent = info.label;
+    badge.className = `aave-badge ${info.cls}`;
+  }
+  const priceDecimals = market ? market.priceDecimals : 8;
+  let suppliedUsd = 0;
+  if (market) {
+    for (const row of market.reserves) {
+      if (row.supplied > 0n) suppliedUsd += usdOf(row.supplied, row.price, row.decimals, priceDecimals);
+    }
+  }
+  const debtUsd = market ? Number(market.account.totalDebtValueRay / 10n ** 45n) / 10 ** priceDecimals : 0;
+  const canUsd = market ? Number(safeBorrowHeadroomValue(market) / 10n ** 18n) / 10 ** priceDecimals : 0;
+  const collateralUsd = market ? Number(market.account.totalCollateralValue / 10n ** 18n) / 10 ** priceDecimals : 0;
+  $("aave-supplied").textContent = market ? aaveUsd(suppliedUsd) : "—";
+  $("aave-borrowed").textContent = market ? aaveUsd(debtUsd) : "—";
+  $("aave-can").textContent = market ? aaveUsd(canUsd) : "—";
+  $("aave-collateral").textContent = market
+    ? `Can borrow is the most that keeps the health factor at 1.5. Collateral counted by Aave is ${aaveUsd(collateralUsd)}.`
+    : "Can borrow is the most that keeps the health factor at 1.5.";
+  paintAavePositions(market, priceDecimals);
+  paintAaveMarkets(market);
+  paintAaveRisk(market);
+  const spoke = $("aave-spoke");
+  const hub = $("aave-hub");
+  if (spoke) {
+    spoke.textContent = shortAddress(AAVE_MAIN_SPOKE);
+    spoke.title = AAVE_MAIN_SPOKE;
+  }
+  if (hub) {
+    hub.textContent = shortAddress(AAVE_CORE_HUB);
+    hub.title = AAVE_CORE_HUB;
+  }
+  paintAaveLive();
 }
 
 async function loadAavePage() {
   const error = $("aave-error");
+  aaveLoadNote = "";
   if (error) error.textContent = "";
+  const refresh = $("aave-refresh");
   if (!session || !session.evmAddress) {
-    $("aave-health").textContent = "Unlock a wallet to load Aave.";
+    aaveMarket = null;
+    showAaveProblem("This wallet has no Ethereum account. Aave needs the account from the recovery phrase.");
+    paintAave();
     return;
   }
-  $("aave-health").textContent = "Loading Aave…";
+  if (refresh) {
+    refresh.disabled = true;
+    refresh.textContent = "Loading…";
+  }
+  if (!aaveMarket) paintAave();
   try {
     aaveMarket = await loadAaveMarket(session.evmAddress);
+    clearAaveReview();
     paintAave();
-    const skipped = aaveMarket.skipped.length ? `Skipped ${aaveMarket.skipped.join(", ")} because the Spoke reserve did not match.` : "";
-    $("aave-status").textContent = skipped;
-  } catch (error) {
+    if (aaveMarket.skipped.length && $("aave-status")) {
+      $("aave-status").textContent = `Aave no longer lists ${aaveMarket.skipped.join(", ")} at the expected id, so it is hidden.`;
+    }
+  } catch (err) {
     aaveMarket = null;
-    if (error) $("aave-error").textContent = error.message;
-    $("aave-health").textContent = "Aave did not load.";
+    showAaveProblem(err.message);
+    paintAave();
+  } finally {
+    if (refresh) {
+      refresh.disabled = false;
+      refresh.textContent = "Refresh";
+    }
   }
 }
 
 function fillAaveMax() {
-  const reserve = selectedAaveReserve();
-  if (!aaveMarket || !reserve) return;
-  const fromEth = $("aave-from-eth").checked && reserve.id === 0;
-  let amount = fromEth ? maxWrappableEth(aaveMarket) : reserve.walletBalance;
-  let why = fromEth ? "ETH you can wrap after gas" : "wallet balance you can supply";
-  if (!fromEth && reserve.supplyRoom < amount) amount = reserve.supplyRoom;
-  if (!fromEth && amount <= 0n && reserve.debt > 0n) {
-    amount = reserve.debt;
-    why = "debt you can repay";
-  } else if (!fromEth && amount <= 0n) {
-    amount = maxSafeWithdraw(aaveMarket, reserve);
-    why = "amount you can withdraw while health stays at 1.5";
+  const market = aaveMarket;
+  const { selected } = aaveSelection();
+  const reserve = selected ? selected.reserve : null;
+  if (!market || !reserve) return;
+  const fromEth = aaveAction === "supply" && selected.key === "eth";
+  let raw = 0n;
+  let full = false;
+  if (aaveAction === "supply") raw = fromEth ? maxWrappableEth(market) : reserve.walletBalance;
+  else if (aaveAction === "withdraw") {
+    raw = maxSafeWithdraw(market, reserve);
+    full = raw >= reserve.supplied;
+  } else if (aaveAction === "borrow") raw = maxSafeBorrow(market, reserve);
+  else {
+    raw = reserve.debt;
+    full = true;
   }
-  $("aave-amount").value = formatUnits(amount, reserve.decimals);
-  $("aave-status").textContent = `Max is the ${why}.`;
+  $("aave-amount").value = raw > 0n ? formatUnits(raw, reserve.decimals) : "";
+  aaveFull = full;
+  clearAaveReview();
+  paintAaveLive();
 }
 
-async function runAave(kind) {
+async function reviewAave() {
   const error = $("aave-error");
-  if (error) error.textContent = "";
-  const reserve = selectedAaveReserve();
-  if (!session || !aaveMarket || !reserve) {
-    if (error) error.textContent = aaveMarket ? "Pick a reserve." : "Load Aave first.";
+  clearAaveActionError();
+  const status = $("aave-status");
+  if (status) status.textContent = "";
+  const { selected } = aaveSelection();
+  const reserve = selected ? selected.reserve : null;
+  if (!aaveMarket || !reserve || !session || !session.evmAddress) return;
+  if (!$("aave-ack").checked) {
+    if (error) error.textContent = "Tick the box to confirm you understand the liquidation risk.";
     return;
   }
-  const full = $("aave-full").checked && (kind === "repay" || kind === "withdraw");
+  const fromEth = aaveAction === "supply" && selected.key === "eth";
+  const isWeth = reserve.id === 0;
+  let raw;
   try {
-    let amount = 0n;
-    if (!full) {
-      amount = parseAaveAmount($("aave-amount").value, reserve.decimals);
-      if (amount <= 0n) throw new Error("Enter an amount greater than 0.");
-    }
+    raw = parseAaveAmount($("aave-amount").value, reserve.decimals);
+    if (raw <= 0n) throw new Error("Enter an amount greater than 0.");
+  } catch (err) {
+    if (error) error.textContent = err.message;
+    return;
+  }
+  aavePlanning = true;
+  paintAaveLive();
+  try {
     const owner = session.evmAddress;
+    const sym = reserve.symbol;
+    const typed = $("aave-amount").value.trim();
+    const unwrap = Boolean($("aave-unwrap").checked);
     let steps;
-    if (kind === "supply") steps = await planSupply(owner, aaveMarket, reserve, amount, $("aave-from-eth").checked);
-    else if (kind === "borrow") steps = planBorrow(owner, aaveMarket, reserve, amount, $("aave-unwrap").checked);
-    else if (kind === "repay") steps = await planRepay(owner, aaveMarket, reserve, amount, full);
-    else steps = planWithdraw(owner, aaveMarket, reserve, amount, full, $("aave-unwrap").checked);
-    let last = "";
+    let rows;
+    let title;
+    let done;
+    if (aaveAction === "supply") {
+      steps = await planSupply(owner, aaveMarket, reserve, raw, fromEth);
+      title = "Confirm supply";
+      rows = [
+        ["Supply", fromEth ? `${typed} ETH (wrapped to WETH, then supplied as WETH)` : `${typed} ${sym}`],
+        ["Collateral", `${sym} will be enabled as collateral`],
+        ["Collateral factor", `${(reserve.collateralFactorBps / 100).toFixed(0)}%`],
+      ];
+      done = `${typed} ${fromEth ? "ETH" : sym} supplied to Aave v4${fromEth ? " as WETH" : ""}.`;
+    } else if (aaveAction === "borrow") {
+      const toEth = unwrap && isWeth;
+      steps = planBorrow(owner, aaveMarket, reserve, raw, toEth);
+      title = "Confirm borrow";
+      rows = [
+        ["Borrow", `${typed} ${sym}${toEth ? " (unwrapped to ETH)" : ""}`],
+        ["Health factor after", formatHealth(healthAfterBorrow(aaveMarket, reserve, raw))],
+        ["Variable rate", `~${rateToPercent(reserve.drawnRateRay)} APR + ${(aaveMarket.account.riskPremiumBps / 100).toFixed(2)}% risk premium`],
+      ];
+      done = `${typed} ${sym} borrowed${toEth ? " and unwrapped to ETH" : ""}.`;
+    } else if (aaveAction === "repay") {
+      const full = aaveFull || raw >= reserve.debt;
+      steps = await planRepay(owner, aaveMarket, reserve, raw > reserve.debt ? reserve.debt : raw, full);
+      title = "Confirm repayment";
+      rows = [
+        ["Repay", full ? `All ${sym} debt (~${aaveAmount(reserve.debt, reserve.decimals, 8)} ${sym})` : `${typed} ${sym}`],
+        ["Health factor after", formatHealth(healthAfterRepay(aaveMarket, reserve, full ? reserve.debt : raw))],
+        ["Paid from", isWeth ? "WETH in this wallet. ETH is wrapped first if needed." : `${sym} in this wallet`],
+      ];
+      done = full ? `${sym} debt repaid.` : `${typed} ${sym} repaid.`;
+    } else {
+      const full = aaveFull || raw >= reserve.supplied;
+      const toEth = unwrap && isWeth;
+      steps = planWithdraw(owner, aaveMarket, reserve, raw, full, toEth);
+      title = "Confirm withdrawal";
+      rows = [
+        ["Withdraw", `${full ? `All ${sym} (${aaveAmount(reserve.supplied, reserve.decimals)})` : `${typed} ${sym}`}${toEth ? " (unwrapped to ETH)" : ""}`],
+        ["Health factor after", formatHealth(healthAfterWithdraw(aaveMarket, reserve, full ? reserve.supplied : raw))],
+      ];
+      done = `${typed} ${sym} withdrawn from Aave v4${toEth ? " and unwrapped to ETH" : ""}.`;
+    }
+    rows.push(
+      ["Transactions", `${steps.length}: ${steps.map((step) => step.label).join(" → ")}`],
+      ["Contract", `Aave v4 Main Spoke ${shortAddress(AAVE_MAIN_SPOKE)}`],
+      ["Network fee", "Paid in ETH for every transaction above. Estimated when each one is sent."],
+    );
+    aavePending = { steps, done };
+    const box = $("aave-review-rows");
+    box.replaceChildren();
+    for (const [label, value] of rows) {
+      const line = document.createElement("p");
+      line.className = "aave-line";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value;
+      line.append(name, strong);
+      box.append(line);
+    }
+    $("aave-review-title").textContent = title;
+    $("aave-review").hidden = false;
+    $("aave-go").hidden = true;
+  } catch (err) {
+    if (error) error.textContent = err.message;
+  } finally {
+    aavePlanning = false;
+    paintAaveLive();
+  }
+}
+
+async function runAave() {
+  const error = $("aave-error");
+  if (error) error.textContent = "";
+  if (!aavePending || !aavePending.steps.length) return;
+  const steps = aavePending.steps;
+  const done = aavePending.done;
+  const go = $("aave-review-go");
+  if (go) go.disabled = true;
+  let sent = 0;
+  try {
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i];
       $("aave-status").textContent = `${step.label} (${i + 1} of ${steps.length})`;
@@ -8032,14 +8686,20 @@ async function runAave(kind) {
         chain: "ethereum",
       });
       await waitEvmReceipt({ hash, chain: "ethereum" });
-      last = hash;
+      sent = i + 1;
     }
-    $("aave-status").textContent = last ? `Submitted ${last}` : "Done.";
+    $("aave-status").textContent = done || "Done.";
     $("aave-amount").value = "";
+    aaveFull = false;
+    clearAaveReview();
     await loadAavePage();
     await refreshWallet();
   } catch (err) {
-    if (error) error.textContent = err.message;
+    const earlier = sent > 0 ? ` ${sent} earlier step${sent === 1 ? "" : "s"} already went through. Check the position before retrying.` : "";
+    await loadAavePage();
+    if (error) error.textContent = `${err.message}${earlier}`;
+  } finally {
+    if (go) go.disabled = false;
   }
 }
 

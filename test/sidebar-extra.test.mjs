@@ -9,7 +9,7 @@ import { buildSolTransfer } from "../src/sol-send.js";
 import { rowsFromBitcoin, rowsFromEvm, rowsFromSolana } from "../src/chain-activity.js";
 import { decryptWalletFile, encryptWalletFile } from "../src/wallet-file.js";
 import { safeSignature } from "../src/safetrade.js";
-import { formatHealth, planBorrow } from "../src/aave.js";
+import { formatHealth, planBorrow, rateToPercent, safeBorrowHeadroomValue, usdOf } from "../src/aave.js";
 import { openWithPrf, sealWithPrf } from "../src/passkey.js";
 import { createVault } from "../src/vault-core.js";
 
@@ -112,6 +112,13 @@ test("Aave blocks a borrow that would leave health under 1.5", () => {
   assert.equal(steps.length, 1);
   assert.match(steps[0].data, /^0x/);
   assert.equal(steps[0].to.toLowerCase(), "0x94e7a5dcbe816e498b89ab752661904e2f56c485");
+  assert.equal(rateToPercent(5n * 10n ** 25n), "5.00%");
+  assert.equal(usdOf(1_000_000n, 100_000_000n, 6, 8), 1);
+  const empty = {
+    account: { totalCollateralValue: 0n, avgCollateralFactorWad: 10n ** 18n, totalDebtValueRay: 0n },
+  };
+  assert.equal(safeBorrowHeadroomValue(empty), 0n);
+  assert.ok(safeBorrowHeadroomValue(roomy) > safeBorrowHeadroomValue(tight));
 });
 
 test("activity rows keep native transfers, bitcoin net, and solana signatures", () => {
@@ -144,10 +151,19 @@ test("a passkey PRF seal opens only with the same secret", async () => {
   await assert.rejects(() => openWithPrf(other, sealed), /passkey/i);
 });
 
-test("a raw key cannot send Solana, and an EVM call returns only the hash", async () => {
+test("a raw key cannot send Solana, Bitcoin, or Ethereum, and an EVM call returns only the hash", async () => {
   const vault = createVault();
   vault.unlock({ privateKey: "11".repeat(32) });
   await assert.rejects(() => vault.sendSol({ to: "x", amount: 1n }), /recovery phrase/i);
+  await assert.rejects(() => vault.sendBtc({ to: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", amount: 1n }), /recovery phrase/i);
+  assert.throws(
+    () => vault.sendNativeEvm({ to: "0x0000000000000000000000000000000000000001", amount: 1n, chain: "ethereum" }),
+    /recovery phrase/i,
+  );
+  assert.throws(
+    () => vault.sendEvmCall({ to: "0x0000000000000000000000000000000000000001", data: "0x", value: 0n }),
+    /recovery phrase/i,
+  );
   vault.lock();
 
   let raw = "";

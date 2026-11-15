@@ -24286,6 +24286,13 @@ function healthAfterWithdraw(market, reserve, amount) {
   }
   return healthWad(weighted, account.totalDebtValueRay);
 }
+function healthAfterRepay(market, asset, amount) {
+  const account = market.account;
+  const weighted = account.totalCollateralValue * account.avgCollateralFactorWad;
+  const repaid = valueOf(amount, asset.price, asset.decimals) * RAY;
+  const debtRay = account.totalDebtValueRay > repaid ? account.totalDebtValueRay - repaid : 0n;
+  return healthWad(weighted, debtRay);
+}
 function maxSafeBorrow(market, asset) {
   const account = market.account;
   if (!asset.canBorrow || asset.price <= 0n) return 0n;
@@ -24320,6 +24327,21 @@ function formatHealth(wad) {
   const n2 = healthToNumber(wad);
   if (n2 == null || !Number.isFinite(n2)) return "No debt";
   return n2.toFixed(2);
+}
+function safeBorrowHeadroomValue(market) {
+  const account = market.account;
+  const weighted = account.totalCollateralValue * account.avgCollateralFactorWad;
+  const allowedDebtRay = weighted * RAY / MIN_SAFE_WAD;
+  if (allowedDebtRay <= account.totalDebtValueRay) return 0n;
+  return (allowedDebtRay - account.totalDebtValueRay) / RAY;
+}
+function rateToPercent(rateRay) {
+  const bps = BigInt(rateRay) * 10000n / RAY;
+  return `${(Number(bps) / 100).toFixed(2)}%`;
+}
+function usdOf(amount, price, decimals, priceDecimals) {
+  const scaled = BigInt(amount) * BigInt(price) / 10n ** BigInt(decimals);
+  return Number(scaled) / 10 ** Number(priceDecimals);
 }
 function maxWrappableEth(market) {
   return market.ethBalance > market.ethGasReserve ? market.ethBalance - market.ethGasReserve : 0n;
@@ -26743,6 +26765,8 @@ async function maxSendableSol(address, fetchImpl = globalThis.fetch) {
   return balance > keep ? balance - keep : 0n;
 }
 export {
+  AAVE_CORE_HUB,
+  AAVE_MAIN_SPOKE,
   SAFE_MARKETS,
   assertBtcAddress,
   assertSolAddress,
@@ -26753,6 +26777,10 @@ export {
   fetchBtcFeeRate,
   fetchBtcUtxos,
   formatHealth,
+  healthAfterBorrow,
+  healthAfterRepay,
+  healthAfterWithdraw,
+  healthToNumber,
   loadAaveMarket,
   maxSafeBorrow,
   maxSafeWithdraw,
@@ -26765,15 +26793,18 @@ export {
   planRepay,
   planSupply,
   planWithdraw,
+  rateToPercent,
   readChainActivity,
   rowsFromBitcoin,
   rowsFromEvm,
   rowsFromSolana,
   safeBalances,
+  safeBorrowHeadroomValue,
   safeCancelOrder,
   safeLimitOrder,
   safeOpenOrders,
   safeSignature,
   safeTicker,
-  sealWithPrf
+  sealWithPrf,
+  usdOf
 };

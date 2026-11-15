@@ -25675,9 +25675,9 @@ function chainAccountsFromPrivateKey(privateKeyHex) {
     privateKey: account.privateKey,
     publicKey: account.publicKey,
     address: account.address,
-    evmAddress: account.evmAddress,
-    evmKey: account.privateKey,
-    btcAddress: btcAddressFromCompressed(account.publicKey),
+    evmAddress: "",
+    evmKey: "",
+    btcAddress: "",
     solAddress: "",
     phrase: ""
   };
@@ -25743,12 +25743,15 @@ async function evmCall(rpc, method, params, fetchImpl) {
   return body.result;
 }
 async function readNativeBalance(chain, address, fetchImpl = globalThis.fetch) {
-  if (chain === "solana" && !address) {
+  if (!address && (chain === "ethereum" || chain === "hemi" || chain === "bitcoin" || chain === "solana")) {
+    const symbol = chain === "bitcoin" ? "BTC" : chain === "solana" ? "SOL" : "ETH";
+    const decimals = chain === "bitcoin" ? 8 : chain === "solana" ? 9 : 18;
+    const name = chain === "bitcoin" ? "Bitcoin" : chain === "solana" ? "Solana" : chain === "hemi" ? "Hemi" : "Ethereum";
     return {
-      symbol: "SOL",
-      decimals: 9,
+      symbol,
+      decimals,
       amount: 0n,
-      missing: "This key has no Solana account. Restore a 12 or 24 word phrase to open one."
+      missing: `This key has no ${name} account. Restore a 12 or 24 word phrase to open one.`
     };
   }
   if (chain === "ethereum" || chain === "hemi") {

@@ -23,15 +23,29 @@ test("the vault returns addresses and keeps the phrase inside", () => {
   assert.equal(vault.exportKey().privateKey, chainAccountsFromPhrase(PHRASE, 1).privateKey);
 });
 
-test("a locked vault signs nothing and a raw key has no phrase", () => {
+test("a locked vault signs nothing and a raw key has no phrase", async () => {
   const vault = createVault();
   assert.throws(() => vault.exportKey(), /locked/i);
   const key = "11".repeat(32);
   const opened = vault.unlock({ privateKey: key });
   assert.equal(opened.hasPhrase, false);
+  assert.equal(opened.address.length, 48);
+  assert.equal(opened.evmAddress, "");
+  assert.equal(opened.btcAddress, "");
+  assert.equal(opened.solAddress, "");
   assert.equal("privateKey" in opened, false);
   assert.throws(() => vault.activate({ index: 1 }), /one private key/i);
   assert.throws(() => vault.exportPhrase(), /one private key/i);
+  assert.throws(
+    () => vault.sendNativeEvm({ to: "0x0000000000000000000000000000000000000001", amount: 1n, chain: "ethereum" }),
+    /recovery phrase/i,
+  );
+  assert.throws(
+    () => vault.sendEvmCall({ to: "0x0000000000000000000000000000000000000001", data: "0x", value: 0n }),
+    /recovery phrase/i,
+  );
+  await assert.rejects(() => vault.sendBtc({ to: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", amount: 1n }), /recovery phrase/i);
+  await assert.rejects(() => vault.signMessage({ message: "hi" }), /recovery phrase/i);
   vault.lock();
   assert.throws(() => vault.exportKey(), /locked/i);
   assert.deepEqual(vault.status(), { unlocked: false });

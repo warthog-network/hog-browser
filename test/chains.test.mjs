@@ -14,12 +14,26 @@ import {
 const PHRASE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 describe("chain accounts", () => {
-  test("a raw key has Ethereum, Hemi, and Bitcoin addresses and no Solana account", () => {
+  test("a raw key is Warthog only", () => {
     const account = chainAccountsFromPrivateKey("1".padStart(64, "0"));
-    assert.equal(account.btcAddress, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
-    assert.equal(account.evmAddress, ethers.computeAddress(`0x${"1".padStart(64, "0")}`));
+    assert.equal(account.address.length, 48);
+    assert.notEqual(account.privateKey, "");
+    assert.equal(account.evmAddress, "");
+    assert.equal(account.evmKey, "");
+    assert.equal(account.btcAddress, "");
     assert.equal(account.solAddress, "");
-    assert.equal(account.evmKey, account.privateKey);
+  });
+
+  test("an empty other-chain address does not ask the network", async () => {
+    const read = await readNativeBalance("ethereum", "", async () => {
+      throw new Error("should not fetch");
+    });
+    assert.match(read.missing, /Ethereum/);
+    assert.equal(read.amount, 0n);
+    const bitcoin = await readNativeBalance("bitcoin", "", async () => {
+      throw new Error("should not fetch");
+    });
+    assert.match(bitcoin.missing, /Bitcoin/);
   });
 
   test("a recovery phrase matches the extension account", () => {
@@ -59,7 +73,8 @@ describe("chain accounts", () => {
   });
 
   test("an approved ethereum send returns only the hash", async () => {
-    const account = chainAccountsFromPrivateKey("11".repeat(32));
+    const privateKey = `0x${"11".repeat(32)}`;
+    const from = ethers.computeAddress(privateKey);
     let raw = "";
     const fetchImpl = async (_url, options) => {
       const body = JSON.parse(options.body);
@@ -73,17 +88,17 @@ describe("chain accounts", () => {
       return { ok: true, json: async () => ({ result }) };
     };
     const hash = await sendNativeEvm({
-      privateKey: account.evmKey,
+      privateKey,
       to: "0x0000000000000000000000000000000000000001",
       amount: 5n,
       chain: "ethereum",
       fetchImpl,
     });
     const parsed = ethers.Transaction.from(raw);
-    assert.equal(parsed.from, account.evmAddress);
+    assert.equal(parsed.from, from);
     assert.equal(parsed.value, 5n);
     assert.equal(hash, `0x${"ab".repeat(32)}`);
-    assert.equal(JSON.stringify(hash).includes(account.privateKey), false);
+    assert.equal(raw.toLowerCase().includes("11".repeat(32)), false);
   });
 
   test("amounts keep the decimals they were given", () => {

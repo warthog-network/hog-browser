@@ -1,7 +1,6 @@
 import { ethers } from "ethers";
 import {
   btcKeyFromPhrase,
-  btcKeyFromPrivateKey,
   chainAccountsFromPhrase,
   chainAccountsFromPrivateKey,
   sendEvmCall,
@@ -29,7 +28,8 @@ const SIGNERS = {
 };
 
 function evmHex(account) {
-  const hex = String(account.evmKey || account.privateKey || "").trim().replace(/^0x/i, "");
+  const hex = String(account.evmKey || "").trim().replace(/^0x/i, "");
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error("Ethereum needs a recovery phrase.");
   return `0x${hex}`;
 }
 
@@ -51,6 +51,11 @@ function publish(account, hasPhrase) {
  */
 export function createVault() {
   let material = null;
+
+  function requirePhrase(label) {
+    if (!material) throw new Error("Wallet is locked");
+    if (!material.phrase) throw new Error(`${label} needs a recovery phrase.`);
+  }
 
   function clear() {
     if (material) {
@@ -108,6 +113,7 @@ export function createVault() {
       return sign({ ...(payload.args || {}), privateKey: account().privateKey });
     },
     sendNativeEvm(payload = {}) {
+      requirePhrase("Ethereum");
       return sendNativeEvm({
         privateKey: evmHex(account()),
         to: payload.to,
@@ -117,10 +123,8 @@ export function createVault() {
       });
     },
     async sendBtc(payload = {}) {
-      if (!material) throw new Error("Wallet is locked");
-      const spent = material.phrase
-        ? btcKeyFromPhrase(material.phrase)
-        : btcKeyFromPrivateKey(material.privateKey);
+      requirePhrase("Bitcoin");
+      const spent = btcKeyFromPhrase(material.phrase);
       try {
         return await sendBtc({
           privateKey: spent.privateKey,
@@ -151,6 +155,7 @@ export function createVault() {
       }
     },
     sendEvmCall(payload = {}) {
+      requirePhrase("Ethereum");
       return sendEvmCall({
         privateKey: evmHex(account()),
         to: payload.to,
@@ -161,15 +166,18 @@ export function createVault() {
       });
     },
     async signMessage(payload = {}) {
+      requirePhrase("Ethereum");
       const wallet = new ethers.Wallet(evmHex(account()));
       if (payload.encoding === "hex") return wallet.signMessage(ethers.getBytes(payload.message));
       return wallet.signMessage(String(payload.message ?? ""));
     },
     async signTypedData(payload = {}) {
+      requirePhrase("Ethereum");
       const wallet = new ethers.Wallet(evmHex(account()));
       return wallet.signTypedData(payload.domain, payload.types, payload.message);
     },
     async signTransaction(payload = {}) {
+      requirePhrase("Ethereum");
       const wallet = new ethers.Wallet(evmHex(account()));
       return wallet.signTransaction(payload.tx || {});
     },

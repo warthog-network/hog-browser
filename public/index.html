@@ -1200,31 +1200,82 @@
 
             <div id="wpage-aave" hidden>
               <button type="button" class="w-back" data-back="trade">Trade</button>
-              <h3>Aave</h3>
-              <p class="note">Supply, borrow, repay, and withdraw on Ethereum. Hog blocks a borrow or withdrawal that would leave the health factor under 1.5. The key stays in the signing worker.</p>
-              <p id="aave-health" class="note">Open this page to load the market.</p>
-              <p id="aave-error" class="error" role="status"></p>
-              <form id="aave-form" class="stack">
-                <label>Reserve
-                  <select id="aave-reserve"></select>
-                </label>
-                <label>Amount
-                  <span class="amount-line">
-                    <input id="aave-amount" inputmode="decimal" placeholder="0.00">
-                    <button type="button" id="aave-max" class="tiny">Max</button>
-                  </span>
-                </label>
-                <label class="check" id="aave-eth-row"><input id="aave-from-eth" type="checkbox"> Use ETH, leaving gas in the wallet</label>
-                <label class="check" id="aave-unwrap-row"><input id="aave-unwrap" type="checkbox"> Unwrap WETH to ETH</label>
-                <label class="check" id="aave-full-row"><input id="aave-full" type="checkbox"> Use the full position</label>
-                <p id="aave-status" class="note"></p>
-                <div class="row">
-                  <button type="button" id="aave-supply">Supply</button>
-                  <button type="button" id="aave-borrow">Borrow</button>
-                  <button type="button" id="aave-repay">Repay</button>
-                  <button type="button" id="aave-withdraw">Withdraw</button>
+              <h3>Aave v4</h3>
+              <section class="aave-card">
+                <div class="aave-top">
+                  <span class="aave-pill"><i></i><span>Aave v4 · Main Spoke · Ethereum</span></span>
+                  <button type="button" id="aave-refresh" class="aave-link">Refresh</button>
                 </div>
-              </form>
+                <p id="aave-error" class="error" role="status"></p>
+                <div class="aave-health">
+                  <div>
+                    <p class="aave-k">Health factor</p>
+                    <p id="aave-health" class="aave-hf">—</p>
+                  </div>
+                  <span id="aave-badge" class="aave-badge is-none">No debt</span>
+                </div>
+                <div class="aave-stats">
+                  <div><p class="aave-k">Supplied</p><p id="aave-supplied">—</p></div>
+                  <div><p class="aave-k">Borrowed</p><p id="aave-borrowed">—</p></div>
+                  <div><p class="aave-k">Can borrow</p><p id="aave-can">—</p></div>
+                </div>
+                <p id="aave-collateral" class="aave-fine">Can borrow is the most that keeps the health factor at 1.5.</p>
+              </section>
+              <section class="aave-card">
+                <div class="aave-seg" role="tablist">
+                  <button type="button" data-aave-action="supply" role="tab" aria-selected="true">Supply</button>
+                  <button type="button" data-aave-action="borrow" role="tab" aria-selected="false">Borrow</button>
+                  <button type="button" data-aave-action="repay" role="tab" aria-selected="false">Repay</button>
+                  <button type="button" data-aave-action="withdraw" role="tab" aria-selected="false">Withdraw</button>
+                </div>
+                <div id="aave-assets" class="aave-grid" role="listbox" aria-label="Asset"></div>
+                <div class="aave-amount">
+                  <input id="aave-amount" inputmode="decimal" placeholder="Amount" autocomplete="off">
+                  <button type="button" id="aave-max" class="tiny">Max</button>
+                </div>
+                <p id="aave-room" class="aave-fine"></p>
+                <label class="check" id="aave-unwrap-row"><input id="aave-unwrap" type="checkbox" checked> <span id="aave-unwrap-label">Unwrap to ETH</span></label>
+                <div id="aave-after" class="aave-after" hidden>
+                  <span>Health factor after</span>
+                  <span class="aave-after-num">
+                    <strong id="aave-after-value">—</strong>
+                    <span id="aave-after-block" class="aave-block" hidden>Below 1.5, blocked</span>
+                  </span>
+                </div>
+                <p class="aave-warn">Borrowing can get your collateral liquidated if the health factor falls below 1.00. Details are under Risk and rates. Hog blocks a borrow or withdrawal that would leave it under 1.5.</p>
+                <label class="check"><input id="aave-ack" type="checkbox"> I understand my collateral can be liquidated and that this has not been tested with real funds.</label>
+                <p id="aave-status" class="note"></p>
+                <button type="button" id="aave-go" class="primary">Review supply</button>
+                <div id="aave-review" hidden>
+                  <p id="aave-review-title" class="aave-k"></p>
+                  <div id="aave-review-rows"></div>
+                  <div class="row">
+                    <button type="button" id="aave-review-cancel">Back</button>
+                    <button type="button" id="aave-review-go" class="primary">Confirm and sign</button>
+                  </div>
+                </div>
+              </section>
+              <details class="aave-card" open>
+                <summary>Your positions <span id="aave-pos-hint"></span></summary>
+                <div id="aave-positions"></div>
+              </details>
+              <details class="aave-card">
+                <summary>Borrow markets <span id="aave-market-hint"></span></summary>
+                <div id="aave-markets" class="aave-grid"></div>
+              </details>
+              <details class="aave-card">
+                <summary>Risk and rates</summary>
+                <div id="aave-risk"></div>
+              </details>
+              <details class="aave-card">
+                <summary>How ETH and WETH work</summary>
+                <p class="aave-fine">Aave holds WETH, a 1:1 wrapped version of ETH. Supplying ETH wraps it first and leaves a little ETH behind for gas. Borrowing or withdrawing WETH can unwrap back to ETH.</p>
+              </details>
+              <details class="aave-card">
+                <summary>Contract details</summary>
+                <p class="aave-row"><span>Main Spoke</span><code id="aave-spoke"></code></p>
+                <p class="aave-row"><span>Core Hub</span><code id="aave-hub"></code></p>
+              </details>
               <button type="button" id="open-aave">Open app.aave.com</button>
             </div>
 
@@ -1315,7 +1366,7 @@
               </form>
               <textarea id="revealed-phrase" readonly rows="3" hidden></textarea>
               <p id="phrase-error" class="error" role="status"></p>
-              <p class="note" id="phrase-note">This wallet was imported or created as a private key, so there is no recovery phrase. The private key is the backup.</p>
+              <p class="note" id="phrase-note">This wallet is one private key. It spends Warthog only. Ethereum, Hemi, Bitcoin, and Solana need a recovery phrase.</p>
             </div>
 
             <div id="wpage-autolock" hidden>
