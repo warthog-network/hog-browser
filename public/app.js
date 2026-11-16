@@ -4776,6 +4776,173 @@ function paintJellyfinLinks(items) {
 }
 
 
+let bzBusy = false;
+let bzDirty = false;
+
+function bzField(id) {
+  return ($(id) && $(id).value.trim()) || "";
+}
+
+function canonicalBzPool(raw) {
+  const text = String(raw || "").trim();
+  const match = /^stratum\+tcp:\/\/(\[[0-9a-f:]+\]|[A-Za-z0-9.-]+):(\d+)$/i.exec(text);
+  if (!match) return "";
+  const port = Number(match[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "";
+  let host = match[1].toLowerCase();
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  const parts = host.split(".");
+  const ipv4 = parts.length === 4 && parts.every((part) => /^\d+$/.test(part) && Number(part) <= 255);
+  const tailnet4 = ipv4 && Number(parts[0]) === 100 && Number(parts[1]) >= 64 && Number(parts[1]) <= 127;
+  const magic = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host);
+  const tailnet6 = host.startsWith("fd7a:115c:a1e0:");
+  if (host !== "127.0.0.1" && !tailnet4 && !magic && !tailnet6) return "";
+  const literal = host.includes(":") ? `[${host}]` : host;
+  return `stratum+tcp://${literal}:${port}`;
+}
+
+function bzOptionalInt(value, low, high) {
+  if (!value) return "";
+  if (!/^-?\d+$/.test(value)) return null;
+  const number = Number(value);
+  if (number === 0) return "";
+  if (!Number.isInteger(number) || number < low || number > high) return null;
+  return String(number);
+}
+
+function readBzminerForm() {
+  const pool = canonicalBzPool(bzField("bz-pool"));
+  if (!pool) return { error: "Use this computer's mining port, or a Tailscale stratum address." };
+  const wallet = bzField("bz-wallet").toLowerCase();
+  if (!/^[0-9a-f]{48}$/.test(wallet)) return { error: "A Warthog address is 48 hex characters." };
+  const worker = bzField("bz-worker") || "rig1";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(worker)) return { error: "Use a worker name of letters, digits, - or _." };
+  const cpuThreads = bzOptionalInt(bzField("bz-threads"), 1, 256);
+  if (cpuThreads == null) return { error: "CPU threads needs a number from 1 to 256." };
+  const memoryGb = bzOptionalInt(bzField("bz-memory"), 6, 64);
+  if (!memoryGb) return { error: "Memory needs a number from 6 to 64." };
+  const ocCore = bzOptionalInt(bzField("bz-oc-core"), 1, 5000);
+  if (ocCore == null) return { error: "Core lock needs a number from 1 to 5000." };
+  const ocMemory = bzOptionalInt(bzField("bz-oc-memory"), 1, 20000);
+  if (ocMemory == null) return { error: "Memory lock needs a number from 1 to 20000." };
+  const ocOffset = bzOptionalInt(bzField("bz-oc-offset"), -2000, 2000);
+  if (ocOffset == null) return { error: "Core offset needs a number from -2000 to 2000." };
+  return { pool, wallet, worker, cpuThreads, memoryGb, ocCore, ocMemory, ocOffset };
+}
+
+function openBzminerPanel() {
+  const card = $("bzminer-card");
+  if (!card) return;
+  card.hidden = false;
+  showSettingsPage("containers");
+  const wallet = $("bz-wallet");
+  const mining = $("mining-address");
+  if (wallet && !wallet.value.trim() && mining && mining.value.trim()) wallet.value = mining.value.trim();
+  card.scrollIntoView({ block: "nearest" });
+}
+
+function paintBzminer(payload) {
+  const card = $("bzminer-card");
+  if (!card || !payload) return;
+  const items = Array.isArray(payload.items) ? payload.items : null;
+  const item = items && items.find((row) => row && row.name === "bzminer");
+  if (item) card.hidden = false;
+  const running = Boolean(item && item.state === "running" && !item.reason);
+  const start = $("bz-start");
+  const stop = $("bz-stop");
+  const status = $("bz-status");
+  const error = $("bz-error");
+  if (bzBusy) {
+    const notice = payload.notice || "";
+    if (payload.ok === false) {
+      bzBusy = false;
+      if (error) error.textContent = payload.error || "Hog could not start BzMiner.";
+      if (status) status.textContent = "";
+    } else if (/^Started BzMiner|^Stopped BzMiner|^BzMiner is/.test(notice)) {
+      bzBusy = false;
+      bzDirty = false;
+      if (error) error.textContent = "";
+      if (status) status.textContent = notice;
+    } else if (notice && /bzminer/i.test(notice) && status) {
+      status.textContent = notice;
+    }
+  } else if (status && items) {
+    if (payload.notice && /bzminer/i.test(payload.notice)) status.textContent = payload.notice;
+    else if (running) status.textContent = "Running. Hashrate is at 127.0.0.1:4014.";
+    else if (item) status.textContent = "Stopped. Start mining replaces this container with the settings below.";
+  }
+  if (start) start.disabled = bzBusy;
+  if (stop) stop.disabled = bzBusy || !running;
+  const saved = payload.bzminer;
+  if (!saved || bzDirty || bzBusy) return;
+  const set = (id, value) => {
+    const input = $(id);
+    if (!input || document.activeElement === input) return;
+    if (id === "bz-wallet" && !value && input.value) return;
+    if (value != null) input.value = String(value);
+  };
+  set("bz-pool", saved.pool);
+  set("bz-wallet", saved.wallet);
+  set("bz-worker", saved.worker);
+  set("bz-threads", saved.cpuThreads || "");
+  set("bz-memory", saved.memoryGb || "8");
+  set("bz-oc-core", saved.ocCore || "");
+  set("bz-oc-memory", saved.ocMemory || "");
+  set("bz-oc-offset", saved.ocOffset || "");
+}
+
+function bindBzminerPanel() {
+  const form = $("bzminer-form");
+  if (!form) return;
+  form.addEventListener("input", () => { bzDirty = true; });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (bzBusy) return;
+    const spec = readBzminerForm();
+    const error = $("bz-error");
+    const status = $("bz-status");
+    if (spec.error) {
+      if (error) error.textContent = spec.error;
+      return;
+    }
+    if (error) error.textContent = "";
+    bzBusy = true;
+    if (status) status.textContent = "Turning on the mining port…";
+    paintBzminer({ bzminer: spec });
+    try {
+      const mining = await postMining({ enabled: true, address: spec.wallet });
+      paintMining(mining);
+      if (!mining.stratumListening) {
+        bzBusy = false;
+        if (error) error.textContent = mining.error || mining.lastError || "Solo mining is not listening, so BzMiner was not started.";
+        if (status) status.textContent = "";
+        paintBzminer({ bzminer: spec });
+        return;
+      }
+    } catch (err) {
+      bzBusy = false;
+      if (error) error.textContent = err instanceof Error ? err.message : String(err);
+      if (status) status.textContent = "";
+      paintBzminer({ bzminer: spec });
+      return;
+    }
+    if (status) status.textContent = "Starting BzMiner…";
+    desktopCommand(`containers:bzminer-start:${JSON.stringify(spec)}`);
+  });
+  const stop = $("bz-stop");
+  if (stop) {
+    stop.addEventListener("click", () => {
+      if (bzBusy || stop.disabled) return;
+      bzBusy = true;
+      const status = $("bz-status");
+      const error = $("bz-error");
+      if (error) error.textContent = "";
+      if (status) status.textContent = "Stopping BzMiner…";
+      desktopCommand("containers:bzminer-stop");
+    });
+  }
+}
+
 function renderContainers(payload) {
   const list = $("container-list");
   const error = $("container-error");
@@ -4801,6 +4968,7 @@ function renderContainers(payload) {
   paintDocker(payload);
   paintDefaultBrowser(payload);
   paintJellyfinGpu(payload);
+  paintBzminer(payload);
   if (Array.isArray(payload.items)) {
     lastContainerItems = payload.items;
     paintJellyfinLinks(payload.items);
@@ -4855,7 +5023,7 @@ function renderContainers(payload) {
     const empty = document.createElement("li");
     const note = document.createElement("p");
     note.className = "empty-state";
-    note.textContent = "No containers yet. Open Images to run Jellyfin, Tailscale, or another image.";
+    note.textContent = "No containers yet. Open Images to run Jellyfin, Tailscale, BzMiner, or another image.";
     empty.append(note);
     list.append(empty);
     return;
@@ -4887,6 +5055,18 @@ function renderContainers(payload) {
       note.className = "note";
       note.textContent = item.reason;
       line.append(note);
+    }
+    if (item.name === "bzminer") {
+      line.classList.add("is-share");
+      line.tabIndex = 0;
+      line.setAttribute("role", "button");
+      line.title = "Pool, wallet, and start mining";
+      line.addEventListener("click", () => openBzminerPanel());
+      line.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        openBzminerPanel();
+      });
     }
     if (item.name === "jellyfin" && running && !item.reason) {
       line.classList.add("is-share");
@@ -4933,7 +5113,7 @@ function renderContainers(payload) {
     const actions = [["Command", "command"]];
     const other = item.runtime === "engine" ? "desktop" : "engine";
     const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
-    if (runtimeOk(other)) actions.push([otherLabel, "runtime"]);
+    if (runtimeOk(other) && item.name !== "bzminer") actions.push([otherLabel, "runtime"]);
     if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
     actions.push(...(running
       ? [["Stop", "stop"], ["Logs", "logs"]]
@@ -4949,6 +5129,10 @@ function renderContainers(payload) {
         event.stopPropagation();
         closeKebabs();
         if (action === "command") {
+          if (item.name === "bzminer") {
+            openBzminerPanel();
+            return;
+          }
           const image = item.image && /^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,200}$/.test(item.image) && !item.image.includes("..")
             ? item.image
             : "ubuntu:24.04";
@@ -7838,6 +8022,7 @@ function bind() {
   });
   bindFilesSettings();
   bindSambaCard();
+  bindBzminerPanel();
   restoreAccordions();
   document.querySelectorAll("[data-launch]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -7899,6 +8084,10 @@ function bind() {
           network: preferEngine ? "host" : "hog-tailscale",
           runtime,
         });
+        return;
+      }
+      if (kind === "bzminer") {
+        openBzminerPanel();
         return;
       }
       if (kind === "jellyfin") {

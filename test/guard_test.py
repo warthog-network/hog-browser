@@ -65,6 +65,13 @@ from guard import (
     parse_sha256sums,
     parse_version,
     version_newer,
+    BZMINER_IMAGE,
+    bzminer_argv,
+    bzminer_container_ok,
+    bzminer_run_args,
+    bzminer_spec,
+    canonical_bz_pool,
+    warthog_address_ok,
 )
 
 
@@ -3010,6 +3017,93 @@ class LegacyAiSettingsTest(unittest.TestCase):
                 self.assertNotIn("ai", payload)
             self.assertFalse(hasattr(guard, "start_code_chat"))
             self.assertFalse(hasattr(guard_module, "OLLAMA_NAME"))
+
+
+def _wallet(body="11" * 20):
+    raw = bytes.fromhex(body)
+    return (raw + hashlib.sha256(raw).digest()[:4]).hex()
+
+
+def _bz_info(cmd, privileged=False, image=BZMINER_IMAGE, binds=None, mounts=None, network="host", devices=None, entrypoint=None):
+    body = info(Privileged=privileged, NetworkMode=network, Binds=binds, Devices=devices)
+    body["Name"] = "/bzminer"
+    body["Config"] = {"Image": image, "Cmd": cmd, "Entrypoint": entrypoint if entrypoint is not None else ["/usr/bin/bzminer"]}
+    body["Mounts"] = mounts or []
+    return body
+
+
+class BzMinerPolicyTest(unittest.TestCase):
+    def test_pool_stays_on_loopback_or_tailnet(self):
+        wallet = _wallet()
+        self.assertTrue(warthog_address_ok(wallet))
+        self.assertFalse(warthog_address_ok(wallet[:-1] + ("0" if wallet[-1] != "0" else "1")))
+        self.assertEqual(canonical_bz_pool("stratum+tcp://127.0.0.1:3456"), "stratum+tcp://127.0.0.1:3456")
+        self.assertEqual(canonical_bz_pool("stratum+tcp://100.119.132.89:3456"), "stratum+tcp://100.119.132.89:3456")
+        self.assertEqual(canonical_bz_pool("stratum+tcp://hog.tail314642.ts.net:3456"), "stratum+tcp://hog.tail314642.ts.net:3456")
+        self.assertEqual(canonical_bz_pool("stratum+tcp://[fd7a:115c:a1e0::1]:3456"), "stratum+tcp://[fd7a:115c:a1e0::1]:3456")
+        for raw in ("stratum+tcp://8.8.8.8:3456", "stratum+tcp://192.168.1.5:3456", "stratum+tcp://pool.example.com:3333", "stratum+ssl://127.0.0.1:3456", ""):
+            self.assertEqual(canonical_bz_pool(raw), "", raw)
+
+    def test_run_args_pass_the_gpu_and_stay_unprivileged(self):
+        wallet = _wallet()
+        spec, error = bzminer_spec({"pool": "stratum+tcp://127.0.0.1:3456", "wallet": wallet, "worker": "rig1", "memoryGb": "8"})
+        self.assertEqual(error, "")
+        self.assertFalse(spec["privileged"])
+        args = bzminer_run_args(spec)
+        image_at = args.index(BZMINER_IMAGE)
+        self.assertEqual(args[args.index("--gpus") + 1], "all")
+        self.assertLess(args.index("--gpus"), image_at)
+        self.assertEqual(args[args.index("--network") + 1], "host")
+        self.assertNotIn("--privileged", args)
+        self.assertNotIn("-v", args)
+        self.assertNotIn("--publish", args)
+        self.assertNotIn("--mount", args)
+        self.assertEqual(args[image_at + 1:image_at + 9], ["-a", "warthog", "-p", "stratum+tcp://127.0.0.1:3456", "-w", wallet, "--worker", "rig1"])
+        self.assertNotIn("--nvidia", args)
+        self.assertNotIn("--set", args)
+
+    def test_clock_locks_are_the_only_privileged_path(self):
+        wallet = _wallet()
+        spec, error = bzminer_spec({
+            "wallet": wallet,
+            "ocCore": "1800",
+            "ocMemory": "810",
+            "ocOffset": "120",
+            "cpuThreads": "4",
+        })
+        self.assertEqual(error, "")
+        self.assertTrue(spec["privileged"])
+        args = bzminer_run_args(spec)
+        image_at = args.index(BZMINER_IMAGE)
+        self.assertLess(args.index("--privileged"), image_at)
+        cmd = bzminer_argv(spec)
+        self.assertEqual(assess(_bz_info(cmd, privileged=True), "bzminer", DATA), "")
+        self.assertEqual(assess(_bz_info(cmd, privileged=True, devices=[{"PathOnHost": "/dev/nvidia0"}, {"PathOnHost": "/dev/dri/card0"}]), "bzminer", DATA), "")
+        self.assertIn("privileged", assess(_bz_info(bzminer_argv({**spec, "ocCore": "", "ocMemory": "", "ocOffset": "", "privileged": False}), privileged=True), "bzminer", DATA))
+        self.assertIn("privileged", assess(_bz_info(cmd, privileged=True, binds=["/var/run/docker.sock:/var/run/docker.sock"]), "bzminer", DATA))
+        self.assertIn("privileged", assess(info(Privileged=True), "demo", DATA))
+        bare = bzminer_argv({**spec, "ocCore": "", "ocMemory": "", "ocOffset": "", "privileged": False})
+        self.assertEqual(assess(_bz_info(bare), "bzminer", DATA), "")
+        self.assertIn("host", assess(_bz_info(["sleep", "infinity"], image="ubuntu:24.04"), "bzminer", DATA))
+        self.assertIn("host", assess(_bz_info(["-a", "warthog", "-p", "stratum+tcp://8.8.8.8:3456", "-w", wallet, "--worker", "rig1"]), "bzminer", DATA))
+        self.assertEqual(assess(_bz_info(bare, network="bridge"), "bzminer", DATA), "")
+
+    def test_generic_launcher_still_refuses_gpu_and_privileged(self):
+        for line in (
+            "docker run --gpus all --name bzminer bzminer/bzminer:v100.81",
+            "docker run --privileged --network host --name bzminer bzminer/bzminer:v100.81",
+        ):
+            with self.assertRaises(CommandError):
+                parse_run(line)
+
+    def test_start_rejects_a_public_pool_before_docker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.engine_status = lambda: {"ok": True, "error": "", "items": []}
+            out = guard.bzminer_start('{"pool":"stratum+tcp://pool.example.com:3333","wallet":"%s"}' % _wallet())
+            self.assertFalse(out["ok"])
+            self.assertIn("Tailscale", out["error"])
+            self.assertFalse(bzminer_container_ok({"Name": "/bzminer", "Config": {"Image": "busybox", "Cmd": ["sh"]}, "HostConfig": {"NetworkMode": "host", "Privileged": True}}, "bzminer"))
 
 
 if __name__ == "__main__":

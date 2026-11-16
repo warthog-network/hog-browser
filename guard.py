@@ -1734,6 +1734,339 @@ def bind_source(bind):
     return text
 
 
+# BzMiner's published image. The panel builds this container itself.
+# The generic Run box cannot say --gpus, and a bridged container's
+# 127.0.0.1 is not Hog's stratum. Host network reaches that port.
+# Clock locks need --privileged; mining without them does not.
+BZMINER_NAME = "bzminer"
+BZMINER_TAG = "v100.81"
+BZMINER_IMAGE = f"bzminer/bzminer:{BZMINER_TAG}"
+BZMINER_GHCR = f"ghcr.io/bzminer/bzminer:{BZMINER_TAG}"
+BZMINER_IMAGE_RE = re.compile(
+    rf"^(?:docker\.io/bzminer/bzminer|ghcr\.io/bzminer/bzminer|bzminer/bzminer):{re.escape(BZMINER_TAG)}$"
+)
+BZMINER_WORKER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+BZMINER_POOL_RE = re.compile(r"^stratum\+tcp://(\[[0-9a-f:]+\]|[A-Za-z0-9.-]+):(\d+)$")
+BZMINER_TS_NET_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$")
+BZMINER_OC_FLAGS = (
+    "--oc-lock-core-clock",
+    "--oc-lock-memory-clock",
+    "--oc-core-clock-offset",
+)
+
+
+def bzminer_defaults():
+    return {
+        "pool": "stratum+tcp://127.0.0.1:3456",
+        "wallet": "",
+        "worker": "rig1",
+        "cpuThreads": "",
+        "memoryGb": "8",
+        "ocCore": "",
+        "ocMemory": "",
+        "ocOffset": "",
+        "privileged": False,
+        "image": BZMINER_IMAGE,
+    }
+
+
+def _expand_ipv6(text):
+    ip = str(text or "").lower()
+    if not ip or "%" in ip or "." in ip:
+        return None
+    halves = ip.split("::")
+    if len(halves) > 2:
+        return None
+
+    def parse(part):
+        if not part:
+            return []
+        groups = []
+        for group in part.split(":"):
+            if not re.fullmatch(r"[0-9a-f]{1,4}", group):
+                return None
+            groups.append(int(group, 16))
+        return groups
+
+    head = parse(halves[0])
+    tail = [] if len(halves) == 1 else parse(halves[1])
+    if head is None or tail is None:
+        return None
+    fill = 8 - len(head) - len(tail)
+    if fill < 0 or (len(halves) == 1 and fill != 0):
+        return None
+    return head + [0] * fill + tail
+
+
+def _bzminer_pool_host_ok(host):
+    if host == "127.0.0.1":
+        return True
+    parts = ipv4_parts(host)
+    if parts and parts[0] == 100 and 64 <= parts[1] <= 127:
+        return True
+    if BZMINER_TS_NET_RE.fullmatch(host):
+        return True
+    groups = _expand_ipv6(host)
+    return bool(groups) and groups[0] == 0xFD7A and groups[1] == 0x115C and groups[2] == 0xA1E0
+
+
+def canonical_bz_pool(raw):
+    """Loopback, a tailnet address, or a MagicDNS name. Public pools are refused."""
+    text = str(raw or "").strip()
+    if text.lower().startswith("stratum+tcp://"):
+        text = "stratum+tcp://" + text[len("stratum+tcp://"):]
+    match = BZMINER_POOL_RE.fullmatch(text)
+    if match is None:
+        return ""
+    port = int(match.group(2))
+    if port < 1 or port > 65535:
+        return ""
+    host = match.group(1).lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if not _bzminer_pool_host_ok(host):
+        return ""
+    literal = f"[{host}]" if ":" in host else host
+    return f"stratum+tcp://{literal}:{port}"
+
+
+def warthog_address_ok(value):
+    text = str(value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{48}", text):
+        return False
+    raw = bytes.fromhex(text)
+    return hashlib.sha256(raw[:20]).digest()[:4] == raw[20:]
+
+
+def _opt_int(value, low, high, label, blank_zero=False):
+    text = str(value if value is not None else "").strip()
+    if text == "":
+        return "", ""
+    if not re.fullmatch(r"-?\d+", text):
+        return None, f"{label} needs a whole number."
+    number = int(text)
+    if blank_zero and number == 0:
+        return "", ""
+    if number < low or number > high:
+        return None, f"{label} needs a number from {low} to {high}."
+    return str(number), ""
+
+
+def bzminer_spec(raw, strict=True):
+    """Settings the panel may set. The image, the network, and privileged stay here."""
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            data = None
+    if not isinstance(data, dict):
+        if strict:
+            return None, "Hog could not read those BzMiner settings."
+        data = {}
+    defaults = bzminer_defaults()
+    pool = canonical_bz_pool(data.get("pool") if "pool" in data and str(data.get("pool") or "").strip() else defaults["pool"])
+    if not pool:
+        if strict:
+            return None, "Use this computer's mining port, or a Tailscale stratum address."
+        pool = defaults["pool"]
+    wallet = str(data.get("wallet") or "").strip().lower()
+    if wallet and not warthog_address_ok(wallet):
+        if strict:
+            return None, "A Warthog address is 48 hex characters with a valid checksum."
+        wallet = ""
+    if strict and not wallet:
+        return None, "Paste the Warthog address blocks should pay."
+    worker = str(data.get("worker") or defaults["worker"]).strip()
+    if not BZMINER_WORKER_RE.fullmatch(worker):
+        if strict:
+            return None, "Use a worker name of letters, digits, - or _."
+        worker = defaults["worker"]
+    cpu, cpu_error = _opt_int(data.get("cpuThreads"), 1, 256, "CPU threads", blank_zero=True)
+    if cpu_error:
+        if strict:
+            return None, cpu_error
+        cpu = ""
+    memory_raw = data.get("memoryGb") if "memoryGb" in data and str(data.get("memoryGb") or "").strip() else defaults["memoryGb"]
+    memory, memory_error = _opt_int(memory_raw, 6, 64, "Memory")
+    if memory_error or not memory:
+        if strict:
+            return None, memory_error or "Memory needs a number from 6 to 64."
+        memory = defaults["memoryGb"]
+    oc_core, core_error = _opt_int(data.get("ocCore"), 1, 5000, "Core lock", blank_zero=True)
+    if core_error:
+        if strict:
+            return None, core_error
+        oc_core = ""
+    oc_memory, mem_error = _opt_int(data.get("ocMemory"), 1, 20000, "Memory lock", blank_zero=True)
+    if mem_error:
+        if strict:
+            return None, mem_error
+        oc_memory = ""
+    oc_offset, offset_error = _opt_int(data.get("ocOffset"), -2000, 2000, "Core offset", blank_zero=True)
+    if offset_error:
+        if strict:
+            return None, offset_error
+        oc_offset = ""
+    return {
+        "pool": pool,
+        "wallet": wallet,
+        "worker": worker,
+        "cpuThreads": cpu or "",
+        "memoryGb": memory,
+        "ocCore": oc_core or "",
+        "ocMemory": oc_memory or "",
+        "ocOffset": oc_offset or "",
+        "privileged": bool(oc_core or oc_memory or oc_offset),
+        "image": BZMINER_IMAGE,
+    }, ""
+
+
+def bzminer_argv(spec):
+    args = ["-a", "warthog", "-p", spec["pool"], "-w", spec["wallet"], "--worker", spec["worker"]]
+    if spec.get("cpuThreads"):
+        args += ["--cpu_threads", str(spec["cpuThreads"])]
+    if spec.get("ocCore"):
+        args += ["--oc-lock-core-clock", str(spec["ocCore"])]
+    if spec.get("ocMemory"):
+        args += ["--oc-lock-memory-clock", str(spec["ocMemory"])]
+    if spec.get("ocOffset"):
+        args += ["--oc-core-clock-offset", str(spec["ocOffset"])]
+    return args
+
+
+def _bzminer_docker_line(result, fallback):
+    blob = f"{getattr(result, 'stderr', '') or ''}\n{getattr(result, 'stdout', '') or ''}"
+    if docker_offline(blob):
+        return "Docker is not running."
+    detail = [line.strip() for line in blob.splitlines() if line.strip()]
+    message = detail[-1][:180] if detail else fallback
+    lowered = message.lower()
+    if "address already in use" in lowered or "port is already allocated" in lowered:
+        return "Port 4014 is already taken, often by a BzMiner started from a start file. Stop that one, then try again."
+    if "nvidia" in lowered or "could not select device driver" in lowered:
+        return "Docker Engine could not see the NVIDIA GPU. Install the NVIDIA toolkit on the Jellyfin card, then try again."
+    return message
+
+
+def bzminer_run_args(spec):
+    image = spec.get("image") or BZMINER_IMAGE
+    args = compose_run(
+        BZMINER_NAME,
+        image,
+        command=tuple(bzminer_argv(spec)),
+        network="host",
+        gpus=True,
+        memory=f"{spec['memoryGb']}g",
+    )
+    if spec.get("privileged"):
+        args.insert(args.index(image), "--privileged")
+    return args
+
+
+def bzminer_image_name_ok(image):
+    return bool(BZMINER_IMAGE_RE.fullmatch(str(image or "").strip().lower()))
+
+
+def bzminer_entrypoint_ok(config):
+    entry = config.get("Entrypoint") if isinstance(config, dict) else None
+    if not entry:
+        return True
+    if not isinstance(entry, list) or len(entry) != 1:
+        return False
+    text = str(entry[0])
+    if not re.fullmatch(r"[A-Za-z0-9_./+-]+", text) or ".." in text:
+        return False
+    return text == "bzminer" or text.endswith("/bzminer")
+
+
+def bzminer_command_ok(cmd):
+    if not isinstance(cmd, list) or cmd[:3] != ["-a", "warthog", "-p"]:
+        return False
+    pool = canonical_bz_pool(cmd[3] if len(cmd) > 3 else "")
+    if not pool or cmd[3] != pool:
+        return False
+    if len(cmd) < 8 or cmd[4] != "-w" or not warthog_address_ok(cmd[5]):
+        return False
+    if cmd[6] != "--worker" or not BZMINER_WORKER_RE.fullmatch(str(cmd[7])):
+        return False
+    allowed = {
+        "--cpu_threads": (1, 256),
+        "--oc-lock-core-clock": (1, 5000),
+        "--oc-lock-memory-clock": (1, 20000),
+        "--oc-core-clock-offset": (-2000, 2000),
+    }
+    seen = set()
+    rest = cmd[8:]
+    index = 0
+    while index < len(rest):
+        flag = rest[index]
+        if flag not in allowed or flag in seen or index + 1 >= len(rest):
+            return False
+        value = str(rest[index + 1])
+        if not re.fullmatch(r"-?\d+", value):
+            return False
+        number = int(value)
+        low, high = allowed[flag]
+        if number == 0 or number < low or number > high:
+            return False
+        seen.add(flag)
+        index += 2
+    return True
+
+
+def bzminer_command_has_oc(cmd):
+    return isinstance(cmd, list) and any(flag in cmd for flag in BZMINER_OC_FLAGS)
+
+
+def bzminer_mounts_clear(info):
+    host = info.get("HostConfig") if isinstance(info.get("HostConfig"), dict) else {}
+    if host.get("Binds") or host.get("VolumesFrom"):
+        return False
+    for mount in info.get("Mounts") or []:
+        if not isinstance(mount, dict):
+            return False
+        blob = " ".join(str(mount.get(key) or "") for key in ("Source", "Destination", "Name"))
+        if blob.strip():
+            return False
+    return True
+
+
+def bzminer_devices_ok(host):
+    for device in host.get("Devices") or []:
+        if not isinstance(device, dict):
+            return False
+        source = str(device.get("PathOnHost") or "")
+        if source == "/dev/net/tun" or nvidia_device_path(source):
+            continue
+        if source == "/dev/dri" or source.startswith("/dev/dri/"):
+            continue
+        return False
+    return True
+
+
+def bzminer_container_ok(info, name):
+    """Pinned image, Warthog argv, no mounts, host network. Privileged only with a clock lock."""
+    if str(name or "") != BZMINER_NAME or not isinstance(info, dict):
+        return False
+    reported = str(info.get("Name") or "").lstrip("/")
+    if reported and reported != BZMINER_NAME:
+        return False
+    config = info.get("Config") if isinstance(info.get("Config"), dict) else {}
+    if not bzminer_image_name_ok(config.get("Image")):
+        return False
+    if not bzminer_entrypoint_ok(config) or not bzminer_command_ok(config.get("Cmd")):
+        return False
+    if not bzminer_mounts_clear(info):
+        return False
+    host = info.get("HostConfig") if isinstance(info.get("HostConfig"), dict) else {}
+    if str(host.get("NetworkMode") or "") != "host" or not bzminer_devices_ok(host):
+        return False
+    if host.get("Privileged") is True and not bzminer_command_has_oc(config.get("Cmd")):
+        return False
+    return True
+
+
 def assess(info, name, data):
     if not valid_name(name):
         return "Use a plain container name."
@@ -1743,13 +2076,13 @@ def assess(info, name, data):
     if reported and reported != name:
         return "That name does not match the container."
     host = info.get("HostConfig") if isinstance(info.get("HostConfig"), dict) else {}
-    if host.get("Privileged") is True:
+    if host.get("Privileged") is True and not bzminer_container_ok(info, name):
         return "That container is privileged."
     config = info.get("Config") if isinstance(info.get("Config"), dict) else {}
     image = str((config or {}).get("Image") or "")
     for key in ("NetworkMode", "PidMode", "IpcMode", "UTSMode", "CgroupnsMode", "UsernsMode"):
         mode = str(host.get(key) or "")
-        if mode == "host" and key == "NetworkMode" and is_tailscale_image(name, image):
+        if mode == "host" and key == "NetworkMode" and (is_tailscale_image(name, image) or bzminer_container_ok(info, name)):
             continue
         if mode == "host" or mode.startswith("container:"):
             return "That container shares the host or another container."
@@ -1769,6 +2102,8 @@ def assess(info, name, data):
         if isinstance(device, dict):
             source = str(device.get("PathOnHost") or "")
             if source == "/dev/net/tun" or nvidia_device_path(source):
+                continue
+            if (source == "/dev/dri" or source.startswith("/dev/dri/")) and bzminer_container_ok(info, name):
                 continue
             sources.append(source)
     for source in sources:
@@ -2279,6 +2614,8 @@ class Guard:
 
     def container_runtime(self, name=""):
         name = str(name or "")
+        if name == BZMINER_NAME:
+            return RUNTIME_ENGINE
         if name == "jellyfin" and self.gpu_enabled():
             return RUNTIME_ENGINE
         saved = self.read_runtimes().get(name)
@@ -2289,6 +2626,8 @@ class Guard:
     def recommended_runtime(self, name="", image=""):
         name = str(name or "")
         image = str(image or "")
+        if name == BZMINER_NAME:
+            return RUNTIME_ENGINE
         if name == "jellyfin" and self.gpu_enabled():
             return RUNTIME_ENGINE
         saved = self.read_runtimes().get(name)
@@ -2741,6 +3080,10 @@ class Guard:
         except Exception:
             payload.setdefault("dockerRuntimes", {})
             payload.setdefault("runtimeDefaults", {})
+        try:
+            payload["bzminer"] = self.read_bzminer()
+        except Exception:
+            payload["bzminer"] = bzminer_defaults()
         return payload
 
     def update_cache_path(self):
@@ -4448,6 +4791,12 @@ class Guard:
             return {"ok": False, "error": "Use a plain container name.", "items": self.items()}
         if not valid_runtime(side):
             return {"ok": False, "error": "Choose Docker Engine or Docker Desktop.", "items": self.items()}
+        if name == BZMINER_NAME:
+            return {
+                "ok": False,
+                "error": "BzMiner stays on Docker Engine so the GPU and the mining port stay reachable.",
+                "items": self.items(),
+            }
         _sock, unavailable = self._runtime_or_error(side)
         if unavailable:
             payload = self.engine_status()
@@ -5064,6 +5413,115 @@ class Guard:
         self.forget(SAMBA_NAME)
         return self.samba_status(notice="Samba is off.")
 
+    def bzminer_path(self):
+        return self.data / "bzminer.json"
+
+    def read_bzminer(self):
+        try:
+            raw = json.loads(self.bzminer_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = None
+        spec, _error = bzminer_spec(raw if isinstance(raw, dict) else {}, strict=False)
+        return spec
+
+    def write_bzminer(self, spec):
+        self.data.mkdir(parents=True, exist_ok=True)
+        path = self.bzminer_path()
+        temporary = path.with_suffix(".json.tmp")
+        blob = {
+            "pool": spec["pool"],
+            "wallet": spec["wallet"],
+            "worker": spec["worker"],
+            "cpuThreads": spec["cpuThreads"],
+            "memoryGb": spec["memoryGb"],
+            "ocCore": spec["ocCore"],
+            "ocMemory": spec["ocMemory"],
+            "ocOffset": spec["ocOffset"],
+        }
+        temporary.write_text(json.dumps(blob, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        return blob
+
+    def _finish_bzminer(self, ok, error="", notice=""):
+        payload = self.engine_status()
+        payload["ok"] = ok
+        payload["error"] = error
+        if notice:
+            payload["notice"] = notice
+        return payload
+
+    def _bzminer_image(self, sock, progress=None):
+        for image in (BZMINER_IMAGE, BZMINER_GHCR):
+            if self.image_exists(image, sock=sock):
+                return image, ""
+        problem = self.pull_image(BZMINER_IMAGE, sock=sock, progress=progress)
+        if not problem:
+            return BZMINER_IMAGE, ""
+        mirror = self.pull_image(BZMINER_GHCR, sock=sock, progress=progress)
+        if not mirror:
+            return BZMINER_GHCR, ""
+        return "", problem
+
+    def bzminer_start(self, raw, progress=None):
+        spec, error = bzminer_spec(raw, strict=True)
+        if error:
+            return self._finish_bzminer(False, error)
+        if not self.runtime_available(RUNTIME_ENGINE):
+            return self._finish_bzminer(False, "BzMiner needs Docker Engine so the GPU is visible. Start Docker Engine, then try again.")
+        try:
+            self.write_bzminer(spec)
+        except OSError:
+            return self._finish_bzminer(False, "Hog could not save those BzMiner settings.")
+        self.save_runtime(BZMINER_NAME, RUNTIME_ENGINE)
+        sock = self.engine_sock()
+        image, problem = self._bzminer_image(sock, progress=progress)
+        if problem:
+            return self._finish_bzminer(False, problem)
+        spec = {**spec, "image": image}
+        problem = self._stop_rm_keep_volumes(BZMINER_NAME, sock=sock)
+        if problem:
+            return self._finish_bzminer(False, problem)
+        result = self.run_on(bzminer_run_args(spec), timeout=180, sock=sock)
+        if result.returncode != 0:
+            self.run_on(["rm", "-f", BZMINER_NAME], timeout=20, sock=sock)
+            return self._finish_bzminer(False, _bzminer_docker_line(result, "Docker did not start BzMiner."))
+        info, inspect_error = self.inspect_on(BZMINER_NAME, sock=sock)
+        reason = assess(info, BZMINER_NAME, self.data) if info else (inspect_error or "Docker did not describe BzMiner.")
+        if reason:
+            self.run_on(["rm", "-f", BZMINER_NAME], timeout=20, sock=sock)
+            self.forget(BZMINER_NAME)
+            return self._finish_bzminer(False, reason)
+        state = info.get("State") if isinstance(info.get("State"), dict) else {}
+        if state.get("Running") is not True:
+            logs = self.run_on(["logs", "--tail", "20", BZMINER_NAME], timeout=15, sock=sock)
+            text = f"{logs.stderr or ''}\n{logs.stdout or ''}".strip().splitlines()
+            detail = text[-1][:180] if text else "BzMiner exited as soon as it started."
+            return self._finish_bzminer(False, detail)
+        self.remember(BZMINER_NAME)
+        notice = f"Started BzMiner. It mines to {spec['pool']}. Hashrate is at 127.0.0.1:4014. Leave the node tab open so work keeps coming."
+        if spec["privileged"]:
+            notice += " Clock locks are on, so this container is privileged."
+        return self._finish_bzminer(True, notice=notice)
+
+    def bzminer_stop(self):
+        if not self.runtime_available(RUNTIME_ENGINE):
+            return self._finish_bzminer(False, "BzMiner needs Docker Engine. Start it, then try again.")
+        self.save_runtime(BZMINER_NAME, RUNTIME_ENGINE)
+        info, error = self.inspect_on(BZMINER_NAME, sock=self.engine_sock())
+        if info is None:
+            if error == "Docker is not running.":
+                return self._finish_bzminer(False, error)
+            return self._finish_bzminer(True, notice="BzMiner is not running.")
+        state = info.get("State") if isinstance(info.get("State"), dict) else {}
+        if state.get("Running") is not True:
+            return self._finish_bzminer(True, notice="BzMiner is already stopped.")
+        result = self.run_on(["stop", BZMINER_NAME], timeout=40, sock=self.engine_sock())
+        if result.returncode != 0:
+            return self._finish_bzminer(False, _bzminer_docker_line(result, "Docker did not stop BzMiner."))
+        return self._finish_bzminer(True, notice="Stopped BzMiner. The mining port stays on.")
+
     def handle(self, action, name="", image="", progress=None):
         if action == "samba-status":
             return self.samba_status()
@@ -5073,6 +5531,10 @@ class Guard:
             return self.samba_on(progress=progress)
         if action == "samba-off":
             return self.samba_off()
+        if action == "bzminer-start":
+            return self._mark_docker(self.bzminer_start(name, progress=progress))
+        if action == "bzminer-stop":
+            return self._mark_docker(self.bzminer_stop())
         if action == "update-status":
             return self.update_status()
         if action == "update-check":

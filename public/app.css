@@ -453,6 +453,13 @@ button { cursor: pointer; }
 }
 .connect-card .note { margin: 0; max-width: none; }
 .connect-card .note + .note { margin-top: 2px; }
+#bzminer-card .bz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+#bzminer-card .settings-sub { margin-top: 2px; }
+#bzminer-card strong { display: block; margin: 2px 0 6px; }
 
 .exit-node-guide {
   max-width: 720px;

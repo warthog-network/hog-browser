@@ -647,6 +647,35 @@ class SettingsUiTest(unittest.TestCase):
         for selector in (".service-links", ".service-link-row", ".service-link ", ".service-link-copy", ".pill.is-lan"):
             self.assertIn(selector, css)
 
+    def test_bzminer_panel_is_separate_from_the_generic_launcher(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        app = (root / "public" / "app.js").read_text(encoding="utf-8")
+        css = (root / "public" / "app.css").read_text(encoding="utf-8")
+        main = (root / "electron" / "main.js").read_text(encoding="utf-8")
+        images = html.split('id="container-images"', 1)[1].split('id="container-runtime-card"', 1)[0]
+        self.assertIn('data-launch="bzminer"', images)
+        self.assertIn("bzminer/bzminer:v100.81", images)
+        self.assertLess(html.find('id="container-list"'), html.find('id="bzminer-card"'))
+        self.assertLess(html.find('id="bzminer-card"'), html.find('id="container-advanced"'))
+        for element in ("bzminer-form", "bz-pool", "bz-wallet", "bz-worker", "bz-threads", "bz-memory", "bz-oc-core", "bz-oc-memory", "bz-oc-offset", "bz-start", "bz-stop"):
+            self.assertIn(f'id="{element}"', html)
+        self.assertIn('id="bzminer-card" class="connect-card" aria-label="BzMiner" hidden', html)
+        self.assertIn("function openBzminerPanel", app)
+        self.assertIn("function bindBzminerPanel", app)
+        self.assertIn('kind === "bzminer"', app)
+        self.assertIn("containers:bzminer-start:", app)
+        self.assertIn("containers:bzminer-stop", app)
+        self.assertIn('item.name === "bzminer"', app)
+        self.assertIn('item.name !== "bzminer"', app)
+        self.assertIn("#bzminer-card .bz-grid", css)
+        self.assertIn("bzminer-start", main)
+        self.assertIn("bzminer-stop", main)
+        bridge = (root / "electron" / "guard-bridge.py").read_text(encoding="utf-8")
+        self.assertIn('"bzminer-start"', bridge)
+        shell = (root / "hog").read_text(encoding="utf-8")
+        self.assertIn('"bzminer-start", "bzminer-stop"', shell)
+
 
 if __name__ == "__main__":
     unittest.main()

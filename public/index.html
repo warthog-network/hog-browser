@@ -445,6 +445,7 @@
               <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
               <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>Click Tailscale, then Run. Docker Engine is recommended so your phone can connect directly.</small></button></li>
               <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>Click Jellyfin, then Run. That creates ~/hog-shares and attaches it at /media. Use GPU acceleration if you want NVENC transcoding.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="bzminer" data-image="bzminer/bzminer:v100.81"><span>BzMiner</span><small>Opens the BzMiner panel. Set the pool and wallet, then start mining on Docker Engine.</small></button></li>
               <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
               <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
             </ul>
@@ -471,6 +472,52 @@
             <div class="popover-head"><strong>Containers</strong></div>
             <ul id="container-list" class="menu-list"></ul>
           </div>
+          <section id="bzminer-card" class="connect-card" aria-label="BzMiner" hidden>
+            <p class="eyebrow">BzMiner</p>
+            <strong>Mine to this node</strong>
+            <p class="note">Hog runs <code>bzminer/bzminer:v100.81</code> on Docker Engine and passes the NVIDIA GPU through. The container joins this computer's network so it can reach the mining port, and it does not mount the wallet. Leave the clock fields empty to mine without a privileged container.</p>
+            <form id="bzminer-form" class="stack">
+              <label>Pool
+                <input id="bz-pool" class="mono" value="stratum+tcp://127.0.0.1:3456" spellcheck="false" autocomplete="off" aria-describedby="bz-error">
+              </label>
+              <label>Wallet
+                <input id="bz-wallet" class="mono" maxlength="48" spellcheck="false" autocomplete="off" placeholder="48 hex characters">
+              </label>
+              <div class="bz-grid">
+                <label>Worker
+                  <input id="bz-worker" value="rig1" maxlength="32" spellcheck="false" autocomplete="off">
+                </label>
+                <label>CPU threads
+                  <input id="bz-threads" inputmode="numeric" placeholder="auto" spellcheck="false" autocomplete="off">
+                </label>
+                <label>Memory (GB)
+                  <input id="bz-memory" inputmode="numeric" value="8" spellcheck="false" autocomplete="off">
+                </label>
+              </div>
+              <details class="settings-sub">
+                <summary>Clock locks</summary>
+                <p class="note">A core lock, memory lock, or core offset starts the container privileged so the clocks apply. Leave them blank to mine without that.</p>
+                <div class="bz-grid">
+                  <label>Core lock (MHz)
+                    <input id="bz-oc-core" inputmode="numeric" placeholder="1800" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label>Memory lock (MHz)
+                    <input id="bz-oc-memory" inputmode="numeric" placeholder="810" autocomplete="off" spellcheck="false">
+                  </label>
+                  <label>Core offset (MHz)
+                    <input id="bz-oc-offset" inputmode="text" placeholder="120" autocomplete="off" spellcheck="false">
+                  </label>
+                </div>
+              </details>
+              <div class="row">
+                <button type="submit" id="bz-start" class="primary">Start mining</button>
+                <button type="button" id="bz-stop" disabled>Stop</button>
+              </div>
+            </form>
+            <p id="bz-status" class="note" role="status"></p>
+            <p id="bz-error" class="error" role="status"></p>
+            <p class="note">Hashrate is in BzMiner's dashboard at <a href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. Leave the node tab open so work keeps coming. The start file on the Mining page still launches the miner on this computer.</p>
+          </section>
           <section id="jellyfin-gpu-card" class="connect-card" aria-label="GPU acceleration">
             <p class="eyebrow">Jellyfin</p>
             <div class="engine-row default-browser-row">
