@@ -404,8 +404,8 @@ function paintNode() {
   }
   box.replaceChildren(
     el("p", { class: "sheet-title", text: `Mines to ${choice.node.label || choice.host}` }),
-    el("p", { class: "mono", text: `POOL="${choice.pool}"` }),
-    el("p", { class: "note", text: "Start writes that POOL line into start_warthog.sh on this computer. If this Hog is an older build, paste the line in yourself. Stop the miner first when it is already running." }),
+    el("p", { class: "mono", text: choice.pool }),
+    el("p", { class: "note", text: "Start writes that address into start_warthog.sh on this computer. BzMiner 100.81 uses the bzminer -p line. Older launchers use POOL=. Stop the miner first when it is already running." }),
     el("button", { class: "ghost", type: "button", text: "Use this hog as the node", onclick: setAsNode }));
 }
 

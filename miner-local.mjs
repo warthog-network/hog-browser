@@ -42,6 +42,8 @@ function rootFailure(text) {
 export const MAX_MINER_LAUNCHERS = 6;
 const LAUNCHER_NAME = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 const POOL_LINE = /^POOL="stratum\+tcp:\/\/[^"\r\n]*"\s*$/m;
+// v100.81 puts the pool on the bzminer command. The value is a URL, never $POOL.
+const LIVE_POOL_FLAG = /(^|\s)(-p|--pool)(\s+|=)(\s*)(["']?)([a-z][a-z0-9+.-]*:\/\/[^"'\s]+)(\5)/i;
 
 function poolHost(raw) {
   let host = String(raw || "").trim().toLowerCase();
@@ -76,12 +78,53 @@ export function canonicalMinerPool(raw) {
   return `stratum+tcp://${literal}:${port}`;
 }
 
-/** Replace the POOL= line. Leaves the wallet, the worker, and comments alone. */
+/**
+ * Point the launcher at poolUrl.
+ * v100.02b6 uses an uncommented POOL="stratum+tcp://..." line.
+ * v100.81 has no POOL= line. Its live command is
+ * ./bzminer -a warthog -p <url> -w <wallet> --worker <name>
+ * and the other pools are comments. Only the first live -p/--pool URL changes.
+ * The wallet, the worker, and comments stay as they are.
+ */
 export function rewriteMinerPool(text, poolUrl) {
   const pool = canonicalMinerPool(poolUrl);
   if (!pool) return { ok: false, error: "That is not a Tailscale stratum address." };
-  if (!POOL_LINE.test(String(text))) return { ok: false, error: "Hog could not find POOL=\"stratum+tcp://...\" in start_warthog.sh." };
-  return { ok: true, text: String(text).replace(POOL_LINE, `POOL="${pool}"`) };
+  const raw = String(text);
+  if (POOL_LINE.test(raw)) return { ok: true, text: raw.replace(POOL_LINE, `POOL="${pool}"`) };
+  const updated = rewriteBzminerPoolFlag(raw, pool);
+  if (updated == null) {
+    return { ok: false, error: "Hog could not find a pool in start_warthog.sh. It needs a POOL=\"stratum+tcp://...\" line or a bzminer -p address." };
+  }
+  return { ok: true, text: updated };
+}
+
+/** First uncommented bzminer -p/--pool URL, or null when the script has none. */
+function rewriteBzminerPoolFlag(raw, pool) {
+  const nl = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw.split(/\r?\n/);
+  let carry = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const body = line.trimStart();
+    if (!body || body.startsWith("#")) {
+      carry = false;
+      continue;
+    }
+    const mine = carry || /\bbzminer(?:\.exe)?\b/i.test(line);
+    if (mine) {
+      const match = LIVE_POOL_FLAG.exec(line);
+      if (match) {
+        const url = match[6];
+        const urlAt = match.index + match[1].length + match[2].length + match[3].length + match[4].length + match[5].length;
+        const next = line.slice(0, urlAt) + pool + line.slice(urlAt + url.length);
+        if (next === line) return raw;
+        lines[i] = next;
+        return lines.join(nl);
+      }
+    }
+    carry = mine && /\\$/.test(line.trimEnd());
+  }
+  return null;
 }
 
 export function defaultMinerScript(home = homedir()) {

@@ -5,8 +5,10 @@ start/stop/restart, Jellyfin, mining stats, start/stop of this computer's
 BzMiner (`start_warthog.sh`), and Files. One phone pairs up to 8 computers.
 Tap the hog name at the top to switch which computer start and stop talk to.
 On Mining, one hog can be marked as the node. Start on the other computers
-writes `POOL="stratum+tcp://<that-node>:3456"` into the chosen
-`start_warthog.sh`. Start on the node itself keeps `POOL` on `127.0.0.1`.
+writes that node's stratum address into the chosen `start_warthog.sh`.
+BzMiner 100.81 keeps the address on the live `./bzminer -p` line. Older
+launchers such as v100.02b6 use a `POOL="stratum+tcp://..."` line. Start on
+the node itself uses `127.0.0.1`.
 Hog keeps up to 6 saved start files in `~/.local/share/hog-browser/miner.json`.
 Each one has a name and shows its path underneath. The Downloads copy
 (`~/Downloads/bzminer_v100.02b6_linux/start_warthog.sh`) is always in the

@@ -33,6 +33,40 @@ test("a rig pool is a tailnet address or this computer, and only the POOL line c
   assert.match(next.text, /# POOL="stratum\+tcp:\/\/127\.0\.0\.1:3456"/);
 });
 
+test("v100.81 start_warthog.sh takes the pool on the live bzminer -p line", () => {
+  const script = [
+    "#!/usr/bin/env bash",
+    "cd \"$(dirname \"$0\")\" || exit 1",
+    "# The first line is live. To use a different pool, comment it out",
+    "./bzminer -a warthog -p stratum+ssl://us.vipor.net:5120 -w YOUR_WARTHOG_WALLET_HERE --pass x --worker rig1 --oc-lock-core-clock 1800",
+    "#   WoolyPooly",
+    "# ./bzminer -a warthog -p stratum+tcp://pool.us.woolypooly.com:3140 -w YOUR_WARTHOG_WALLET_HERE --pass x --worker rig1",
+    "#   SOLO, to your own node over stratum",
+    "# ./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w YOUR_WARTHOG_WALLET_HERE --pass x --worker rig1",
+    "",
+  ].join("\n");
+  const next = rewriteMinerPool(script, "stratum+tcp://100.119.132.89:3456");
+  assert.equal(next.ok, true);
+  assert.match(next.text, /^\.\/bzminer -a warthog -p stratum\+tcp:\/\/100\.119\.132\.89:3456 -w YOUR_WARTHOG_WALLET_HERE --pass x --worker rig1 --oc-lock-core-clock 1800$/m);
+  assert.match(next.text, /# \.\/bzminer -a warthog -p stratum\+tcp:\/\/pool\.us\.woolypooly\.com:3140/);
+  assert.match(next.text, /# \.\/bzminer -a warthog -p stratum\+tcp:\/\/127\.0\.0\.1:3456/);
+  assert.equal(next.text.includes("POOL="), false);
+  const quoted = rewriteMinerPool("./bzminer -a warthog -p \"stratum+ssl://us.vipor.net:5120\" -w WALLET --worker rig1\n", "stratum+tcp://hog.tail314642.ts.net:3456");
+  assert.equal(quoted.ok, true);
+  assert.match(quoted.text, /-p "stratum\+tcp:\/\/hog\.tail314642\.ts\.net:3456"/);
+  assert.match(quoted.text, /-w WALLET --worker rig1/);
+  const wrapped = rewriteMinerPool("./bzminer -a warthog \\\n  --pool stratum+ssl://us.vipor.net:5120 \\\n  -w WALLET --worker rig1\n", "stratum+tcp://127.0.0.1:3456");
+  assert.equal(wrapped.ok, true);
+  assert.match(wrapped.text, /^  --pool stratum\+tcp:\/\/127\.0\.0\.1:3456 \\\r?$/m);
+  assert.match(wrapped.text, /-w WALLET --worker rig1/);
+  const same = rewriteMinerPool("./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w WALLET --worker rig1\n", "stratum+tcp://127.0.0.1:3456");
+  assert.equal(same.ok, true);
+  assert.match(same.text, /-p stratum\+tcp:\/\/127\.0\.0\.1:3456 -w WALLET/);
+  const missing = rewriteMinerPool("#!/bin/sh\n./bzminer -a warthog -w WALLET --worker rig1\n", "stratum+tcp://127.0.0.1:3456");
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /bzminer -p/);
+});
+
 test("rejects launchers outside home or with the wrong name", () => {
   const home = tempHome();
   assert.match(minerScriptProblem("", home), /no miner launcher/);
@@ -73,6 +107,48 @@ test("start and stop only the launcher hog spawned", async () => {
   } finally {
     await miner.stop();
   }
+});
+
+test("start points a v100.81 launcher at the node", async () => {
+  const home = tempHome();
+  const script = join(home, "start_warthog.sh");
+  const original = "#!/bin/sh\n./bzminer -a warthog -p stratum+ssl://us.vipor.net:5120 -w YOUR_WARTHOG_WALLET_HERE --pass x --worker rig1\n# ./bzminer -a warthog -p stratum+tcp://pool.us.woolypooly.com:3140 -w YOUR_WARTHOG_WALLET_HERE --pass x --worker rig1\nsleep 30\n";
+  writeFileSync(script, original);
+  chmodSync(script, 0o755);
+  const miner = createLocalMiner({ home, scriptPath: () => script, port: 3456, logFile: join(home, "miner.log"), settleMs: 200 });
+  try {
+    const started = await miner.start({ pool: "stratum+tcp://100.119.132.89:3456" });
+    assert.equal(started.ok, true);
+    const text = readFileSync(script, "utf8");
+    assert.match(text, / -p stratum\+tcp:\/\/100\.119\.132\.89:3456 /);
+    assert.match(text, /YOUR_WARTHOG_WALLET_HERE/);
+    assert.match(text, /--worker rig1/);
+    assert.match(text, /# \.\/bzminer -a warthog -p stratum\+tcp:\/\/pool\.us\.woolypooly\.com:3140/);
+    assert.equal(text.includes("POOL="), false);
+  } finally {
+    await miner.stop();
+  }
+});
+
+test("start with a pool does not launch a script that has no pool line", async () => {
+  const home = tempHome();
+  const script = join(home, "start_warthog.sh");
+  writeFileSync(script, "#!/bin/sh\nsleep 30\n");
+  chmodSync(script, 0o755);
+  let spawns = 0;
+  const miner = createLocalMiner({
+    home,
+    scriptPath: () => script,
+    port: 3456,
+    logFile: join(home, "miner.log"),
+    settleMs: 20,
+    spawnImpl: () => { spawns += 1; throw new Error("should not spawn"); },
+  });
+  const started = await miner.start({ pool: "stratum+tcp://100.119.132.89:3456" });
+  assert.equal(started.ok, false);
+  assert.match(started.error, /bzminer -p/);
+  assert.equal(spawns, 0);
+  assert.equal(readFileSync(script, "utf8"), "#!/bin/sh\nsleep 30\n");
 });
 
 test("start writes the node's stratum address into start_warthog.sh", async () => {
