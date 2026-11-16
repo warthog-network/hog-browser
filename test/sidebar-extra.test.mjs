@@ -8,7 +8,7 @@ import { buildSignedBtcTx } from "../src/btc-send.js";
 import { buildSolTransfer } from "../src/sol-send.js";
 import { rowsFromBitcoin, rowsFromEvm, rowsFromSolana } from "../src/chain-activity.js";
 import { decryptWalletFile, encryptWalletFile } from "../src/wallet-file.js";
-import { safeBalances, safeSignature } from "../src/safetrade.js";
+import { safeBalances, safeFailureText, safeSignature } from "../src/safetrade.js";
 import { formatHealth, planBorrow, rateToPercent, safeBorrowHeadroomValue, usdOf } from "../src/aave.js";
 import { openWithPrf, sealWithPrf } from "../src/passkey.js";
 import { createVault } from "../src/vault-core.js";
@@ -77,8 +77,18 @@ test("a missing SafeTrade key is told apart from an empty balance", async () => 
   const fetchImpl = async () => new Response(JSON.stringify({ errors: ["record.not_found"] }), { status: 404, headers: { "content-type": "application/json" } });
   await assert.rejects(
     () => safeBalances({ apiKey: "demo-key", secret: "demo-secret" }, fetchImpl),
-    /SafeTrade rejected that API key/,
+    /record\.not_found/,
   );
+});
+
+test("a SafeTrade IP rejection keeps the error code", async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({ errors: ["authz.apikey_untrusted_ip"] }), { status: 401, headers: { "content-type": "application/json" } });
+  await assert.rejects(
+    () => safeBalances({ apiKey: "demo-key", secret: "demo-secret" }, fetchImpl),
+    /authz\.apikey_untrusted_ip/,
+  );
+  assert.equal(safeFailureText({ errors: ["authz.invalid_signature"] }, 401), "authz.invalid_signature");
+  assert.equal(safeFailureText("<html>cloudflare</html>", 403), "SafeTrade returned HTTP 403.");
 });
 
 test("SafeTrade signatures match HMAC-SHA256 of nonce plus key", async () => {

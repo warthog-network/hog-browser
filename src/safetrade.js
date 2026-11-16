@@ -67,6 +67,30 @@ function nextNonce() {
   return String(lastNonce);
 }
 
+/** SafeTrade's own error code, such as authz.apikey_untrusted_ip. */
+export function safeFailureText(parsed, status) {
+  const bits = [];
+  const push = (value) => {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (text) bits.push(text);
+  };
+  if (parsed && typeof parsed === "object") {
+    if (typeof parsed.error === "string") push(parsed.error);
+    else if (parsed.error && typeof parsed.error === "object") push(parsed.error.message);
+    if (Array.isArray(parsed.errors)) {
+      for (const item of parsed.errors) {
+        if (typeof item === "string") push(item);
+        else if (item && typeof item === "object") push(item.code || item.error || item.message);
+      }
+    }
+    if (!bits.length) push(parsed.message);
+  } else if (typeof parsed === "string" && !/^\s*</.test(parsed)) {
+    push(parsed.slice(0, 400));
+  }
+  const code = bits.join("; ").slice(0, 400);
+  return code || `SafeTrade returned HTTP ${status}.`;
+}
+
 function asNumber(value) {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -104,15 +128,7 @@ async function safeRequest({ creds, path, method = "GET", body, fetchImpl = glob
     parsed = text;
   }
   if (!response.ok) {
-    const raw = parsed && typeof parsed === "object"
-      ? parsed.error || parsed.message || (Array.isArray(parsed.errors) ? parsed.errors.join(" ") : parsed.errors)
-      : parsed;
-    const text = typeof raw === "string" ? raw : "";
-    const auth = response.status === 401
-      || /authz|nonce|signature|api.?key/i.test(text)
-      || (creds && response.status === 404 && /not_found|authz|nonce|signature/i.test(text));
-    const line = auth ? "SafeTrade rejected that API key." : (text || "SafeTrade rejected the request.");
-    const error = new Error(line);
+    const error = new Error(safeFailureText(parsed, response.status));
     error.status = response.status;
     throw error;
   }

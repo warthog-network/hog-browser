@@ -1694,7 +1694,13 @@ function safeTradeTarget(url, method) {
 }
 
 const SAFE_TRADE_PY = `
-import json, sys, urllib.error, urllib.request
+import json, socket, sys, urllib.error, urllib.request
+# SafeTrade stores an IPv4 allowlist and cannot store an IPv6 address.
+# This computer prefers IPv6 for safe.trade, so the dial stays on IPv4.
+_getaddrinfo = socket.getaddrinfo
+def _ipv4_only(host, port, family=0, typ=0, proto=0, flags=0):
+    return _getaddrinfo(host, port, socket.AF_INET, typ, proto, flags)
+socket.getaddrinfo = _ipv4_only
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None

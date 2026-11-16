@@ -10411,8 +10411,8 @@ function reviewChainSwap() {
 function safeErrorText(error) {
   const message = error?.message || "SafeTrade did not answer.";
   if (/failed to fetch|networkerror|load failed/i.test(message)) return "SafeTrade did not answer.";
-  if (/allow.?list|whitelist|ipv6|not allowed ip|ip address/i.test(message)) {
-    return "SafeTrade accepts the call only from a trusted IPv4.";
+  if (/authz\.apikey_untrusted_ip|allow.?list|whitelist|ipv6|not allowed ip|ip address/i.test(message)) {
+    return `SafeTrade accepts the call only from a trusted IPv4 (${message}).`;
   }
   return message;
 }
