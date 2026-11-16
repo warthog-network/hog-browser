@@ -231,12 +231,27 @@ test("mobile API: containers and mining show only what the phone needs", async (
     assert.ok(!("command" in mining.json) && !("remoteCommand" in mining.json));
     assert.ok(!("source" in mining.json.workers[0]));
     assert.equal(mining.json.localMiner, "stopped");
-    const hidden = mobileMiningView({ localMiner: "running", localMinerError: "stopped early", command: "nope", script: "/secret/start_warthog.sh", workers: [] });
+    const hidden = mobileMiningView({
+      localMiner: "running",
+      localMinerError: "stopped early",
+      command: "nope",
+      script: "/secret/start_warthog.sh",
+      launchers: [
+        { id: "aaaaaaaaaaaaaaaa", name: "OC lock", path: "~/mining/oc/start_warthog.sh", active: true, script: "/secret/start_warthog.sh", problem: "" },
+        { id: "../x", name: "nope", path: "/etc/passwd", script: "/etc/passwd" },
+      ],
+      workers: [],
+    });
     assert.equal(hidden.localMiner, "running");
     assert.equal(hidden.localMinerError, "stopped early");
     assert.equal(hidden.command, undefined);
     assert.equal(hidden.script, undefined);
+    assert.equal(hidden.launchers.length, 1);
+    assert.equal(hidden.launchers[0].name, "OC lock");
+    assert.equal(hidden.launchers[0].path, "~/mining/oc/start_warthog.sh");
+    assert.equal(hidden.launchers[0].script, undefined);
     assert.deepEqual(mobileMiningView(null).workers, []);
+    assert.deepEqual(mobileMiningView(null).launchers, []);
     assert.equal(mobileMiningView(null).localMiner, "stopped");
   });
 });
@@ -251,8 +266,9 @@ test("mobile API: the phone can start and stop the local miner and nothing else"
   let running = false;
   const actions = [];
   const mining = () => ({ enabled: true, localMiner: running ? "running" : "stopped", blocks: 1, workers: [] });
-  const miningAction = async (action) => {
-    actions.push(action);
+  const miningAction = async (action, extra) => {
+    if (action === "launcher") actions.push({ action, op: extra.op, id: extra.id, name: extra.name, script: extra.script });
+    else actions.push(extra && extra.pool ? extra : action);
     running = action === "start";
     return { ...mining(), ok: true, error: "" };
   };
@@ -271,6 +287,20 @@ test("mobile API: the phone can start and stop the local miner and nothing else"
     const stop = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "stop" } });
     assert.equal(stop.json.localMiner, "stopped");
     assert.deepEqual(actions, ["start", "stop"]);
+    const bad = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "start", pool: "stratum+tcp://8.8.8.8:3456" } });
+    assert.equal(bad.status, 400);
+    const aimed = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "start", pool: "stratum+tcp://100.119.132.89:3456" } });
+    assert.equal(aimed.status, 200);
+    assert.deepEqual(actions.at(-1), { pool: "stratum+tcp://100.119.132.89:3456" });
+    assert.equal((await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "launcher", op: "run", script: "/tmp/evil.sh" } })).status, 400);
+    assert.equal((await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "launcher", op: "select", id: "../etc", script: "/tmp/evil.sh" } })).status, 400);
+    const picked = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "launcher", op: "select", id: "aaaaaaaaaaaaaaaa", script: "/tmp/evil.sh" } });
+    assert.equal(picked.status, 200);
+    assert.equal(picked.json.script, undefined);
+    assert.deepEqual(actions.at(-1), { action: "launcher", op: "select", id: "aaaaaaaaaaaaaaaa", name: undefined, script: undefined });
+    const saved = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "launcher", op: "add", name: "OC lock", script: "~/mining/oc/start_warthog.sh" } });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(actions.at(-1), { action: "launcher", op: "add", id: undefined, name: "OC lock", script: "~/mining/oc/start_warthog.sh" });
   } finally {
     await listener.stop();
   }

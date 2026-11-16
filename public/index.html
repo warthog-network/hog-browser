@@ -657,6 +657,15 @@
                 <button type="button" id="mining-address-save" class="tiny">Save</button>
               </div>
               <p id="mining-address-note" class="note" role="status"></p>
+              <p class="mining-address-label">Start file</p>
+              <p class="note">Save a few by name and pick the one Hog launches. The line under the name is its path. The file has to be named start_warthog.sh, be executable, and stay in your home folder. A path can start with ~/.</p>
+              <div id="mining-launchers" role="radiogroup" aria-label="Start file"></div>
+              <form id="mining-launcher-add" class="mining-launcher-add">
+                <input id="mining-launcher-name" class="name" maxlength="40" autocomplete="off" placeholder="Name" aria-label="Start file name">
+                <input id="mining-launcher-path" class="path" autocomplete="off" spellcheck="false" placeholder="~/Downloads/bzminer_v100.02b6_linux/start_warthog.sh" aria-label="Start file path">
+                <button type="submit" class="tiny">Save</button>
+              </form>
+              <p id="mining-launcher-note" class="note" role="status"></p>
               <p class="note">3. Run BzMiner (it uses the GPU and the CPU together; do not add <code>--nvidia</code> on its own):</p>
               <div class="mining-address-row">
                 <code id="mining-command" class="mono">./bzminer -a warthog -p stratum+tcp://127.0.0.1:3456 -w &lt;48-hex-wallet&gt; -r rig1</code>

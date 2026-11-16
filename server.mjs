@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
@@ -15,7 +15,7 @@ import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs
 import { createFilesService, handleFilesRequest } from "./files.mjs";
 import { execFile } from "node:child_process";
 import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
-import { createLocalMiner, defaultMinerScript } from "./miner-local.mjs";
+import { applyMinerLauncher, createLocalMiner, defaultMinerScript, launcherView, normalizeMinerConfig } from "./miner-local.mjs";
 import { canPrompt, changeFirewall, createLanForwarder, createLanState, lanAddresses, lanStatus, runUfw, ufwEnabled } from "./jellyfin-lan.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
@@ -154,7 +154,7 @@ const MOBILE_API = createMobileApi({
   state: MOBILE_STATE,
   files: FILES,
   mining: () => miningStatus(miningEnabled),
-  miningAction: (action) => mobileMiningAction(action),
+  miningAction: (action, extra) => mobileMiningAction(action, extra),
   containers: (action, name) => mobileContainers(action, name),
   info: mobileHogInfo,
 });
@@ -412,6 +412,7 @@ function miningStatus(enabled) {
     }),
     error: miningError,
     ...localMinerFields(),
+    ...minerLauncherFields(),
   };
 }
 
@@ -448,16 +449,69 @@ let miningEnabled = false;
 let miningAddress = "";
 let persistMining = false;
 
-function configuredMinerScript() {
-  const fromEnv = process.env.HOG_MINER_SCRIPT;
-  if (typeof fromEnv === "string" && fromEnv.trim()) return fromEnv.trim();
+function minerConfigFile() {
+  return join(HOG_DATA_DIR, "miner.json");
+}
+
+/** { ok, missing, value }. value is the parsed miner.json. */
+function readMinerFile() {
   try {
-    const saved = JSON.parse(readFileSync(join(HOG_DATA_DIR, "miner.json"), "utf8"));
-    if (typeof saved?.script === "string" && saved.script.trim()) return saved.script.trim();
-  } catch {
-    // No miner.json: use the BzMiner folder in Downloads.
+    return { ok: true, missing: false, value: JSON.parse(readFileSync(minerConfigFile(), "utf8")) };
+  } catch (error) {
+    return { ok: false, missing: error?.code === "ENOENT", value: null };
   }
-  return defaultMinerScript();
+}
+
+function envMinerScript() {
+  const fromEnv = process.env.HOG_MINER_SCRIPT;
+  return typeof fromEnv === "string" && fromEnv.trim() ? fromEnv.trim() : "";
+}
+
+function configuredMinerScript() {
+  const saved = readMinerFile();
+  if (saved.missing) return envMinerScript() || defaultMinerScript();
+  if (!saved.ok) return defaultMinerScript();
+  const config = normalizeMinerConfig(saved.value);
+  return config.script || defaultMinerScript();
+}
+
+function minerLauncherFields() {
+  const saved = readMinerFile();
+  const pinned = saved.missing ? envMinerScript() : "";
+  return launcherView(saved.ok ? saved.value : null, { home: homedir(), pinnedScript: pinned });
+}
+
+function writeMinerFile(config) {
+  mkdirSync(HOG_DATA_DIR, { recursive: true });
+  const file = minerConfigFile();
+  const tmp = join(HOG_DATA_DIR, `.miner.json.${process.pid}.tmp`);
+  const body = {
+    script: typeof config.script === "string" ? config.script : "",
+    launchers: Array.isArray(config.launchers)
+      ? config.launchers.map((item) => ({ id: item.id, name: item.name, script: item.script }))
+      : [],
+  };
+  try {
+    writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+  } catch (error) {
+    try { unlinkSync(tmp); } catch { /* The temp file was already gone. */ }
+    throw error;
+  }
+}
+
+function changeMinerLauncher(input) {
+  const saved = readMinerFile();
+  if (!saved.ok && !saved.missing) return { ok: false, error: "Hog could not read the saved start files." };
+  const result = applyMinerLauncher(saved.value, input, homedir());
+  if (!result.ok) return result;
+  try {
+    writeMinerFile(result.config);
+  } catch {
+    return { ok: false, error: "Hog could not save the start file list." };
+  }
+  return { ok: true };
 }
 
 const LOCAL_MINER = createLocalMiner({
@@ -477,7 +531,13 @@ function miningActionResult(result) {
 }
 
 /** Phone start/stop. Turns Solo mining on if it is off, then launches BzMiner. */
-async function mobileMiningAction(action) {
+async function mobileMiningAction(action, extra = {}) {
+  if (action === "launcher") {
+    const result = changeMinerLauncher(extra || {});
+    const status = miningStatus(miningEnabled);
+    if (!result.ok) return { ...status, ok: false, error: result.error || "Could not save that start file." };
+    return status;
+  }
   if (action === "start") {
     if (!miningEnabled || !STRATUM.status().stratumListening) {
       miningEnabled = true;
@@ -487,7 +547,8 @@ async function mobileMiningAction(action) {
     if (!STRATUM.status().stratumListening) {
       return { ...miningStatus(miningEnabled), ok: false, error: miningError || "Solo mining is not listening, so BzMiner was not started." };
     }
-    const result = await LOCAL_MINER.start();
+    const pool = extra && typeof extra.pool === "string" ? extra.pool : "";
+    const result = await LOCAL_MINER.start(pool ? { pool } : {});
     return miningActionResult(result);
   }
   if (action === "stop") {
@@ -2454,6 +2515,20 @@ async function handle(req, res, runtime) {
     }
     if (url.pathname === "/api/mining" && req.method === "POST") {
       const payload = await readJson(req);
+      if (payload.launcher !== undefined) {
+        const launcher = payload.launcher;
+        if (!launcher || typeof launcher !== "object" || Array.isArray(launcher)) throw new Error("Use add, select, or remove.");
+        const result = changeMinerLauncher({
+          op: launcher.op,
+          id: launcher.id,
+          name: launcher.name,
+          script: launcher.script,
+        });
+        if (!result.ok) {
+          send(res, 400, { ...miningStatus(miningEnabled), ok: false, error: result.error || "Could not save that start file." });
+          return;
+        }
+      }
       if (payload.address !== undefined) {
         const address = String(payload.address || "").trim().toLowerCase();
         if (address && !isWarthogAddress(address)) {

@@ -4,9 +4,10 @@
     sudo -n /usr/libexec/hog-miner-ctl start
     sudo -n /usr/libexec/hog-miner-ctl stop
 
-The phone never chooses the program. This runs start_warthog.sh inside the
-caller's home, as root, so the clock locks in that script apply. Stop signals
-only processes that are that launcher or bzminer on Hog's local stratum.
+The phone picks a saved start_warthog.sh by name. This runs the script field
+in the caller's miner.json, inside that home, as root, so the clock locks in
+that script apply. Stop signals only processes that are that launcher or
+bzminer on Hog's local stratum.
 """
 import json
 import os
@@ -90,11 +91,31 @@ def processes():
     return found
 
 
+def on_hog_pool(arg):
+    """BzMiner pointed at this computer or at a tailnet Hog node."""
+    text = str(arg)
+    if POOL in text:
+        return True
+    marker = ":3456"
+    if "stratum+tcp://" not in text or marker not in text:
+        return False
+    host = text.split("stratum+tcp://", 1)[1].split(marker, 1)[0].strip("[]").lower()
+    if host.endswith(".ts.net") and host.replace(".", "").replace("-", "").isalnum():
+        return True
+    parts = host.split(".")
+    if len(parts) != 4 or not all(part.isdigit() for part in parts):
+        return False
+    nums = [int(part) for part in parts]
+    if any(num > 255 for num in nums):
+        return False
+    return nums[0] == 100 and 64 <= nums[1] <= 127
+
+
 def is_target(proc, script):
     args = proc["args"]
     base = args[0].rsplit("/", 1)[-1]
     is_bz = base == "bzminer" or any(arg == "./bzminer" or arg.endswith("/bzminer") for arg in args)
-    if is_bz and "warthog" in args and any(POOL in arg for arg in args):
+    if is_bz and "warthog" in args and any(on_hog_pool(arg) for arg in args):
         return True
     if str(script) in args:
         return True

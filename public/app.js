@@ -9944,6 +9944,7 @@ window.__hogReady = true;
 // ---------- Solo mining (BzMiner -> stratum 127.0.0.1:3456 -> node tab, mainnet or DeFi testnet) ----------
 const MINING_ADDRESS_RE = /^[0-9a-fA-F]{48}$/;
 let miningAddressDirty = false;
+let miningLauncherHold = 0;
 
 function setText(id, text) {
   const el = $(id);
@@ -10011,6 +10012,54 @@ function paintMining(state) {
   }
   error.textContent = state.error || state.lastError || "";
   paintMiningTailnet(state);
+  paintMiningLaunchers(state);
+}
+
+function paintMiningLaunchers(state) {
+  const list = $("mining-launchers");
+  if (!list || !state) return;
+  const pinned = Boolean(state.launcherPinned);
+  const items = Array.isArray(state.launchers) ? state.launchers : [];
+  list.replaceChildren(...items.map((item) => {
+    const row = document.createElement("div");
+    row.className = `mining-launcher${item.active ? " is-on" : ""}`;
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "mining-launcher";
+    radio.value = item.id;
+    radio.checked = Boolean(item.active);
+    radio.disabled = item.id === "pinned" || Boolean(item.problem);
+    radio.setAttribute("aria-label", item.name || "Start file");
+    if (!radio.disabled) radio.addEventListener("change", () => chooseMiningLauncher(item.id));
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = item.name || "Start file";
+    row.append(radio, name);
+    if (item.id !== "default" && item.id !== "pinned") {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "tiny";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => removeMiningLauncher(item.id));
+      row.append(remove);
+    }
+    const path = document.createElement("p");
+    path.className = "path";
+    path.textContent = item.path || "";
+    row.append(path);
+    if (item.problem) {
+      const problem = document.createElement("p");
+      problem.className = "path is-problem";
+      problem.textContent = item.problem;
+      row.append(problem);
+    }
+    return row;
+  }));
+  if (Date.now() < miningLauncherHold) return;
+  const fallback = pinned
+    ? ""
+    : "Pick one. The next start uses it. Stop the miner first when it is already running.";
+  setText("mining-launcher-note", state.launcherNote || fallback);
 }
 
 /** "Syncing (height X of ~Y)" while the mining ready gate is closed. */
@@ -10080,6 +10129,46 @@ async function refreshMining() {
   }
 }
 
+function holdLauncherNote(text) {
+  miningLauncherHold = Date.now() + 8000;
+  setText("mining-launcher-note", text);
+}
+
+async function chooseMiningLauncher(id) {
+  try {
+    miningLauncherHold = 0;
+    paintMining(await postMining({ launcher: { op: "select", id } }));
+  } catch (err) {
+    holdLauncherNote(err instanceof Error ? err.message : String(err));
+    refreshMining();
+  }
+}
+
+async function removeMiningLauncher(id) {
+  try {
+    miningLauncherHold = 0;
+    paintMining(await postMining({ launcher: { op: "remove", id } }));
+  } catch (err) {
+    holdLauncherNote(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function saveMiningLauncher(event) {
+  event.preventDefault();
+  const name = $("mining-launcher-name");
+  const path = $("mining-launcher-path");
+  if (!name || !path) return;
+  try {
+    const state = await postMining({ launcher: { op: "add", name: name.value, script: path.value } });
+    name.value = "";
+    path.value = "";
+    miningLauncherHold = 0;
+    paintMining(state);
+  } catch (err) {
+    holdLauncherNote(err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function saveMiningAddress() {
   const input = $("mining-address");
   if (!input) return;
@@ -10133,6 +10222,13 @@ async function saveMiningAddress() {
   }
   const save = $("mining-address-save");
   if (save) save.addEventListener("click", saveMiningAddress);
+  const launcherForm = $("mining-launcher-add");
+  if (launcherForm) launcherForm.addEventListener("submit", saveMiningLauncher);
+  for (const id of ["mining-launcher-name", "mining-launcher-path"]) {
+    const field = $(id);
+    if (!field) continue;
+    field.addEventListener("input", () => { miningLauncherHold = 0; });
+  }
   const copy = $("mining-command-copy");
   if (copy) {
     copy.addEventListener("click", async () => {

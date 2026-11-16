@@ -1,16 +1,63 @@
 // Start and stop the local Warthog BzMiner from the phone.
 //
-// The phone sends only "start" or "stop". It never chooses the program or
-// the arguments. Hog runs one launcher, start_warthog.sh, and only when that
-// file is a real executable inside the home directory. A second start does
-// nothing if that miner is already running. Stop signals only processes this
-// user owns, so a miner started as root is left alone.
+// The phone sends only "start" or "stop", or picks one of the saved
+// start_warthog.sh files by id. It never chooses a different program or the
+// miner's arguments. Hog runs one launcher, and only when that file is a real
+// executable inside the home directory. A second start does nothing if that
+// miner is already running. Stop signals only processes this user owns, so a
+// miner started as root is left alone.
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { isTailnetIpv4, isTailnetIpv6 } from "./tailnet.mjs";
 
 export const MINER_SCRIPT_NAME = "start_warthog.sh";
+export const MAX_MINER_LAUNCHERS = 6;
+const LAUNCHER_NAME = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
+const POOL_LINE = /^POOL="stratum\+tcp:\/\/[^"\r\n]*"\s*$/m;
+
+function poolHost(raw) {
+  let host = String(raw || "").trim().toLowerCase();
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  return host;
+}
+
+/** This arg is bzminer pointed at Hog's own stratum: loopback, a tailnet address, or a .ts.net name. */
+export function hogPoolArg(arg, port) {
+  const text = String(arg || "");
+  const match = text.match(/stratum\+tcp:\/\/(\[[0-9a-f:]+\]|[^:/\s]+):(\d+)/i);
+  if (!match || Number(match[2]) !== Number(port)) return false;
+  const host = poolHost(match[1]);
+  if (host === "127.0.0.1") return true;
+  if (isTailnetIpv4(host) || isTailnetIpv6(host)) return true;
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host);
+}
+
+/**
+ * A pool the phone may ask a rig to use. Loopback means this computer's node.
+ * Anything else has to be a Tailscale address or MagicDNS name. Returns the
+ * canonical URL, or "" when the value is not allowed.
+ */
+export function canonicalMinerPool(raw) {
+  const text = String(raw || "").trim();
+  const match = text.match(/^stratum\+tcp:\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+):(\d+)$/i);
+  if (!match) return "";
+  const port = Number(match[2]);
+  if (!hogPoolArg(`stratum+tcp://${match[1]}:${port}`, port)) return "";
+  const host = poolHost(match[1]);
+  const literal = host.includes(":") ? `[${host}]` : host;
+  return `stratum+tcp://${literal}:${port}`;
+}
+
+/** Replace the POOL= line. Leaves the wallet, the worker, and comments alone. */
+export function rewriteMinerPool(text, poolUrl) {
+  const pool = canonicalMinerPool(poolUrl);
+  if (!pool) return { ok: false, error: "That is not a Tailscale stratum address." };
+  if (!POOL_LINE.test(String(text))) return { ok: false, error: "Hog could not find POOL=\"stratum+tcp://...\" in start_warthog.sh." };
+  return { ok: true, text: String(text).replace(POOL_LINE, `POOL="${pool}"`) };
+}
 
 export function defaultMinerScript(home = homedir()) {
   return join(home, "Downloads", "bzminer_v100.02b6_linux", MINER_SCRIPT_NAME);
@@ -43,13 +90,197 @@ export function minerScriptProblem(script, home = homedir()) {
   return "";
 }
 
+/** "~/Downloads/..." when the path is inside home. The saved path stays absolute. */
+export function homePathNote(script, home = homedir()) {
+  const text = String(script || "");
+  const root = String(home || "").replace(/[\\/]+$/, "");
+  if (root && (text === root || text.startsWith(root + sep))) return `~${text.slice(root.length)}`;
+  return text;
+}
+
+/** "~/rest" becomes an absolute path in home. Other text is unchanged. */
+export function expandHomePath(script, home = homedir()) {
+  const text = String(script || "").trim();
+  if (text === "~") return String(home || "");
+  if (text.startsWith("~/") || text.startsWith(`~${sep}`)) return join(String(home || ""), text.slice(2));
+  return text;
+}
+
+export function launcherName(raw) {
+  const name = String(raw || "").trim().replace(/\s+/g, " ");
+  return LAUNCHER_NAME.test(name) ? name : "";
+}
+
+function launcherIdFor(script) {
+  return createHash("sha256").update(String(script)).digest("hex").slice(0, 16);
+}
+
+function labelForScript(script) {
+  return launcherName(basename(dirname(String(script || "")))) || "Start file";
+}
+
+function sameScript(a, b) {
+  if (a === b) return true;
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/** { script, launchers: [{ id, name, script }] } from miner.json, or from nothing. */
+export function normalizeMinerConfig(raw) {
+  const launchers = [];
+  const seenPaths = new Set();
+  const seenIds = new Set();
+  const items = raw && typeof raw === "object" && Array.isArray(raw.launchers) ? raw.launchers : [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const script = typeof item.script === "string" ? item.script.trim() : "";
+    if (!script || script.length > 500 || seenPaths.has(script)) continue;
+    const id = /^[a-f0-9]{16}$/.test(item.id) ? item.id : launcherIdFor(script);
+    if (seenIds.has(id)) continue;
+    seenPaths.add(script);
+    seenIds.add(id);
+    launchers.push({ id, name: launcherName(item.name) || labelForScript(script), script });
+    if (launchers.length >= MAX_MINER_LAUNCHERS) break;
+  }
+  let script = raw && typeof raw === "object" && typeof raw.script === "string" ? raw.script.trim() : "";
+  if (script.length > 500) script = "";
+  if (script && !seenPaths.has(script)) {
+    const id = launcherIdFor(script);
+    if (!seenIds.has(id)) {
+      launchers.unshift({ id, name: labelForScript(script), script });
+      if (launchers.length > MAX_MINER_LAUNCHERS) launchers.pop();
+    }
+  }
+  return { script, launchers };
+}
+
+function decorateLauncher(item, home) {
+  return {
+    id: item.id,
+    name: item.name,
+    path: homePathNote(item.script, home),
+    active: false,
+    problem: minerScriptProblem(item.script, home),
+  };
+}
+
+/**
+ * Saved start files for the settings page and the phone.
+ * `path` is the note under the name. `pinnedScript` is HOG_MINER_SCRIPT, used
+ * only when miner.json does not exist yet.
+ */
+export function launcherView(config, { home = homedir(), pinnedScript = "" } = {}) {
+  const normalized = normalizeMinerConfig(config);
+  const defScript = defaultMinerScript(home);
+  const items = normalized.launchers.map((item) => decorateLauncher(item, home));
+  if (!normalized.launchers.some((item) => sameScript(item.script, defScript))) {
+    items.unshift(decorateLauncher({ id: "default", name: "Downloads", script: defScript }, home));
+  }
+  const pinned = String(pinnedScript || "").trim();
+  const activeScript = normalized.script || (pinned ? "" : defScript);
+  let marked = false;
+  if (!pinned) {
+    for (const item of items) {
+      const stored = item.id === "default" ? defScript : (normalized.launchers.find((row) => row.id === item.id)?.script || "");
+      item.active = !marked && sameScript(stored, activeScript);
+      if (item.active) marked = true;
+    }
+    if (!marked && items[0]) items[0].active = true;
+  }
+  if (pinned) {
+    items.unshift({
+      id: "pinned",
+      name: "From HOG_MINER_SCRIPT",
+      path: homePathNote(pinned, home),
+      active: true,
+      problem: minerScriptProblem(pinned, home),
+    });
+  }
+  return {
+    launcherPinned: Boolean(pinned),
+    launcherNote: pinned ? "HOG_MINER_SCRIPT is set, and no start file is saved yet. The line under that name is the path Hog starts. Save one by name to choose a different file." : "",
+    launchers: items,
+  };
+}
+
+function cleanLauncherScript(script, home) {
+  const expanded = expandHomePath(script, home);
+  if (!expanded || expanded.length > 500) return { ok: false, error: "Enter the path to start_warthog.sh." };
+  const problem = minerScriptProblem(expanded, home);
+  if (problem) return { ok: false, error: problem };
+  return { ok: true, script: expanded };
+}
+
+export function addMinerLauncher(config, { name, script, home = homedir() } = {}) {
+  const cleanName = launcherName(name);
+  if (!cleanName) return { ok: false, error: "Name the start file with letters, numbers, spaces, dots, or dashes (up to 40 characters)." };
+  const cleaned = cleanLauncherScript(script, home);
+  if (!cleaned.ok) return cleaned;
+  const normalized = normalizeMinerConfig(config);
+  const visible = launcherView(normalized, { home }).launchers.filter((item) => item.id !== "pinned");
+  if (visible.some((item) => item.name.toLowerCase() === cleanName.toLowerCase())) {
+    return { ok: false, error: "That name is already used." };
+  }
+  if (normalized.launchers.some((item) => sameScript(item.script, cleaned.script)) || sameScript(cleaned.script, defaultMinerScript(home))) {
+    return { ok: false, error: "That start file is already saved." };
+  }
+  if (normalized.launchers.length >= MAX_MINER_LAUNCHERS) {
+    return { ok: false, error: "Hog keeps 6 start files. Remove one to add another." };
+  }
+  return {
+    ok: true,
+    config: {
+      script: cleaned.script,
+      launchers: [...normalized.launchers, { id: launcherIdFor(cleaned.script), name: cleanName, script: cleaned.script }],
+    },
+  };
+}
+
+export function selectMinerLauncher(config, id, home = homedir()) {
+  const picked = String(id || "");
+  if (picked !== "default" && !/^[a-f0-9]{16}$/.test(picked)) return { ok: false, error: "Pick a saved start file." };
+  const normalized = normalizeMinerConfig(config);
+  if (picked === "default") {
+    const problem = minerScriptProblem(defaultMinerScript(home), home);
+    if (problem) return { ok: false, error: problem };
+    return { ok: true, config: { script: "", launchers: normalized.launchers } };
+  }
+  const item = normalized.launchers.find((row) => row.id === picked);
+  if (!item) return { ok: false, error: "Hog does not have that start file saved." };
+  const problem = minerScriptProblem(item.script, home);
+  if (problem) return { ok: false, error: problem };
+  return { ok: true, config: { script: item.script, launchers: normalized.launchers } };
+}
+
+export function removeMinerLauncher(config, id, home = homedir()) {
+  const picked = String(id || "");
+  if (picked === "default" || picked === "pinned") return { ok: false, error: "That start file stays in the list." };
+  if (!/^[a-f0-9]{16}$/.test(picked)) return { ok: false, error: "Pick a saved start file." };
+  const normalized = normalizeMinerConfig(config);
+  const item = normalized.launchers.find((row) => row.id === picked);
+  if (!item) return { ok: false, error: "Hog does not have that start file saved." };
+  const launchers = normalized.launchers.filter((row) => row.id !== picked);
+  const script = normalized.script === item.script ? "" : normalized.script;
+  return { ok: true, config: { script, launchers } };
+}
+
+export function applyMinerLauncher(config, input, home = homedir()) {
+  const op = input && typeof input === "object" ? String(input.op || "") : "";
+  if (op === "add") return addMinerLauncher(config, { name: input.name, script: input.script, home });
+  if (op === "select") return selectMinerLauncher(config, input.id, home);
+  if (op === "remove") return removeMinerLauncher(config, input.id, home);
+  return { ok: false, error: "Use add, select, or remove." };
+}
+
 /** "miner", "launcher", or "" for one process command line. */
 export function classifyMinerProc(args, { script, port }) {
   if (!Array.isArray(args) || args.length === 0) return "";
-  const pool = `127.0.0.1:${port}`;
   const bin = String(args[0]).split(/[/\\]/).pop();
   const isMiner = bin === "bzminer" || args.some((arg) => arg === "./bzminer" || String(arg).endsWith("/bzminer"));
-  if (isMiner && args.includes("warthog") && args.some((arg) => String(arg).includes(pool))) return "miner";
+  if (isMiner && args.includes("warthog") && args.some((arg) => hogPoolArg(arg, port))) return "miner";
   if (script && args.includes(script)) return "launcher";
   return "";
 }
@@ -210,24 +441,63 @@ export function createLocalMiner({
     return { state: "stopped", error: lastError };
   }
 
-  async function start() {
+  async function start(options = {}) {
     if (busy) return busy;
-    busy = doStart().finally(() => {
+    const pool = options && typeof options.pool === "string" ? options.pool : "";
+    busy = doStart(pool).finally(() => {
       busy = null;
     });
     return busy;
   }
 
-  async function doStart() {
+  function pointScript(path, pool) {
+    if (!pool) return "";
+    if (!canonicalMinerPool(pool)) return "That is not a Tailscale stratum address.";
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      return "Hog could not read start_warthog.sh.";
+    }
+    const applied = rewriteMinerPool(text, pool);
+    if (!applied.ok) return applied.error;
+    if (applied.text === text) return "";
+    try {
+      writeFileSync(path, applied.text);
+    } catch {
+      return "Hog could not set the pool in start_warthog.sh.";
+    }
+    return "";
+  }
+
+  async function doStart(pool = "") {
     const path = script();
     const problem = minerScriptProblem(path, home);
     if (problem) {
       lastError = problem;
       return { ok: false, started: false, ...status() };
     }
+    if (pool && !canonicalMinerPool(pool)) {
+      lastError = "That is not a Tailscale stratum address.";
+      return { ok: false, started: false, ...status() };
+    }
     if (matched().length) {
+      if (pool) {
+        let current = "";
+        try { current = readFileSync(path, "utf8"); } catch { current = ""; }
+        const applied = current ? rewriteMinerPool(current, pool) : { ok: false, text: "" };
+        if (applied.ok && applied.text !== current) {
+          lastError = "Stop the miner before changing which node it mines to.";
+          return { ok: false, started: false, ...status(), error: lastError };
+        }
+      }
       lastError = "";
       return { ok: true, started: false, ...status() };
+    }
+    const pointed = pointScript(path, pool);
+    if (pointed) {
+      lastError = pointed;
+      return { ok: false, started: false, ...status(), error: pointed };
     }
     if (rootReady()) {
       const ran = await runRoot("start");

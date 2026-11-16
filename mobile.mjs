@@ -12,7 +12,8 @@
 // and Files (browse, preview, download, chunked upload, new folder, rename,
 // delete to Trash) through the same Files service and rules as hog://files.
 // Nothing else in hog (wallet, node, browse proxy, keys) is reachable from it.
-// The phone cannot choose which program starts: Hog launches start_warthog.sh.
+// The phone starts the saved start_warthog.sh, or picks one of those saved
+// files by id. It cannot name a different program.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -20,6 +21,7 @@ import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { isIP } from "node:net";
 import { handleFilesRequest } from "./files.mjs";
+import { canonicalMinerPool } from "./miner-local.mjs";
 import { isLoopback, isTailnetIpv4, isTailnetIpv6, normalizeIp, tailnetAddresses } from "./tailnet.mjs";
 
 export const DEFAULT_MOBILE_PORT = 4189;
@@ -323,6 +325,24 @@ export function mobileRequestProblem(req) {
   return "";
 }
 
+function cleanLaunchers(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw.slice(0, 8)) {
+    if (!item || typeof item !== "object") continue;
+    const id = String(item.id || "");
+    if (!/^(default|pinned|[a-f0-9]{16})$/.test(id)) continue;
+    out.push({
+      id,
+      name: String(item.name || "Start file").replace(/\s+/g, " ").trim().slice(0, 40) || "Start file",
+      path: String(item.path || "").slice(0, 300),
+      active: Boolean(item.active),
+      problem: String(item.problem || "").slice(0, 200),
+    });
+  }
+  return out;
+}
+
 /** Only the fields the phone shows; no keys, no command lines. */
 export function mobileMiningView(status) {
   const s = status && typeof status === "object" ? status : {};
@@ -350,8 +370,13 @@ export function mobileMiningView(status) {
     lastResult: String(s.lastResult || "").slice(0, 200),
     lastError: String(s.lastError || s.error || "").slice(0, 300),
     allowTailnet: Boolean(s.allowTailnet),
+    tailnetAddress: String(s.tailnetAddress || ""),
+    stratumPort: num(s.stratumPort || s.configuredStratumPort) || 3456,
     localMiner: s.localMiner === "running" || s.localMiner === "missing" ? s.localMiner : "stopped",
     localMinerError: String(s.localMinerError || "").slice(0, 300),
+    launcherPinned: Boolean(s.launcherPinned),
+    launcherNote: String(s.launcherNote || "").slice(0, 300),
+    launchers: cleanLaunchers(s.launchers),
     workers: Array.isArray(s.workers)
       ? s.workers.slice(0, 64).map((w) => ({
         worker: String(w.worker || ""),
@@ -370,7 +395,7 @@ export function mobileMiningView(status) {
 /**
  * The mobile API request handler.
  * @param {{ state: ReturnType<typeof createMobileState>, files: any, mining: () => any,
- *   miningAction?: (action: "start" | "stop") => Promise<any>,
+ *   miningAction?: (action: "start" | "stop" | "launcher", extra?: { pool?: string, op?: string, id?: string, name?: string, script?: string }) => Promise<any>,
  *   containers: (action: string, name?: string) => Promise<any>, info?: () => any }} deps
  */
 export function createMobileApi({ state, files, mining, miningAction, containers, info = () => ({}) }) {
@@ -411,8 +436,33 @@ export function createMobileApi({ state, files, mining, miningAction, containers
         if (typeof miningAction !== "function") return sendJson(res, 404, { ok: false, error: "Not available from the phone." });
         const body = await readJson(req);
         const action = String(body.action || "");
+        if (action === "launcher") {
+          const op = String(body.op || "");
+          if (op !== "add" && op !== "select" && op !== "remove") return sendJson(res, 400, { ok: false, error: "op must be add, select, or remove" });
+          const extra = { op };
+          if (op === "select" || op === "remove") {
+            const id = String(body.id || "");
+            if (!/^(default|[a-f0-9]{16})$/.test(id)) return sendJson(res, 400, { ok: false, error: "Pick a saved start file." });
+            extra.id = id;
+          }
+          if (op === "add") {
+            extra.name = String(body.name || "").slice(0, 80);
+            extra.script = String(body.script || "").slice(0, 500);
+          }
+          const status = await miningAction("launcher", extra);
+          const view = mobileMiningView(status);
+          if (status && status.ok === false) {
+            return sendJson(res, 200, { ...view, ok: false, error: String(status.error || "Could not save that start file.").slice(0, 300) });
+          }
+          return sendJson(res, 200, view);
+        }
         if (action !== "start" && action !== "stop") return sendJson(res, 400, { ok: false, error: "action must be start or stop" });
-        const status = await miningAction(action);
+        let pool = "";
+        if (action === "start" && body.pool != null && String(body.pool).trim() !== "") {
+          pool = canonicalMinerPool(body.pool);
+          if (!pool) return sendJson(res, 400, { ok: false, error: "The mining node has to be this computer or a Tailscale address." });
+        }
+        const status = await miningAction(action, pool ? { pool } : {});
         const view = mobileMiningView(status);
         if (status && status.ok === false) {
           return sendJson(res, 200, { ...view, ok: false, error: String(status.error || view.localMinerError || "Could not change the miner.").slice(0, 300) });
