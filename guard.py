@@ -5464,6 +5464,25 @@ class Guard:
             return BZMINER_GHCR, ""
         return "", problem
 
+    def _bzminer_running(self):
+        if not self.runtime_available(RUNTIME_ENGINE):
+            return False
+        info, _error = self.inspect_on(BZMINER_NAME, sock=self.engine_sock())
+        state = info.get("State") if isinstance(info, dict) and isinstance(info.get("State"), dict) else {}
+        return state.get("Running") is True
+
+    def bzminer_save(self, raw):
+        spec, error = bzminer_spec(raw, strict=True)
+        if error:
+            return self._finish_bzminer(False, error)
+        if self._bzminer_running():
+            return self._finish_bzminer(False, "BzMiner is mining. Stop it before changing these settings.")
+        try:
+            self.write_bzminer(spec)
+        except OSError:
+            return self._finish_bzminer(False, "Hog could not save those BzMiner settings.")
+        return self._finish_bzminer(True, notice="Saved BzMiner settings. The container stays off until you start mining.")
+
     def bzminer_start(self, raw, progress=None):
         spec, error = bzminer_spec(raw, strict=True)
         if error:
@@ -5531,6 +5550,8 @@ class Guard:
             return self.samba_on(progress=progress)
         if action == "samba-off":
             return self.samba_off()
+        if action == "bzminer-save":
+            return self._mark_docker(self.bzminer_save(name))
         if action == "bzminer-start":
             return self._mark_docker(self.bzminer_start(name, progress=progress))
         if action == "bzminer-stop":

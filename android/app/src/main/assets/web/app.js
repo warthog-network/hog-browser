@@ -10,13 +10,14 @@ const $ = (id) => document.getElementById(id);
 const native = window.HogNative || null;
 const pending = new Map();
 let seq = 0;
-let current = "containers";
+let current = "home";
 let timers = {};
 let files = { roots: [], root: "shares", path: "", entries: [], q: "" };
 let uploads = new Map();
 let cfgCache = { paired: false, hogs: [] };
 let scannedIp = "";
 let lastMining = null;
+let lastFetch = 0;
 
 // ---------- bridge ----------
 window.hogNative = {
@@ -111,6 +112,35 @@ function when(ms) {
   if (!ms) return "";
   const d = new Date(ms);
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function ago(ms) {
+  if (!ms) return "—";
+  const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function fetchedNote() {
+  return lastFetch ? `updated ${ago(lastFetch)}` : "updated —";
+}
+
+function noteFetch() {
+  lastFetch = Date.now();
+  paintChip();
+}
+
+function shown(value) {
+  return value == null || value === "" ? "—" : String(value);
+}
+
+function stat(label, value, cls = "") {
+  return el("div", { class: `stat ${cls}` }, el("b", { text: shown(value) }), el("span", { text: label }));
 }
 
 // ---------- pairing ----------
@@ -218,13 +248,13 @@ function go(tab) {
 
 function refresh(tab) {
   clearTimeout(timers.poll);
-  const job = { containers: loadContainers, jellyfin: loadJellyfin, mining: loadMining, files: loadFiles }[tab];
+  const job = { home: loadHome, mining: loadMining, services: loadServices, files: loadFiles }[tab];
   if (!job) return;
   job().catch((error) => {
     setConn(false);
     toast(error.message || "Could not reach hog.", true);
   }).finally(() => {
-    const every = { containers: 10000, jellyfin: 15000, mining: 5000 }[tab];
+    const every = { home: 8000, services: 10000, mining: 5000 }[tab];
     if (every && current === tab && !$("app-view").hidden) timers.poll = setTimeout(() => refresh(tab), every);
   });
 }
@@ -242,6 +272,7 @@ function paintContainers(data) {
   list.replaceChildren();
   $("containers-note").textContent = data.error ? data.error : !data.items.length ? "No containers in hog yet. Add them in hog → Containers." : "";
   for (const item of data.items) {
+    if (item.name === "jellyfin") continue;
     const running = item.state === "running";
     const links = (item.links || []).filter((l) => l.kind === "tailnet" || l.kind === "lan");
     const act = (action) => async (event) => {
@@ -263,62 +294,102 @@ function paintContainers(data) {
       item.blocked ? el("p", { class: "note", text: item.reason || "Hog does not run this container." }) : el("div", { class: "ct-actions" },
         running ? null : el("button", { class: "primary", type: "button", text: "Start", onclick: act("start") }),
         running ? el("button", { class: "ghost", type: "button", text: "Restart", onclick: act("restart") }) : null,
-        running && item.name !== "tailscale" ? el("button", { class: "danger", type: "button", text: "Stop", onclick: (e) => confirmSheet(`Stop ${item.name}?`, "Stop", () => act("stop")(e)) }) : null),
+        running && item.name !== "tailscale" ? el("button", { class: "danger", type: "button", text: "Stop", onclick: (e) => confirmSheet(`Stop ${item.name} on ${hogLabel()}?`, "Stop", () => act("stop")(e)) }) : null),
       links.length ? el("div", { class: "ct-links" }, links.map((l) => el("button", { class: "chip", type: "button", text: `${l.label} :${l.port}`, onclick: () => openUrl(l.url) }))) : null));
   }
 }
 
 // ---------- jellyfin ----------
 let jellyUrl = "";
-async function loadJellyfin() {
+async function loadServices() {
   const data = await apiGet("containers");
+  lastContainers = data;
+  noteFetch();
+  paintJellyfin(data);
+  paintContainers(data);
+}
+
+function paintJellyfin(data) {
   const jf = data.items.find((i) => i.name === "jellyfin");
   const dns = jf && (jf.links || []).find((l) => l.kind === "tailnet" && /\.ts\.net/.test(l.url));
   jellyUrl = (dns && dns.url) || data.jellyfinUrl || "";
   const state = jf ? jf.state : "not set up";
   $("jelly-state").textContent = jf ? (state === "running" ? "Jellyfin is running" : `Jellyfin is ${state}`) : "Jellyfin is not set up in hog";
-  $("jelly-url").textContent = jellyUrl || (jf && state !== "running" ? "Start it in Containers." : "");
+  $("jelly-url").textContent = jellyUrl || (jf && state !== "running" ? "Start it in Services." : "");
   $("jelly-app").disabled = !jellyUrl;
   $("jelly-browser").disabled = !jellyUrl;
 }
 
 // ---------- mining ----------
+function syncLine(m) {
+  if (!m || !m.enabled) return "Solo mining is off.";
+  if (!m.nodeTabConnected) return "Waiting for the node tab.";
+  if (m.synced) return `Synced at ${m.nodeHeight || m.height || "—"}`;
+  return `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
+}
+
 function paintMining(m) {
-  const sync = !m.enabled ? "Solo mining is off. Start turns it on." : !m.nodeTabConnected ? "Waiting for hog's node tab." : m.synced ? `Synced at ${m.nodeHeight || m.height}` : `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
-  const where = hogLabel();
-  const rig = m.localMiner === "running" ? `BzMiner is running on ${where}.` : m.localMiner === "missing" ? (m.localMinerError || `Hog could not find BzMiner on ${where}.`) : `BzMiner is off on ${where}.`;
-  const network = m.networkLabel || m.network || "";
-  $("mining-status").replaceChildren(
-    el("span", { class: `status-dot${m.localMiner === "running" ? " on" : ""}` }),
-    el("div", { class: "status-text" },
-      el("b", { text: m.localMiner === "running" ? `BzMiner${network ? ` · ${network}` : ""}` : "BzMiner is off" }),
-      el("span", { text: where }),
-      el("span", { text: rig }),
-      el("span", { text: sync }),
-      m.localMinerError && m.localMiner !== "missing" ? el("span", { class: "error", text: m.localMinerError }) : null,
-      m.lastError ? el("span", { class: "error", text: m.lastError }) : null));
+  paintChip();
   paintNode();
-  const actions = $("mining-actions");
-  actions.replaceChildren();
-  if (m.localMiner === "running") {
-    actions.append(el("button", { class: "danger", type: "button", text: "Stop miner", onclick: () => confirmSheet(`Stop BzMiner on ${where}?`, "Stop", () => miningAct("stop")) }));
-  } else if (m.localMiner !== "missing") {
-    actions.append(el("button", { class: "primary", type: "button", text: "Start miner", onclick: () => miningAct("start") }));
-  }
-  const stat = (label, value, cls = "") => el("div", { class: `stat ${cls}` }, el("b", { text: String(value) }), el("span", { text: label }));
-  $("mining-stats").replaceChildren(
-    stat("Blocks", m.blocks, "gold"), stat("Shares", m.shares), stat("Miners", m.miners, "blue"),
-    stat("Rejected", m.rejected), stat("Stale", m.stale), stat("Pending", m.pending),
-    stat("Height", m.height || m.nodeHeight || 0), stat("Tip", m.tipHeight || 0), stat("Jobs", m.jobs));
+  const earn = $("mining-earn");
+  if (earn) earn.textContent = `Earnings — · Luck — · ${fetchedNote()}`;
   paintLaunchers(m);
+  const where = hogLabel();
+  const rows = Array.isArray(m.workers) ? m.workers.map((worker) => ({ ...worker })) : [];
+  if (!rows.some((worker) => !worker.remote) && m.localMiner) {
+    rows.unshift({
+      worker: "This PC",
+      remote: false,
+      connected: m.localMiner === "running" ? 1 : 0,
+      blocks: null,
+      rejected: null,
+      stale: null,
+      lastShareAt: 0,
+    });
+  }
+  rows.sort((a, b) => Number(Boolean(b.connected)) - Number(Boolean(a.connected)) || String(a.worker || "").localeCompare(String(b.worker || "")));
   const workers = $("mining-workers");
   workers.replaceChildren();
-  if (!m.workers.length) workers.append(el("p", { class: "note", text: "No rigs connected yet." }));
-  for (const w of m.workers) {
-    workers.append(el("div", { class: "card" },
-      el("div", { class: "ct-head" }, el("span", { class: "ct-name", text: w.worker || "(no name)" }), el("span", { class: `badge ${w.connected ? "running" : ""}`, text: w.connected ? (w.remote ? "tailnet" : "this PC") : "offline" })),
-      el("div", { class: "ct-meta", text: `${w.blocks} blocks · ${w.shares} shares · ${w.rejected} rejected${w.lastShareAt ? ` · last ${when(w.lastShareAt)}` : ""}` })));
+  if (m.lastError) workers.append(el("p", { class: "error", text: m.lastError }));
+  if (m.localMinerError && m.localMiner !== "missing") workers.append(el("p", { class: "error", text: m.localMinerError }));
+  if (!rows.length) workers.append(el("p", { class: "note", text: `No rigs connected to ${where} yet.` }));
+  for (const w of rows) {
+    const online = Boolean(w.connected);
+    workers.append(el("button", { class: "card", type: "button", onclick: () => minerDetail(w) },
+      el("div", { class: "ct-head" },
+        el("span", { class: "ct-name", text: w.worker || "(no name)" }),
+        el("span", { class: `badge ${online ? "running" : ""}`, text: online ? "online" : "offline" })),
+      el("div", { class: "ct-meta", text: `— · ${shown(w.blocks)} blocks · ${shown(w.rejected)} rejected · ${shown(w.stale)} stale${w.lastShareAt ? ` · ${ago(w.lastShareAt)}` : ""}` })));
   }
+}
+
+function minerDetail(w) {
+  const where = hogLabel();
+  const local = !w.remote;
+  const running = Boolean(lastMining && lastMining.localMiner === "running");
+  const rows = [
+    ["Hashrate", "—"],
+    ["Temperature", "—"],
+    ["Power", "—"],
+    ["Blocks", shown(w.blocks)],
+    ["Rejected", shown(w.rejected)],
+    ["Stale", shown(w.stale)],
+    ["Status", w.connected ? "online" : "offline"],
+    ["Last share", w.lastShareAt ? ago(w.lastShareAt) : "—"],
+  ];
+  const actions = [];
+  if (local && lastMining && lastMining.localMiner === "missing") {
+    actions.push(el("p", { class: "note", text: lastMining.localMinerError || `Hog could not find BzMiner on ${where}.` }));
+  } else if (local && running) {
+    actions.push(el("button", { class: "danger", type: "button", text: "Stop", onclick: () => confirmSheet(`Stop BzMiner on ${where}?`, "Stop", () => miningAct("stop")) }));
+  } else if (local) {
+    actions.push(el("button", { class: "primary", type: "button", text: "Start", onclick: () => confirmSheet(`Start BzMiner on ${where}?`, "Start", () => miningAct("start")) }));
+  }
+  sheet(
+    el("p", { class: "sheet-title", text: w.worker || "Miner" }),
+    el("p", { class: "sheet-sub", text: local ? `${where}. Per-GPU hashrate is not on this phone yet.` : `${w.worker || "This rig"} is mining through ${where}. Start and stop run on ${where}.` }),
+    el("dl", { class: "kv" }, rows.flatMap(([key, value]) => [el("dt", { text: key }), el("dd", { text: value })])),
+    actions.length ? el("div", { class: "sheet-actions" }, actions) : null);
 }
 
 function stratumLiteral(host) {
@@ -349,7 +420,7 @@ function paintLaunchers(m) {
       actions.push(el("button", { class: "primary", type: "button", text: "Use this", onclick: () => launcherAct("select", item) }));
     }
     if (item.id !== "default" && item.id !== "pinned") {
-      actions.push(el("button", { class: "danger", type: "button", text: "Remove", onclick: () => confirmSheet(`Remove ${item.name}?`, "Remove", () => launcherAct("remove", item)) }));
+      actions.push(el("button", { class: "danger", type: "button", text: "Remove", onclick: () => confirmSheet(`Remove ${item.name} on ${hogLabel()}?`, "Remove", () => launcherAct("remove", item)) }));
     }
     box.append(el("div", { class: `card launcher${item.active ? " is-on" : ""}` },
       el("div", { class: "ct-head" },
@@ -388,25 +459,53 @@ function paintNode() {
   const box = $("mining-node");
   if (!box) return;
   const choice = nodeChoice();
+  const change = el("button", { class: "ghost", type: "button", text: "Change", onclick: chooseNode });
+  const head = (title) => el("div", { class: "ct-head" }, el("span", { class: "ct-name", text: title }), change);
   if (!choice.node || !choice.pool) {
     box.replaceChildren(
-      el("p", { class: "sheet-title", text: "No mining node yet" }),
-      el("p", { class: "note", text: "Pick the computer that runs the Warthog node. The other computers mine to it." }),
-      el("button", { class: "primary", type: "button", text: "Use this hog as the node", onclick: setAsNode }));
+      head("No mining node yet"),
+      el("p", { class: "note", text: "Pick the computer that runs the Warthog node. The other computers mine to it. Changing this does not move a miner that is already running." }));
     return;
   }
   if (choice.here) {
     box.replaceChildren(
-      el("p", { class: "sheet-title", text: "This hog is the mining node" }),
+      head("This hog is the mining node"),
       el("p", { class: "mono", text: choice.pool }),
-      el("p", { class: "note", text: "Start on this computer mines to 127.0.0.1. The other computers mine to the address above. Leave Allow rigs on my tailnet on here." }));
+      el("p", { class: "note", text: `${syncLine(lastMining)} Start on this computer mines to 127.0.0.1. The other computers mine to the address above.` }));
     return;
   }
   box.replaceChildren(
-    el("p", { class: "sheet-title", text: `Mines to ${choice.node.label || choice.host}` }),
+    head(`Mines to ${choice.node.label || choice.host}`),
     el("p", { class: "mono", text: choice.pool }),
-    el("p", { class: "note", text: "Start writes that address into start_warthog.sh on this computer. BzMiner 100.81 uses the bzminer -p line. Older launchers use POOL=. Stop the miner first when it is already running." }),
-    el("button", { class: "ghost", type: "button", text: "Use this hog as the node", onclick: setAsNode }));
+    el("p", { class: "note", text: `Start on ${hogLabel()} writes that address into its start file. Stop the miner there first when it is already running.` }));
+}
+
+function chooseNode() {
+  const cfg = config();
+  const port = Number(lastMining && (lastMining.stratumPort || lastMining.configuredStratumPort)) || 3456;
+  const rows = (cfg.hogs || []).map((hog) => {
+    const name = hog.label || hog.host || hog.ip || "Hog";
+    const on = hog.id === cfg.nodeId;
+    return el("button", {
+      class: `hog-row${on ? " is-on" : ""}`,
+      type: "button",
+      onclick: () => confirmSheet(`Use ${name} as the mining node? A miner that is already running stays where it is.`, "Use this hog", () => {
+        const host = (hog.id === cfg.id && lastMining && lastMining.tailnetAddress) ? String(lastMining.tailnetAddress) : (hog.ip || hog.host || "");
+        if (native) native.setNode(hog.id, port, host);
+        else demo.setNode(hog.id, port, host);
+        closeSheet();
+        if (lastMining) paintMining(lastMining);
+        else paintNode();
+        toast(`${name} is the mining node.`);
+      }),
+    },
+      el("span", { class: "hog-name", text: name }),
+      el("span", { class: "hog-sub", text: on ? "mining node" : (hog.host || hog.ip || "") }));
+  });
+  sheet(
+    el("p", { class: "sheet-title", text: "Mining node" }),
+    el("p", { class: "sheet-sub", text: "This is where rigs mine. The hog in the header is only what this phone is showing." }),
+    rows.length ? el("div", { class: "hog-list" }, rows) : el("p", { class: "note", text: "Pair a hog first." }));
 }
 
 function setAsNode() {
@@ -426,11 +525,59 @@ function setAsNode() {
 
 async function loadMining() {
   lastMining = await apiGet("mining");
+  noteFetch();
   paintMining(lastMining);
+  if (current === "home") paintHome();
+}
+
+async function loadHome() {
+  const [mining, containers] = await Promise.all([apiGet("mining"), apiGet("containers")]);
+  lastMining = mining;
+  lastContainers = containers;
+  noteFetch();
+  paintHome();
+  paintJellyfin(containers);
+  paintContainers(containers);
+}
+
+function paintHome() {
+  const where = hogLabel();
+  const mining = lastMining;
+  $("home-sync").replaceChildren(
+    el("p", { class: "sheet-title", text: where }),
+    el("p", { text: syncLine(mining) }),
+    el("p", { class: "note", text: fetchedNote() }));
+  const state = !mining ? "Waiting for this hog." : mining.localMiner === "running" ? `BzMiner is running on ${where}.` : mining.localMiner === "missing" ? (mining.localMinerError || `Hog could not find BzMiner on ${where}.`) : `BzMiner is off on ${where}.`;
+  $("home-mining").replaceChildren(
+    el("p", { class: "sheet-title", text: "Mining" }),
+    el("p", { text: state }),
+    mining ? el("div", { class: "stats" },
+      stat("Blocks", mining.blocks, "gold"),
+      stat("Rejected", mining.rejected),
+      stat("Stale", mining.stale),
+      stat("Miners", mining.miners, "blue"),
+      stat("Hashrate", "—"),
+      stat("Luck", "—")) : null);
+  $("home-earn").replaceChildren(
+    el("p", { class: "sheet-title", text: "Earnings" }),
+    el("p", { class: "note", text: "Today — · This week —. Hog does not keep a block log on the phone yet." }));
+  const services = $("home-services");
+  services.replaceChildren();
+  const items = lastContainers && Array.isArray(lastContainers.items) ? lastContainers.items : null;
+  if (!items) {
+    services.append(el("p", { class: "note", text: "Services —" }));
+    return;
+  }
+  const jellyfin = items.find((item) => item.name === "jellyfin");
+  const running = items.filter((item) => item.state === "running").length;
+  services.append(el("button", { class: "card", type: "button", onclick: () => go("services") },
+    el("p", { class: "sheet-title", text: "Services" }),
+    el("p", { class: "note", text: `Jellyfin ${jellyfin ? jellyfin.state : "not set up"} · ${running} running · ${fetchedNote()}` })));
 }
 
 async function miningAct(action) {
-  for (const button of $("mining-actions").querySelectorAll("button")) button.disabled = true;
+  const box = $("mining-actions");
+  if (box) for (const button of box.querySelectorAll("button")) button.disabled = true;
   const choice = nodeChoice();
   const payload = { action };
   if (action === "start" && choice.pool) {
@@ -507,11 +654,23 @@ function openDir(path) {
   loadFiles().catch((e) => toast(e.message, true));
 }
 
+function parkLaunchers() {
+  const park = $("launcher-park");
+  if (!park) return;
+  for (const id of ["mining-launchers", "mining-launcher-add"]) {
+    const node = $(id);
+    if (node && node.parentElement !== park) park.append(node);
+  }
+}
+
 function sheet(...content) {
-  $("sheet-content").replaceChildren(...content);
+  const nodes = content.flat().filter((node) => node !== null && node !== undefined && node !== false);
+  parkLaunchers();
+  $("sheet-content").replaceChildren(...nodes);
   $("sheet").hidden = false;
 }
 function closeSheet() {
+  parkLaunchers();
   $("sheet").hidden = true;
   $("sheet-content").replaceChildren();
 }
@@ -651,24 +810,46 @@ function forgetCurrent() {
 
 function hogSheet() {
   const cfg = config();
-  const rows = (cfg.hogs || []).map((hog) => el("button", {
-    class: `hog-row${hog.id === cfg.id ? " is-on" : ""}`,
-    type: "button",
-    onclick: () => switchHog(hog.id),
-  },
-    el("span", { class: "hog-name", text: hog.label || hog.host || hog.ip || "Hog" }),
-    el("span", { class: "hog-sub", text: [hog.id === cfg.nodeId ? "mining node" : "", hog.host && hog.ip ? hog.ip : "", hog.port || 4189].filter(Boolean).join(" · ") })));
+  const rows = (cfg.hogs || []).map((hog) => {
+    const name = hog.label || hog.host || hog.ip || "Hog";
+    const here = hog.id === cfg.id;
+    let sub = "latency — · sync — · miners —";
+    if (here && lastMining) {
+      const height = lastMining.synced ? (lastMining.nodeHeight || lastMining.height || "—") : "—";
+      const miners = Array.isArray(lastMining.workers) ? String(lastMining.workers.length) : "—";
+      sub = `latency — · sync ${height} · ${miners} miners`;
+    }
+    if (hog.id === cfg.nodeId) sub = `mining node · ${sub}`;
+    return el("button", {
+      class: `hog-row${here ? " is-on" : ""}`,
+      type: "button",
+      onclick: () => switchHog(hog.id),
+    },
+      el("span", { class: "hog-name", text: name }),
+      el("span", { class: "hog-sub", text: sub }));
+  });
   sheet(
     el("p", { class: "sheet-title", text: "Your hogs" }),
-    el("p", { class: "sheet-sub", text: "Start and stop apply to the hog you pick. Pairing another computer keeps the rest." }),
+    el("p", { class: "sheet-sub", text: "Switching changes what the phone shows, not where miners mine." }),
     el("div", { class: "hog-list" }, rows),
     el("div", { class: "sheet-actions" },
-      el("button", { class: "primary", type: "button", text: "Pair another", onclick: () => { closeSheet(); showPair("", true); } }),
-      el("button", { class: "danger", type: "button", text: "Forget this one", onclick: forgetCurrent })));
+      el("button", { class: "primary", type: "button", text: "Add hog", onclick: () => { closeSheet(); showPair("", true); } }),
+      el("button", { class: "ghost", type: "button", text: "This hog", onclick: hogDetail }),
+      el("button", { class: "ghost", type: "button", text: "Settings", onclick: settingsSheet })));
 }
 
-// ---------- menu ----------
-function menu() {
+function hogDetail() {
+  const where = hogLabel();
+  sheet(
+    el("p", { class: "sheet-title", text: where }),
+    el("p", { class: "sheet-sub", text: "Start files on this computer. The line under the name is the path. The file has to be executable and stay in the home folder." }),
+    $("mining-launchers"),
+    $("mining-launcher-add"),
+    el("button", { class: "danger", type: "button", text: "Forget this hog", onclick: forgetCurrent }));
+  if (lastMining) paintLaunchers(lastMining);
+}
+
+function settingsSheet() {
   const cfg = config();
   sheet(
     el("p", { class: "sheet-title", text: "This phone" }),
@@ -680,8 +861,7 @@ function menu() {
       el("dt", { text: "Paired" }), el("dd", { text: String((cfg.hogs || []).length) })),
     el("p", { class: "note", text: "To cut this phone off a computer, remove it there in Settings → Tailscale → Phone app. Forget only clears it on the phone." }),
     el("div", { class: "sheet-actions" },
-      el("button", { class: "primary", type: "button", text: "Your hogs", onclick: hogSheet }),
-      el("button", { class: "ghost", type: "button", text: "Close", onclick: closeSheet })));
+      el("button", { class: "ghost", type: "button", text: "Your hogs", onclick: hogSheet })));
 }
 
 // ---------- start ----------
@@ -689,10 +869,23 @@ function startApp() {
   const cfg = config();
   $("pair-view").hidden = true;
   $("app-view").hidden = false;
-  const via = cfg.via || cfg.host || cfg.ip;
-  $("top-host").textContent = via ? `${via}:${cfg.port}` : "Choose a hog";
-  $("top-host").setAttribute("aria-label", via ? `Switch hog. ${via} is selected.` : "Switch hog");
+  paintChip();
+  clearInterval(timers.chip);
+  timers.chip = setInterval(() => { if (!$("app-view").hidden) paintChip(); }, 1000);
   go(current);
+}
+
+function paintChip() {
+  const chip = $("hog-chip");
+  const text = $("hog-chip-text");
+  if (!chip || !text) return;
+  const cfg = config();
+  const name = cfg.paired ? hogLabel(cfg) : "Choose a hog";
+  const rigs = lastMining && Array.isArray(lastMining.workers) ? lastMining.workers.length : null;
+  const rigText = rigs == null ? "— rigs" : `${rigs} ${rigs === 1 ? "rig" : "rigs"}`;
+  const age = fetchedNote();
+  text.textContent = `${name} ▾ · ${rigText} · — · ${age}`;
+  chip.setAttribute("aria-label", `${name}. ${rigText}. Hashrate is not available yet. ${age}. Switch hog.`);
 }
 
 function wire() {
@@ -705,8 +898,7 @@ function wire() {
   });
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => go(b.dataset.go)));
   document.querySelectorAll("[data-refresh]").forEach((b) => b.addEventListener("click", () => refresh(b.dataset.refresh)));
-  $("menu-btn").addEventListener("click", menu);
-  $("top-host").addEventListener("click", hogSheet);
+  $("hog-chip").addEventListener("click", hogSheet);
   $("pair-back").addEventListener("click", backToHogs);
   $("sheet").addEventListener("click", (ev) => { if (ev.target.matches("[data-close]")) closeSheet(); });
   $("jelly-app").addEventListener("click", () => { if (native) native.openJellyfin(jellyUrl); else openUrl(jellyUrl); });
@@ -723,8 +915,8 @@ const demo = (() => {
   const params = new URLSearchParams(location.search);
   const miners = {};
   let hogs = params.get("demo") === "pair" ? [] : [
-    { id: "a", host: "hog.tail314642.ts.net", ip: "100.119.132.89", port: 4189, label: "hog.tail314642.ts.net" },
-    { id: "b", host: "hog-1.tail314642.ts.net", ip: "100.72.197.80", port: 4189, label: "hog-1.tail314642.ts.net" },
+    { id: "a", host: "hog.tail314642.ts.net", ip: "100.119.132.89", port: 4189, label: "Gaming-PC" },
+    { id: "b", host: "hog-1.tail314642.ts.net", ip: "100.72.197.80", port: 4189, label: "hog-1" },
   ];
   let currentId = hogs[0] ? hogs[0].id : "";
   let paired = hogs.length > 0;
@@ -820,8 +1012,8 @@ const demo = (() => {
         const demoMiner = miners[currentId] || "stopped";
         const demoIp = currentId === "b" ? "100.72.197.80" : "100.119.132.89";
         return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, lastError: "", localMiner: demoMiner, localMinerError: "", tailnetAddress: demoIp, stratumPort: 3456, launcherPinned: false, launcherNote: "", launchers: demoLaunchers.map((item) => ({ ...item })), workers: [
-          { worker: "hog-mainnet", remote: false, connected: 1, shares: 80, blocks: 55, rejected: 6, lastShareAt: now - 42e3 },
-          { worker: "rig2-mainnet", remote: true, connected: 1, shares: 12, blocks: 6, rejected: 1, lastShareAt: now - 6e5 },
+          { worker: "hog-mainnet", remote: false, connected: 1, shares: 80, blocks: 55, rejected: 6, stale: 2, lastShareAt: now - 42e3 },
+          { worker: "rig2-mainnet", remote: true, connected: 1, shares: 12, blocks: 6, rejected: 1, stale: 1, lastShareAt: now - 6e5 },
         ] };
       }
       if (route === "files/roots") return { ok: true, roots: [{ id: "shares", name: "hog-shares", ok: true }, { id: "a1b2c3d4", name: "Media drive", ok: true }] };
@@ -860,12 +1052,12 @@ const demo = (() => {
   };
 })();
 
-// Android back button: close a sheet, go up a folder, then back to Containers.
+// Android back button: close a sheet, go up a folder, then back to Home.
 window.hogBack = () => {
   if (!$("sheet").hidden) { closeSheet(); return true; }
   if ($("app-view").hidden) return false;
   if (current === "files" && files.path) { openDir(files.path.includes("/") ? files.path.slice(0, files.path.lastIndexOf("/")) : ""); return true; }
-  if (current !== "containers") { go("containers"); return true; }
+  if (current !== "home") { go("home"); return true; }
   return false;
 };
 

@@ -445,7 +445,7 @@
               <li><button type="button" data-launch="wireguard" data-image="lscr.io/linuxserver/wireguard:latest"><span>WireGuard</span><small>UDP 51820 · name wireguard</small></button></li>
               <li><button type="button" class="has-step" data-launch="tailscale" data-image="tailscale/tailscale:latest"><span>Tailscale</span><small>Click Tailscale, then Run. Docker Engine is recommended so your phone can connect directly.</small></button></li>
               <li><button type="button" class="has-step" data-launch="jellyfin" data-image="jellyfin/jellyfin:latest"><span>Jellyfin</span><small>Click Jellyfin, then Run. That creates ~/hog-shares and attaches it at /media. Use GPU acceleration if you want NVENC transcoding.</small></button></li>
-              <li><button type="button" class="has-step" data-launch="bzminer" data-image="bzminer/bzminer:v100.81"><span>BzMiner</span><small>Opens the BzMiner panel. Set the pool and wallet, then start mining on Docker Engine.</small></button></li>
+              <li><button type="button" class="has-step" data-launch="bzminer" data-image="bzminer/bzminer:v100.81"><span>BzMiner</span><small>Opens the BzMiner panel. Set the pool and wallet while it is off. Turning the container on starts mining.</small></button></li>
               <li><button type="button" data-launch="cartesi-db" data-image="cartesi-v2-db:r10"><span>Cartesi database</span><small>localhost 5433 · start this first · name cartesi-db</small></button></li>
               <li><button type="button" data-launch="cartesi-bridge" data-image="cartesi-v2-follow:r10"><span>cartesi-bridge</span><small>follows bridge-v2-r10 · no claims · name cartesi-bridge</small></button></li>
             </ul>
@@ -473,15 +473,22 @@
             <ul id="container-list" class="menu-list"></ul>
           </div>
           <section id="bzminer-card" class="connect-card" aria-label="BzMiner" hidden>
-            <p class="eyebrow">BzMiner</p>
-            <strong>Mine to this node</strong>
-            <p class="note">Hog runs <code>bzminer/bzminer:v100.81</code> on Docker Engine and passes the NVIDIA GPU through. The container joins this computer's network so it can reach the mining port, and it does not mount the wallet. Leave the clock fields empty to mine without a privileged container.</p>
+            <div class="bz-head">
+              <div>
+                <p class="eyebrow">BzMiner</p>
+                <strong>Mine to this node</strong>
+              </div>
+              <span id="bz-state" class="pill is-stopped">Off</span>
+            </div>
+            <p class="note">When this container is on, it is mining. Set the pool, wallet, and clocks while it is off. Save keeps them. Start mining turns the container on.</p>
             <form id="bzminer-form" class="stack">
               <label>Pool
                 <input id="bz-pool" class="mono" value="stratum+tcp://127.0.0.1:3456" spellcheck="false" autocomplete="off" aria-describedby="bz-error">
+                <span class="bz-hint">This computer (127.0.0.1), a 100.x Tailscale address, or a .ts.net name.</span>
               </label>
               <label>Wallet
                 <input id="bz-wallet" class="mono" maxlength="48" spellcheck="false" autocomplete="off" placeholder="48 hex characters">
+                <span class="bz-hint">The 48-character Warthog address that should be paid.</span>
               </label>
               <div class="bz-grid">
                 <label>Worker
@@ -510,13 +517,14 @@
                 </div>
               </details>
               <div class="row">
-                <button type="submit" id="bz-start" class="primary">Start mining</button>
+                <button type="button" id="bz-save">Save settings</button>
+                <button type="button" id="bz-start" class="primary">Start mining</button>
                 <button type="button" id="bz-stop" disabled>Stop</button>
               </div>
             </form>
-            <p id="bz-status" class="note" role="status"></p>
+            <p id="bz-status" class="note" role="status">Off. Save keeps these settings. Start mining turns the container on.</p>
             <p id="bz-error" class="error" role="status"></p>
-            <p class="note">Hashrate is in BzMiner's dashboard at <a href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. Leave the node tab open so work keeps coming. The start file on the Mining page still launches the miner on this computer.</p>
+            <p class="note">Hog runs <code>bzminer/bzminer:v100.81</code> on Docker Engine with the NVIDIA GPU, on this computer's network, and without mounting the wallet. Hashrate is at <a href="http://127.0.0.1:4014/">127.0.0.1:4014</a>. Leave the node tab open so work keeps coming. The Mining page start file is separate.</p>
           </section>
           <section id="jellyfin-gpu-card" class="connect-card" aria-label="GPU acceleration">
             <p class="eyebrow">Jellyfin</p>
@@ -1194,7 +1202,7 @@
                         </div>
                         <div class="swap-amount-row">
                           <div class="swap-amount-value"><input id="chain-swap-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
-                          <select id="chain-swap-pay" class="swap-token-btn" aria-label="Pay token"></select>
+                          <div id="chain-swap-pay" class="swap-token-menu"></div>
                         </div>
                       </div>
                       <div class="swap-legs-flip">
@@ -1207,7 +1215,7 @@
                         </div>
                         <div class="swap-amount-row">
                           <div class="swap-amount-value" id="chain-swap-out">0</div>
-                          <select id="chain-swap-receive" class="swap-token-btn" aria-label="Receive token"></select>
+                          <div id="chain-swap-receive" class="swap-token-menu"></div>
                         </div>
                       </div>
                     </div>
@@ -1316,12 +1324,7 @@
                     <button type="button" class="swap-chip-btn" data-safe-panel="limit">Limit</button>
                     <button type="button" class="swap-chip-btn" data-safe-panel="deposit">Deposit</button>
                     <button type="button" class="swap-chip-btn" data-safe-panel="withdraw">Withdraw</button>
-                    <select id="safe-network" class="swap-chip-btn" aria-label="SafeTrade network">
-                      <option>Warthog</option>
-                      <option>Ethereum</option>
-                      <option>Bitcoin</option>
-                      <option>Solana</option>
-                    </select>
+                    <div id="safe-network" class="swap-token-menu"></div>
                   </div>
                   <div class="swap-legs">
                     <div class="swap-panel">
@@ -1332,7 +1335,7 @@
                       <p id="safe-free" class="swap-fine"></p>
                       <div class="swap-amount-row">
                         <div class="swap-amount-value"><input id="safe-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
-                        <select id="safe-pay" class="swap-token-btn" aria-label="Pay asset"></select>
+                        <div id="safe-pay" class="swap-token-menu"></div>
                       </div>
                     </div>
                     <div class="swap-legs-flip">
@@ -1345,7 +1348,7 @@
                       </div>
                       <div class="swap-amount-row">
                         <div class="swap-amount-value" id="safe-receive-amount">0</div>
-                        <select id="safe-receive" class="swap-token-btn" aria-label="Receive asset"></select>
+                        <div id="safe-receive" class="swap-token-menu"></div>
                       </div>
                     </div>
                   </div>

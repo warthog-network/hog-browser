@@ -3096,6 +3096,40 @@ class BzMinerPolicyTest(unittest.TestCase):
             with self.assertRaises(CommandError):
                 parse_run(line)
 
+    def test_save_remembers_settings_while_the_container_is_off(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.engine_status = lambda: {"ok": True, "error": "", "items": []}
+            guard._bzminer_running = lambda: False
+            wallet = _wallet()
+            out = guard.bzminer_save(json.dumps({
+                "pool": "stratum+tcp://100.119.132.89:3456",
+                "wallet": wallet,
+                "worker": "rig1",
+                "memoryGb": "8",
+                "ocCore": "1800",
+            }))
+            self.assertTrue(out["ok"], out)
+            self.assertIn("off", out["notice"].lower())
+            saved = json.loads((Path(folder) / "bzminer.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["pool"], "stratum+tcp://100.119.132.89:3456")
+            self.assertEqual(saved["wallet"], wallet)
+            self.assertEqual(saved["ocCore"], "1800")
+            self.assertNotIn("privileged", saved)
+
+    def test_save_refuses_while_the_container_is_mining(self):
+        with tempfile.TemporaryDirectory() as folder:
+            guard = Guard(folder, docker="docker")
+            guard.engine_status = lambda: {"ok": True, "error": "", "items": []}
+            guard._bzminer_running = lambda: True
+            out = guard.bzminer_save(json.dumps({
+                "pool": "stratum+tcp://127.0.0.1:3456",
+                "wallet": _wallet(),
+            }))
+            self.assertFalse(out["ok"])
+            self.assertIn("mining", out["error"].lower())
+            self.assertFalse((Path(folder) / "bzminer.json").exists())
+
     def test_start_rejects_a_public_pool_before_docker(self):
         with tempfile.TemporaryDirectory() as folder:
             guard = Guard(folder, docker="docker")

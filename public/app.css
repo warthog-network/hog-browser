@@ -453,11 +453,27 @@ button { cursor: pointer; }
 }
 .connect-card .note { margin: 0; max-width: none; }
 .connect-card .note + .note { margin-top: 2px; }
+#browser-settings #bzminer-card,
+#browser-settings #bzminer-form.stack { max-width: 640px; }
+#bzminer-card .bz-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+#bzminer-card .bz-head .pill { flex: none; margin-top: 4px; }
 #bzminer-card .bz-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
 }
+#bzminer-card .bz-hint {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+#bzminer-card input:disabled { opacity: 0.72; }
+#bzminer-card .row button:disabled { opacity: 0.55; cursor: default; }
 #bzminer-card .settings-sub { margin-top: 2px; }
 #bzminer-card strong { display: block; margin: 2px 0 6px; }
 
@@ -1242,14 +1258,15 @@ button { cursor: pointer; }
 .hold-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 0; }
 .hold-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .hold-row .net-mark { width: 28px; height: 28px; }
-.hold-row .net-mark.is-letter {
+.net-mark.is-letter {
   display: grid;
   place-items: center;
   background-image: none;
   color: #fff;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
+.hold-row .net-mark.is-letter { font-size: 12px; }
 .hold-sym { margin: 0; font-size: 14px; font-weight: 650; }
 .hold-sub { margin: 0; color: #71717a; font-size: 11px; }
 .hold-amt {
@@ -1953,6 +1970,11 @@ details.aave-card > :not(summary) { padding: 0 10px 10px; }
 .net-mark[data-mark="btc"] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23F7931A'/%3E%3Cpath fill='%23fff' d='M22.4 14.1c.3-1.9-1.2-2.9-3.2-3.6l.6-2.6-1.6-.4-.6 2.5c-.4-.1-.8-.2-1.3-.3l.6-2.5-1.6-.4-.6 2.6c-.3-.1-.7-.2-1-.2l-2.2-.6-.4 1.7s1.2.3 1.1.3c.6.2.8.6.7.9l-.7 3 .2.1-1 4.1c-.1.2-.3.5-.7.4 0 0-1.1-.3-1.1-.3l-.8 1.8 2.1.5c.4.1.8.2 1.1.3l-.7 2.6 1.6.4.6-2.6c.4.1.8.2 1.3.3l-.6 2.6 1.6.4.7-2.6c2.7.5 4.7.3 5.6-2.1.7-2-.1-3.1-1.5-3.8 1-.2 1.8-.9 2-2.3zm-3.6 5c-.5 2-3.8.9-4.9.6l.9-3.5c1.1.3 4.5.8 4 2.9zm.5-5.1c-.4 1.8-3.2.9-4.1.7l.8-3.2c.9.2 3.8.6 3.3 2.5z'/%3E%3C/svg%3E"); }
 .net-mark[data-mark="hemi"] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23FF4600'/%3E%3Cpath fill='%23fff' d='M10 8h3.2v6.2h5.6V8H22v16h-3.2v-6.6h-5.6V24H10V8z'/%3E%3C/svg%3E"); }
 .net-mark[data-mark="sol"] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23141414'/%3E%3Cpath fill='%239945FF' d='M8.4 20.2c.2-.2.4-.3.7-.3h12.2c.4 0 .6.5.3.8l-2.2 2.2c-.2.2-.4.3-.7.3H8.6c-.4 0-.6-.5-.3-.8l.1-.2z'/%3E%3Cpath fill='%2314F195' d='M8.4 9.1c.2-.2.4-.3.7-.3h12.2c.4 0 .6.5.3.8l-2.2 2.2c-.2.2-.4.3-.7.3H8.6c-.4 0-.6-.5-.3-.8l.1-.2z'/%3E%3Cpath fill='%2314F195' d='M23.6 14.4c-.2-.2-.4-.3-.7-.3H10.7c-.4 0-.6.5-.3.8l2.2 2.2c.2.2.4.3.7.3h12.2c.4 0 .6-.5.3-.8l-2.2-2.2z'/%3E%3C/svg%3E"); }
+.net-mark[data-mark="usdc"] { background-image: url("marks/usdc.svg"); }
+.net-mark[data-mark="usdt"] { background-image: url("marks/usdt.svg"); }
+.net-mark[data-mark="wbtc"] { background-image: url("marks/wbtc.svg"); }
+.net-mark[data-mark="jup"] { background-image: url("marks/jup.svg"); }
+.net-mark[data-mark="vusd"] { background-image: url("marks/vusd.svg"); }
 .w-body { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px 12px; }
 .w-body h3 { margin: 2px 0 0; font-size: 15px; }
 .brand-run {
@@ -2276,6 +2298,7 @@ details.aave-card > :not(summary) { padding: 0 10px 10px; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   padding: 6px 10px;
   font-size: 11px;
   font-weight: 650;
@@ -2320,17 +2343,77 @@ details.aave-card > :not(summary) { padding: 0 10px 10px; }
   font: inherit;
   padding: 0;
 }
+.swap-page .swap-chip-mark { width: 14px; height: 14px; }
+.swap-page .swap-token-menu { position: relative; flex-shrink: 0; }
+.swap-page .swap-token-menu.is-open { z-index: 30; }
 .swap-page .swap-token-btn {
-  flex-shrink: 0;
-  max-width: 7.5rem;
-  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 11rem;
+  padding: 4px 10px 4px 4px;
   border-radius: 999px;
   background: rgba(39, 39, 42, 0.95);
   color: #fafafa;
   border: 1px solid rgba(113, 113, 122, 0.9);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 650;
 }
+.swap-page .swap-token-btn:disabled { cursor: default; opacity: 1; }
+.swap-token-marks { position: relative; width: 22px; height: 22px; flex: none; }
+.swap-token-marks > .net-mark { display: block; width: 22px; height: 22px; }
+.swap-token-marks > .swap-chain-mark {
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 0 0 1.5px #27272a;
+}
+.swap-token-sym { line-height: 1; }
+.swap-token-chevron { color: #71717a; font-size: 10px; line-height: 1; }
+.swap-page .swap-token-list { display: none; }
+.swap-page .swap-token-menu.is-open .swap-token-list { display: block; }
+.swap-page .swap-token-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 11rem;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid rgba(113, 113, 122, 0.9);
+  background: #18181b;
+  box-shadow: 0 16px 32px -18px rgba(0, 0, 0, 0.9);
+}
+.swap-page .swap-token-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #fafafa;
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+}
+.swap-page .swap-token-option .swap-token-marks,
+.swap-page .swap-token-option .swap-token-marks > .net-mark { width: 18px; height: 18px; }
+.swap-page .swap-token-option .swap-token-marks > .swap-chain-mark { width: 11px; height: 11px; }
+.swap-token-copy { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; line-height: 1.1; }
+.swap-token-chain { color: #a1a1aa; font-size: 10px; font-weight: 600; }
+.swap-page .swap-token-option:hover,
+.swap-page .swap-token-option.is-on {
+  background: rgba(253, 185, 19, 0.12);
+  color: #fdb913;
+}
+.swap-page .swap-token-option.is-on .swap-token-chain,
+.swap-page .swap-token-option:hover .swap-token-chain { color: rgba(253, 185, 19, 0.75); }
 .swap-flip-btn {
   width: 36px;
   height: 36px;

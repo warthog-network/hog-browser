@@ -136,22 +136,22 @@ const SOL_RPC = "https://solana.publicnode.com";
 const HOLDINGS = {
   ethereum: [
     { symbol: "ETH", name: "Ether", mark: "eth", decimals: 18, native: true },
-    { symbol: "USDC", name: "USD Coin", letter: "U", color: "#2775CA", decimals: 6, address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" },
-    { symbol: "USDT", name: "Tether", letter: "T", color: "#26A17B", decimals: 6, address: "0xdAC17F958D2ee523a2206206994597C13D831ec7" },
-    { symbol: "WBTC", name: "Wrapped Bitcoin", letter: "W", color: "#F09242", decimals: 8, address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" },
+    { symbol: "USDC", name: "USD Coin", mark: "usdc", decimals: 6, address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" },
+    { symbol: "USDT", name: "Tether", mark: "usdt", decimals: 6, address: "0xdAC17F958D2ee523a2206206994597C13D831ec7" },
+    { symbol: "WBTC", name: "Wrapped Bitcoin", mark: "wbtc", decimals: 8, address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" },
   ],
   hemi: [
     { symbol: "ETH", name: "Hemi ETH", mark: "eth", decimals: 18, native: true },
     { symbol: "hemiBTC", name: "hemiBTC", mark: "btc", decimals: 8, address: "0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28" },
     { symbol: "HEMI", name: "HEMI", mark: "hemi", decimals: 18, address: "0x99e3dE3817F6081B2568208337ef83295b7f591D" },
-    { symbol: "VUSD", name: "VUSD", letter: "V", color: "#596AEC", decimals: 18, address: "0x7A06C4AeF988e7925575C50261297a946aD204A8" },
-    { symbol: "USDT", name: "Tether", letter: "T", color: "#26A17B", decimals: 6, address: "0xbB0D083fb1be0A9f6157ec484b6C79E0A4e31C2e" },
+    { symbol: "VUSD", name: "VUSD", mark: "vusd", decimals: 18, address: "0x7A06C4AeF988e7925575C50261297a946aD204A8" },
+    { symbol: "USDT", name: "Tether", mark: "usdt", decimals: 6, address: "0xbB0D083fb1be0A9f6157ec484b6C79E0A4e31C2e" },
   ],
   solana: [
     { symbol: "SOL", name: "Solana", mark: "sol", decimals: 9, native: true },
-    { symbol: "USDC", name: "USD Coin", letter: "U", color: "#2775CA", decimals: 6, mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
-    { symbol: "USDT", name: "Tether", letter: "T", color: "#26A17B", decimals: 6, mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" },
-    { symbol: "JUP", name: "Jupiter", letter: "J", color: "#141726", decimals: 6, mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN" },
+    { symbol: "USDC", name: "USD Coin", mark: "usdc", decimals: 6, mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+    { symbol: "USDT", name: "Tether", mark: "usdt", decimals: 6, mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" },
+    { symbol: "JUP", name: "Jupiter", mark: "jup", decimals: 6, mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN" },
   ],
   bitcoin: [
     { symbol: "BTC", name: "Bitcoin", mark: "btc", decimals: 8, native: true },
@@ -2365,6 +2365,14 @@ function showSuggestions(query) {
   syncPageView();
 }
 
+function closeSwapMenus() {
+  document.querySelectorAll(".swap-token-menu.is-open").forEach((menu) => {
+    menu.classList.remove("is-open");
+    const button = menu.querySelector(".swap-token-btn");
+    if (button) button.setAttribute("aria-expanded", "false");
+  });
+}
+
 function closePopovers() {
   $("shields-panel").hidden = true;
   $("history-panel").hidden = true;
@@ -2375,6 +2383,7 @@ function closePopovers() {
   const settingsBtn = $("settings-btn");
   if (settingsBtn) settingsBtn.setAttribute("aria-expanded", "false");
   if (typeof closeKebabs === "function") closeKebabs();
+  closeSwapMenus();
   setNetOpen(false);
   syncPageView();
 }
@@ -2790,6 +2799,7 @@ function paintWartBadge() {
 }
 
 function setNetOpen(open) {
+  if (open) closeSwapMenus();
   $("net-panel").hidden = !open;
   $("net-btn").setAttribute("aria-expanded", open ? "true" : "false");
   $("net-menu").classList.toggle("is-open", open);
@@ -4778,6 +4788,9 @@ function paintJellyfinLinks(items) {
 
 let bzBusy = false;
 let bzDirty = false;
+let bzRunning = false;
+
+const BZ_FIELDS = ["bz-pool", "bz-wallet", "bz-worker", "bz-threads", "bz-memory", "bz-oc-core", "bz-oc-memory", "bz-oc-offset"];
 
 function bzField(id) {
   return ($(id) && $(id).value.trim()) || "";
@@ -4847,18 +4860,21 @@ function paintBzminer(payload) {
   const items = Array.isArray(payload.items) ? payload.items : null;
   const item = items && items.find((row) => row && row.name === "bzminer");
   if (item) card.hidden = false;
-  const running = Boolean(item && item.state === "running" && !item.reason);
+  if (items) bzRunning = Boolean(item && item.state === "running" && !item.reason);
+  const running = bzRunning;
   const start = $("bz-start");
   const stop = $("bz-stop");
+  const save = $("bz-save");
   const status = $("bz-status");
   const error = $("bz-error");
+  const state = $("bz-state");
   if (bzBusy) {
     const notice = payload.notice || "";
     if (payload.ok === false) {
       bzBusy = false;
-      if (error) error.textContent = payload.error || "Hog could not start BzMiner.";
+      if (error) error.textContent = payload.error || "Hog could not update BzMiner.";
       if (status) status.textContent = "";
-    } else if (/^Started BzMiner|^Stopped BzMiner|^BzMiner is/.test(notice)) {
+    } else if (/^Started BzMiner|^Stopped BzMiner|^BzMiner is|^Saved BzMiner/.test(notice)) {
       bzBusy = false;
       bzDirty = false;
       if (error) error.textContent = "";
@@ -4868,11 +4884,22 @@ function paintBzminer(payload) {
     }
   } else if (status && items) {
     if (payload.notice && /bzminer/i.test(payload.notice)) status.textContent = payload.notice;
-    else if (running) status.textContent = "Running. Hashrate is at 127.0.0.1:4014.";
-    else if (item) status.textContent = "Stopped. Start mining replaces this container with the settings below.";
+    else if (running) status.textContent = "Mining with these settings. Stop to change them.";
+    else status.textContent = "Off. Save keeps these settings. Start mining turns the container on.";
   }
-  if (start) start.disabled = bzBusy;
+  const locked = bzBusy || running;
+  for (const id of BZ_FIELDS) {
+    const input = $(id);
+    if (input) input.disabled = locked;
+  }
+  if (save) save.disabled = locked;
+  if (start) start.disabled = locked;
   if (stop) stop.disabled = bzBusy || !running;
+  if (state && (items || !bzBusy)) {
+    state.textContent = running ? "Mining" : "Off";
+    state.className = running ? "pill is-running" : "pill is-stopped";
+  }
+  if (items && running) bzDirty = false;
   const saved = payload.bzminer;
   if (!saved || bzDirty || bzBusy) return;
   const set = (id, value) => {
@@ -4895,40 +4922,11 @@ function bindBzminerPanel() {
   const form = $("bzminer-form");
   if (!form) return;
   form.addEventListener("input", () => { bzDirty = true; });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (bzBusy) return;
-    const spec = readBzminerForm();
-    const error = $("bz-error");
-    const status = $("bz-status");
-    if (spec.error) {
-      if (error) error.textContent = spec.error;
-      return;
-    }
-    if (error) error.textContent = "";
-    bzBusy = true;
-    if (status) status.textContent = "Turning on the mining port…";
-    paintBzminer({ bzminer: spec });
-    try {
-      const mining = await postMining({ enabled: true, address: spec.wallet });
-      paintMining(mining);
-      if (!mining.stratumListening) {
-        bzBusy = false;
-        if (error) error.textContent = mining.error || mining.lastError || "Solo mining is not listening, so BzMiner was not started.";
-        if (status) status.textContent = "";
-        paintBzminer({ bzminer: spec });
-        return;
-      }
-    } catch (err) {
-      bzBusy = false;
-      if (error) error.textContent = err instanceof Error ? err.message : String(err);
-      if (status) status.textContent = "";
-      paintBzminer({ bzminer: spec });
-      return;
-    }
-    if (status) status.textContent = "Starting BzMiner…";
-    desktopCommand(`containers:bzminer-start:${JSON.stringify(spec)}`);
-  });
+  form.addEventListener("submit", (event) => event.preventDefault());
+  const save = $("bz-save");
+  const start = $("bz-start");
+  if (save) save.addEventListener("click", () => submitBzminer(false));
+  if (start) start.addEventListener("click", () => submitBzminer(true));
   const stop = $("bz-stop");
   if (stop) {
     stop.addEventListener("click", () => {
@@ -4938,9 +4936,48 @@ function bindBzminerPanel() {
       const error = $("bz-error");
       if (error) error.textContent = "";
       if (status) status.textContent = "Stopping BzMiner…";
+      paintBzminer({});
       desktopCommand("containers:bzminer-stop");
     });
   }
+}
+
+async function submitBzminer(startMining) {
+  if (bzBusy || bzRunning) return;
+  const spec = readBzminerForm();
+  const error = $("bz-error");
+  const status = $("bz-status");
+  if (spec.error) {
+    if (error) error.textContent = spec.error;
+    return;
+  }
+  if (error) error.textContent = "";
+  bzBusy = true;
+  if (status) status.textContent = startMining ? "Turning on the mining port…" : "Saving BzMiner settings…";
+  paintBzminer({ bzminer: spec });
+  if (!startMining) {
+    desktopCommand(`containers:bzminer-save:${JSON.stringify(spec)}`);
+    return;
+  }
+  try {
+    const mining = await postMining({ enabled: true, address: spec.wallet });
+    paintMining(mining);
+    if (!mining.stratumListening) {
+      bzBusy = false;
+      if (error) error.textContent = mining.error || mining.lastError || "Solo mining is not listening, so BzMiner was not started.";
+      if (status) status.textContent = "";
+      paintBzminer({ bzminer: spec });
+      return;
+    }
+  } catch (err) {
+    bzBusy = false;
+    if (error) error.textContent = err instanceof Error ? err.message : String(err);
+    if (status) status.textContent = "";
+    paintBzminer({ bzminer: spec });
+    return;
+  }
+  if (status) status.textContent = "Starting BzMiner…";
+  desktopCommand(`containers:bzminer-start:${JSON.stringify(spec)}`);
 }
 
 function renderContainers(payload) {
@@ -5040,7 +5077,8 @@ function renderContainers(payload) {
     pills.className = "status-pills";
     const running = item.state === "running";
     const missing = item.state === "missing";
-    pills.append(statusPill(running ? "Running" : (missing ? "Not created" : (item.state || "unknown")), running ? "running" : (missing ? "missing" : "stopped")));
+    const stateLabel = item.name === "bzminer" && running ? "Mining" : (running ? "Running" : (missing ? "Not created" : (item.state || "unknown")));
+    pills.append(statusPill(stateLabel, running ? "running" : (missing ? "missing" : "stopped")));
     const runtimeLabel = item.runtime === "engine" ? "Engine" : "Desktop";
     pills.append(statusPill(runtimeLabel, item.runtime === "engine" ? "engine" : "desktop"));
     if (item.name === "jellyfin" && running) pills.append(statusPill("Tailnet", "tailnet"));
@@ -5060,7 +5098,7 @@ function renderContainers(payload) {
       line.classList.add("is-share");
       line.tabIndex = 0;
       line.setAttribute("role", "button");
-      line.title = "Pool, wallet, and start mining";
+      line.title = "Settings while it is off. On means mining.";
       line.addEventListener("click", () => openBzminerPanel());
       line.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -5110,15 +5148,21 @@ function renderContainers(payload) {
       menu.hidden = !willOpen;
       kebab.setAttribute("aria-expanded", willOpen ? "true" : "false");
     });
-    const actions = [["Command", "command"]];
-    const other = item.runtime === "engine" ? "desktop" : "engine";
-    const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
-    if (runtimeOk(other) && item.name !== "bzminer") actions.push([otherLabel, "runtime"]);
-    if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
-    actions.push(...(running
-      ? [["Stop", "stop"], ["Logs", "logs"]]
-      : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
-    if (running) actions.push(["Recreate", "recreate-prompt"]);
+    const actions = [[item.name === "bzminer" ? "Settings" : "Command", "command"]];
+    if (item.name === "bzminer") {
+      if (running && !item.reason) actions.push(["Stop", "bzminer-stop"]);
+      actions.push(["Logs", "logs"]);
+      if (!running) actions.push(["Remove", "remove"]);
+    } else {
+      const other = item.runtime === "engine" ? "desktop" : "engine";
+      const otherLabel = other === "engine" ? "Move to Engine" : "Move to Desktop";
+      if (runtimeOk(other) && item.name !== "bzminer") actions.push([otherLabel, "runtime"]);
+      if (running && !item.reason) actions.push(["SSH", "shell"], ["Save image", "commit"], ["Restart", "restart"]);
+      actions.push(...(running
+        ? [["Stop", "stop"], ["Logs", "logs"]]
+        : [["Start", "start"], ["Logs", "logs"], ["Remove", "remove"]]));
+      if (running) actions.push(["Recreate", "recreate-prompt"]);
+    }
     for (const [label, action] of actions) {
       const button = document.createElement("button");
       button.type = "button";
@@ -5170,6 +5214,17 @@ function renderContainers(payload) {
           if (advanced) advanced.open = true;
           showSettingsPage("containers");
           $("container-status").textContent = `Use Recreate in Advanced to replace ${item.name}.`;
+          return;
+        }
+        if (action === "bzminer-stop") {
+          if (bzBusy) return;
+          bzBusy = true;
+          const bzStatus = $("bz-status");
+          const bzError = $("bz-error");
+          if (bzError) bzError.textContent = "";
+          if (bzStatus) bzStatus.textContent = "Stopping BzMiner…";
+          paintBzminer({});
+          desktopCommand("containers:bzminer-stop");
           return;
         }
         if (action === "shell") beginShell(item.name);
@@ -8515,7 +8570,7 @@ function bind() {
     button.addEventListener("click", () => openUrl(button.dataset.url));
   });
   document.addEventListener("click", (event) => {
-    if (event.target.closest("#net-menu")) return;
+    if (event.target.closest("#net-menu, .swap-token-menu")) return;
     if (!event.target.closest("#bm-more, #bm-more-menu")) {
       const more = $("bm-more-menu");
       if (more && !more.hidden) {
@@ -8650,13 +8705,13 @@ function bind() {
     paintChainSlip();
     scheduleChainQuote();
   });
-  $("chain-swap-pay").addEventListener("change", () => {
-    chainForm.payId = $("chain-swap-pay").value;
+  bindMarkMenu("chain-swap-pay", (id) => {
+    chainForm.payId = id;
     closeChainConfirm();
     paintChainSwap();
   });
-  $("chain-swap-receive").addEventListener("change", () => {
-    chainForm.receiveId = $("chain-swap-receive").value;
+  bindMarkMenu("chain-swap-receive", (id) => {
+    chainForm.receiveId = id;
     closeChainConfirm();
     paintChainSwap();
   });
@@ -9048,8 +9103,8 @@ function bind() {
       paintSafeChrome();
     }
   });
-  $("safe-network").addEventListener("change", () => {
-    safeUi.network = $("safe-network").value;
+  bindMarkMenu("safe-network", (id) => {
+    safeUi.network = id;
     const first = routesOn(safeUi.network)[0];
     safeUi.payId = first ? first.id : "";
     safeUi.receiveId = "";
@@ -9057,14 +9112,14 @@ function bind() {
     paintSafeChrome();
     void refreshSafeBook();
   });
-  $("safe-pay").addEventListener("change", () => {
-    safeUi.payId = $("safe-pay").value;
+  bindMarkMenu("safe-pay", (id) => {
+    safeUi.payId = id;
     safeUi.confirm = false;
     paintSafeChrome();
     void refreshSafeBook();
   });
-  $("safe-receive").addEventListener("change", () => {
-    safeUi.receiveId = $("safe-receive").value;
+  bindMarkMenu("safe-receive", (id) => {
+    safeUi.receiveId = id;
     safeUi.confirm = false;
     paintSafeChrome();
     void refreshSafeBook();
@@ -10129,20 +10184,179 @@ function chainModel() {
   };
 }
 
-function fillTokenSelect(select, rows, value, disabled) {
-  const sig = `${disabled ? "1" : "0"}:${rows.map((row) => row.id).join("|")}`;
-  if (select.dataset.sig !== sig) {
-    select.replaceChildren();
-    for (const row of rows) {
-      const option = document.createElement("option");
-      option.value = row.id;
-      option.textContent = row.symbol;
-      select.append(option);
-    }
-    select.dataset.sig = sig;
+const SWAP_MARKS = new Set(["wart", "eth", "btc", "hemi", "sol", "usdc", "usdt", "wbtc", "jup", "vusd"]);
+
+function chainMarkKey(network) {
+  const key = String(network || "").toLowerCase();
+  if (key === "ethereum" || key === "eth") return "eth";
+  if (key === "bitcoin" || key === "btc") return "btc";
+  if (key === "hemi") return "hemi";
+  if (key === "solana" || key === "sol") return "sol";
+  if (key === "warthog" || key === "wart" || key === "mainnet" || key === "defi") return "wart";
+  return "";
+}
+
+function chainTitle(network) {
+  const key = chainMarkKey(network);
+  if (key === "eth") return "Ethereum";
+  if (key === "btc") return "Bitcoin";
+  if (key === "hemi") return "Hemi";
+  if (key === "sol") return "Solana";
+  if (key === "wart") return "Warthog";
+  return "";
+}
+
+function swapFace(row) {
+  const symbol = String(row?.symbol || "");
+  const upper = symbol.toUpperCase();
+  const raw = String(row?.mark || "");
+  let mark = "";
+  if (SWAP_MARKS.has(raw.toLowerCase())) mark = raw.toLowerCase();
+  else if (raw === "HEMIETH" || upper === "ETH") mark = "eth";
+  else if (raw === "HEMIBTC" || upper === "HEMIBTC") mark = "btc";
+  else if (upper === "BTC") mark = "btc";
+  else if (upper === "SOL") mark = "sol";
+  else if (upper === "HEMI") mark = "hemi";
+  else if (upper === "WART") mark = "wart";
+  else if (upper === "USDC") mark = "usdc";
+  else if (upper === "USDT") mark = "usdt";
+  else if (upper === "WBTC") mark = "wbtc";
+  else if (upper === "JUP") mark = "jup";
+  else if (upper === "VUSD") mark = "vusd";
+  const chain = chainMarkKey(row?.network || row?.chain || "");
+  const letter = mark ? "" : (row?.letter || upper.slice(0, 1) || "?");
+  return {
+    id: row?.id || "",
+    symbol,
+    mark,
+    letter,
+    color: row?.color || "#3f3f46",
+    chain: chain && chain !== mark ? chain : "",
+    chainLabel: row?.chainLabel || chainTitle(row?.network || row?.chain || ""),
+  };
+}
+
+function markCluster(face) {
+  const wrap = document.createElement("span");
+  wrap.className = "swap-token-marks";
+  const token = document.createElement("span");
+  token.className = "net-mark";
+  token.setAttribute("aria-hidden", "true");
+  if (face.mark) token.dataset.mark = face.mark;
+  else {
+    token.classList.add("is-letter");
+    token.style.background = face.color || "#3f3f46";
+    token.textContent = face.letter || "?";
   }
-  select.disabled = Boolean(disabled);
-  if (value && [...select.options].some((option) => option.value === value)) select.value = value;
+  wrap.append(token);
+  if (face.chain) {
+    const chain = document.createElement("span");
+    chain.className = "net-mark swap-chain-mark";
+    chain.dataset.mark = face.chain;
+    chain.setAttribute("aria-hidden", "true");
+    wrap.append(chain);
+  }
+  return wrap;
+}
+
+function bindMarkMenu(id, onPick) {
+  const host = $(id);
+  if (!host || host.dataset.menu === "1") return;
+  host.dataset.menu = "1";
+  host.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-mark-value]");
+    if (option && host.contains(option)) {
+      host.classList.remove("is-open");
+      const button = host.querySelector(".swap-token-btn");
+      if (button) button.setAttribute("aria-expanded", "false");
+      const next = option.dataset.markValue || "";
+      if (next && next !== host.dataset.value) onPick(next);
+      return;
+    }
+    const button = event.target.closest(".swap-token-btn");
+    if (!button || button.disabled || !host.contains(button)) return;
+    const was = host.classList.contains("is-open");
+    closePopovers();
+    if (!was) {
+      host.classList.add("is-open");
+      button.setAttribute("aria-expanded", "true");
+    }
+  });
+}
+
+function paintMarkMenu(host, spec) {
+  if (!host) return;
+  const rows = Array.isArray(spec.rows) ? spec.rows : [];
+  const faces = rows.map((row) => swapFace(row));
+  const disabled = Boolean(spec.disabled) || faces.length < 2;
+  const sig = `${disabled ? "1" : "0"}:${faces.map((row) => [row.id, row.symbol, row.mark, row.chain, row.chainLabel].join("~")).join("|")}`;
+  const picked = faces.find((row) => row.id === spec.value) || faces[0] || swapFace({ symbol: spec.empty || "" });
+  if (host.dataset.sig !== sig) {
+    host.dataset.sig = sig;
+    host.classList.remove("is-open");
+    host.replaceChildren();
+    host.classList.add("swap-token-menu");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "swap-token-btn";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-label", spec.label || "Token");
+    const sym = document.createElement("span");
+    sym.className = "swap-token-sym";
+    const chev = document.createElement("span");
+    chev.className = "swap-token-chevron";
+    chev.setAttribute("aria-hidden", "true");
+    chev.textContent = "▾";
+    button.append(markCluster(picked), sym, chev);
+    host.append(button);
+    if (!disabled) {
+      const list = document.createElement("div");
+      list.className = "swap-token-list";
+      list.role = "listbox";
+      list.setAttribute("aria-label", spec.label || "Token");
+      for (const face of faces) {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "swap-token-option";
+        option.role = "option";
+        option.dataset.markValue = face.id;
+        const copy = document.createElement("span");
+        copy.className = "swap-token-copy";
+        const name = document.createElement("span");
+        name.textContent = face.symbol;
+        copy.append(name);
+        if (face.chainLabel) {
+          const sub = document.createElement("span");
+          sub.className = "swap-token-chain";
+          sub.textContent = face.chainLabel;
+          copy.append(sub);
+        }
+        option.append(markCluster(face), copy);
+        list.append(option);
+      }
+      host.append(list);
+    }
+  }
+  host.dataset.value = picked.id || "";
+  const button = host.querySelector(".swap-token-btn");
+  button.disabled = disabled;
+  const chevron = button.querySelector(".swap-token-chevron");
+  if (chevron) chevron.hidden = disabled;
+  const current = button.querySelector(".swap-token-marks");
+  const next = markCluster(picked);
+  if (current) current.replaceWith(next);
+  else button.prepend(next);
+  button.querySelector(".swap-token-sym").textContent = picked.symbol;
+  host.querySelectorAll(".swap-token-option").forEach((option) => {
+    const on = option.dataset.markValue === picked.id;
+    option.classList.toggle("is-on", on);
+    option.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  if (disabled) {
+    host.classList.remove("is-open");
+    button.setAttribute("aria-expanded", "false");
+  }
 }
 
 function paintChainChips(model) {
@@ -10152,7 +10366,15 @@ function paintChainChips(model) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `swap-chip-btn${active ? " swap-chip-btn--active" : ""}`;
-    button.textContent = label;
+    const markId = attrs.chainTarget ? chainMarkKey(attrs.chainTarget) : "";
+    if (markId) {
+      const mark = document.createElement("span");
+      mark.className = "net-mark swap-chip-mark";
+      mark.dataset.mark = markId;
+      mark.setAttribute("aria-hidden", "true");
+      button.append(mark);
+    }
+    button.append(document.createTextNode(label));
     Object.assign(button.dataset, attrs);
     host.append(button);
   };
@@ -10162,7 +10384,15 @@ function paintChainChips(model) {
     if (model.choices.length === 1) {
       const span = document.createElement("span");
       span.className = "swap-chip-btn swap-chip-btn--active";
-      span.textContent = `To ${model.ends?.receiveChain || model.choices[0][1]}`;
+      const markId = chainMarkKey(model.choices[0][0]);
+      if (markId) {
+        const mark = document.createElement("span");
+        mark.className = "net-mark swap-chip-mark";
+        mark.dataset.mark = markId;
+        mark.setAttribute("aria-hidden", "true");
+        span.append(mark);
+      }
+      span.append(document.createTextNode(`To ${model.ends?.receiveChain || model.choices[0][1]}`));
       host.append(span);
     } else {
       for (const [id, label] of model.choices) add(label, { chainTarget: id }, model.target === id);
@@ -10339,18 +10569,30 @@ function paintChainSwap() {
       : "Estimate";
   paintChainChips(model);
   paintChainSlip(model);
+  const payChain = model.locked?.payNetwork || model.ends?.payChain || chainTitle(model.chain);
+  const receiveChain = model.locked?.receiveNetwork || model.ends?.receiveChain || chainTitle(model.chain);
   const payRows = model.locked
-    ? [{ id: "locked-pay", symbol: model.locked.pay.symbol }]
+    ? [{ id: "locked-pay", symbol: model.locked.pay.symbol, mark: model.locked.pay.mark, network: model.locked.payNetwork, chainLabel: payChain }]
     : model.jupPair
-      ? JUP_BRIDGE.filter((row) => row.network === model.jupPair.pay.network)
-      : model.tokens;
+      ? JUP_BRIDGE.filter((row) => row.network === model.jupPair.pay.network).map((row) => ({ ...row, chainLabel: payChain }))
+      : model.tokens.map((row) => ({ ...row, chainLabel: payChain }));
   const receiveRows = model.locked
-    ? [{ id: "locked-receive", symbol: model.locked.receive.symbol }]
+    ? [{ id: "locked-receive", symbol: model.locked.receive.symbol, mark: model.locked.receive.mark, network: model.locked.receiveNetwork, chainLabel: receiveChain }]
     : model.jupPair
-      ? JUP_BRIDGE.filter((row) => row.network === model.jupPair.receive.network)
-      : model.tokens.filter((token) => token.id !== model.pay?.id);
-  fillTokenSelect($("chain-swap-pay"), payRows, model.locked ? "locked-pay" : model.pay?.id, Boolean(model.locked));
-  fillTokenSelect($("chain-swap-receive"), receiveRows, model.locked ? "locked-receive" : model.receive?.id, Boolean(model.locked));
+      ? JUP_BRIDGE.filter((row) => row.network === model.jupPair.receive.network).map((row) => ({ ...row, chainLabel: receiveChain }))
+      : model.tokens.filter((token) => token.id !== model.pay?.id).map((row) => ({ ...row, chainLabel: receiveChain }));
+  paintMarkMenu($("chain-swap-pay"), {
+    rows: payRows,
+    value: model.locked ? "locked-pay" : model.pay?.id,
+    disabled: Boolean(model.locked),
+    label: "Pay token",
+  });
+  paintMarkMenu($("chain-swap-receive"), {
+    rows: receiveRows,
+    value: model.locked ? "locked-receive" : model.receive?.id,
+    disabled: Boolean(model.locked),
+    label: "Receive token",
+  });
   const gen = ++chainQuoteGen;
   chainAvailable = null;
   $("chain-swap-max").textContent = "Available …";
@@ -10464,20 +10706,12 @@ function safeBalance(asset) {
   return safeRows.find((row) => row.asset === String(asset || "").toUpperCase()) || { asset, available: 0, locked: 0 };
 }
 
-function fillSelect(select, rows, value) {
-  const sig = rows.map((row) => row.id).join("|");
-  if (select.dataset.sig !== sig) {
-    select.replaceChildren();
-    for (const row of rows) {
-      const option = document.createElement("option");
-      option.value = row.id;
-      option.textContent = row.symbol;
-      select.append(option);
-    }
-    select.dataset.sig = sig;
-  }
-  if (value && [...select.options].some((option) => option.value === value)) select.value = value;
-}
+const SAFE_NETWORKS = [
+  { id: "Warthog", symbol: "Warthog", mark: "wart" },
+  { id: "Ethereum", symbol: "Ethereum", mark: "eth" },
+  { id: "Bitcoin", symbol: "Bitcoin", mark: "btc" },
+  { id: "Solana", symbol: "Solana", mark: "sol" },
+];
 
 function safeReceiveText() {
   const pay = currentSafePay();
@@ -10547,7 +10781,7 @@ function paintSafeChrome() {
   if (receive && safeUi.panel !== "deposit" && safeUi.panel !== "withdraw") safeUi.receiveId = receive.id;
   const trading = safeUi.panel === "swap" || safeUi.panel === "limit";
   $("safe-title").textContent = safeUi.panel === "limit" ? "Limit" : safeUi.panel === "swap" ? "Swap" : safeUi.panel === "deposit" ? "Deposit" : "Withdraw";
-  $("safe-network").value = safeUi.network;
+  paintMarkMenu($("safe-network"), { rows: SAFE_NETWORKS, value: safeUi.network, label: "SafeTrade network" });
   for (const button of document.querySelectorAll("#wpage-safetrade [data-safe-panel]")) {
     button.classList.toggle("swap-chip-btn--active", button.dataset.safePanel === safeUi.panel);
   }
@@ -10555,9 +10789,20 @@ function paintSafeChrome() {
     const bps = button.dataset.safeSlip === "" ? null : Number(button.dataset.safeSlip);
     button.classList.toggle("swap-chip-btn--active", bps === safeUi.slippage);
   }
-  fillSelect($("safe-pay"), routesOn(safeUi.network), pay?.id);
+  paintMarkMenu($("safe-pay"), {
+    rows: routesOn(safeUi.network).map((row) => ({ ...row, chainLabel: row.network })),
+    value: pay?.id,
+    label: "Pay asset",
+  });
   $("safe-receive").hidden = !trading;
-  if (trading) fillSelect($("safe-receive"), partnerRoutes(pay), receive?.id);
+  if (!trading) $("safe-receive").classList.remove("is-open");
+  if (trading) {
+    paintMarkMenu($("safe-receive"), {
+      rows: partnerRoutes(pay).map((row) => ({ ...row, chainLabel: row.network })),
+      value: receive?.id,
+      label: "Receive asset",
+    });
+  }
   $("safe-limit-row").hidden = safeUi.panel !== "limit";
   $("safe-withdraw-row").hidden = safeUi.panel !== "withdraw";
   $("safe-slip").hidden = safeUi.panel !== "swap";

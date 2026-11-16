@@ -658,23 +658,29 @@ class SettingsUiTest(unittest.TestCase):
         self.assertIn("bzminer/bzminer:v100.81", images)
         self.assertLess(html.find('id="container-list"'), html.find('id="bzminer-card"'))
         self.assertLess(html.find('id="bzminer-card"'), html.find('id="container-advanced"'))
-        for element in ("bzminer-form", "bz-pool", "bz-wallet", "bz-worker", "bz-threads", "bz-memory", "bz-oc-core", "bz-oc-memory", "bz-oc-offset", "bz-start", "bz-stop"):
+        for element in ("bzminer-form", "bz-pool", "bz-wallet", "bz-worker", "bz-threads", "bz-memory", "bz-oc-core", "bz-oc-memory", "bz-oc-offset", "bz-save", "bz-start", "bz-stop", "bz-state"):
             self.assertIn(f'id="{element}"', html)
+        self.assertIn("When this container is on, it is mining.", html)
         self.assertIn('id="bzminer-card" class="connect-card" aria-label="BzMiner" hidden', html)
         self.assertIn("function openBzminerPanel", app)
         self.assertIn("function bindBzminerPanel", app)
+        self.assertIn("function submitBzminer", app)
         self.assertIn('kind === "bzminer"', app)
+        self.assertIn("containers:bzminer-save:", app)
         self.assertIn("containers:bzminer-start:", app)
         self.assertIn("containers:bzminer-stop", app)
         self.assertIn('item.name === "bzminer"', app)
         self.assertIn('item.name !== "bzminer"', app)
+        self.assertIn('["Stop", "bzminer-stop"]', app)
+        self.assertIn("input.disabled = locked", app)
         self.assertIn("#bzminer-card .bz-grid", css)
+        self.assertIn("bzminer-save", main)
         self.assertIn("bzminer-start", main)
         self.assertIn("bzminer-stop", main)
         bridge = (root / "electron" / "guard-bridge.py").read_text(encoding="utf-8")
         self.assertIn('"bzminer-start"', bridge)
         shell = (root / "hog").read_text(encoding="utf-8")
-        self.assertIn('"bzminer-start", "bzminer-stop"', shell)
+        self.assertIn('"bzminer-save", "bzminer-start", "bzminer-stop"', shell)
 
 
 if __name__ == "__main__":
