@@ -8,12 +8,37 @@
 // miner started as root is left alone.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { isTailnetIpv4, isTailnetIpv6 } from "./tailnet.mjs";
 
 export const MINER_SCRIPT_NAME = "start_warthog.sh";
+const SYSTEMD_RUN = "/usr/bin/systemd-run";
+
+/**
+ * Hog sets no_new_privs, so sudo it spawns cannot become root
+ * ("The no new privileges flag is set"). systemd-run asks the user
+ * session to start sudo, and that process is allowed to be setuid.
+ * @returns {[string, string[]]}
+ */
+export function minerRootArgv(helper, action, systemdRun = "") {
+  const sudoArgs = ["-n", "--", helper, action];
+  if (systemdRun) {
+    return [systemdRun, ["--user", "--pipe", "--wait", "--collect", "--quiet", "--", "sudo", ...sudoArgs]];
+  }
+  return ["sudo", sudoArgs];
+}
+
+function rootFailure(text) {
+  if (/no new privileges/i.test(text)) {
+    return "Hog could not start BzMiner as root from inside the browser.";
+  }
+  if (/password|interactive authentication/i.test(text)) {
+    return "Update Hog so the phone can start BzMiner as root, then try again.";
+  }
+  return text.slice(0, 300) || "Hog could not change BzMiner.";
+}
 export const MAX_MINER_LAUNCHERS = 6;
 const LAUNCHER_NAME = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 const POOL_LINE = /^POOL="stratum\+tcp:\/\/[^"\r\n]*"\s*$/m;
@@ -347,7 +372,7 @@ function signalPid(pid, sig) {
  * @param {{ home?: string, scriptPath?: () => string, port?: number | (() => number),
  *   uid?: number, list?: () => Array<{pid:number,ppid:number,uid:number|null,args:string[]}>,
  *   spawnImpl?: typeof spawn, logFile?: string, settleMs?: number,
- *   rootHelper?: string }} [options]
+ *   rootHelper?: string, systemdRun?: string }} [options]
  */
 export function createLocalMiner({
   home = homedir(),
@@ -359,6 +384,7 @@ export function createLocalMiner({
   logFile = join(home, ".local", "share", "hog-browser", "miner.log"),
   settleMs = 1500,
   rootHelper = "",
+  systemdRun = existsSync(SYSTEMD_RUN) ? SYSTEMD_RUN : "",
 } = {}) {
   let lastError = "";
   let busy = null;
@@ -390,12 +416,13 @@ export function createLocalMiner({
     }
   }
 
-  /** sudo -n the installed helper. The helper accepts only start or stop. */
+  /** sudo -n the installed helper, from outside Hog when systemd-run is there. */
   function runRoot(action) {
     return new Promise((resolve) => {
       let child;
+      const [cmd, args] = minerRootArgv(rootHelper, action, systemdRun);
       try {
-        child = spawnImpl("sudo", ["-n", "--", rootHelper, action], { stdio: ["ignore", "pipe", "pipe"] });
+        child = spawnImpl(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
       } catch {
         resolve({ ok: false, error: "Hog could not run the miner helper." });
         return;
@@ -405,11 +432,11 @@ export function createLocalMiner({
         return;
       }
       let err = "";
-      if (child.stderr && typeof child.stderr.on === "function") {
-        child.stderr.on("data", (chunk) => {
-          err = `${err}${chunk}`.slice(-600);
-        });
-      }
+      const take = (chunk) => {
+        err = `${err}${chunk}`.slice(-600);
+      };
+      if (child.stderr && typeof child.stderr.on === "function") child.stderr.on("data", take);
+      if (child.stdout && typeof child.stdout.on === "function") child.stdout.on("data", take);
       let settled = false;
       const finish = (result) => {
         if (settled) return;
@@ -422,14 +449,7 @@ export function createLocalMiner({
           finish({ ok: true, error: "" });
           return;
         }
-        const text = err.trim();
-        const needsInstall = /password|interactive authentication/i.test(text);
-        finish({
-          ok: false,
-          error: needsInstall
-            ? "Update Hog so the phone can start BzMiner as root, then try again."
-            : (text.slice(0, 300) || "Hog could not change BzMiner."),
-        });
+        finish({ ok: false, error: rootFailure(err.trim()) });
       });
     });
   }

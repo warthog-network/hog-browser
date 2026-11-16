@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { addMinerLauncher, applyMinerLauncher, canonicalMinerPool, classifyMinerProc, createLocalMiner, launcherView, minerScriptProblem, removeMinerLauncher, rewriteMinerPool, selectMinerLauncher } from "../miner-local.mjs";
+import { addMinerLauncher, applyMinerLauncher, canonicalMinerPool, classifyMinerProc, createLocalMiner, launcherView, minerRootArgv, minerScriptProblem, removeMinerLauncher, rewriteMinerPool, selectMinerLauncher } from "../miner-local.mjs";
 
 function tempHome() {
   return realpathSync(mkdtempSync(join(tmpdir(), "hog-miner-")));
@@ -150,9 +150,10 @@ test("the root helper starts and stops a miner owned by root, and the phone cann
     uid: 1000,
     rootHelper: helper,
     list: () => foreign,
+    systemdRun: "/usr/bin/systemd-run",
     spawnImpl: (cmd, args) => {
       calls.push([cmd, args]);
-      if (args[3] === "stop") return fake(0, () => { foreign = []; });
+      if (args.at(-1) === "stop") return fake(0, () => { foreign = []; });
       return fake(0, () => {});
     },
     logFile: join(home, "miner.log"),
@@ -165,12 +166,49 @@ test("the root helper starts and stops a miner owned by root, and the phone cann
   const started = await miner.start();
   assert.equal(started.ok, false);
   assert.match(started.error, /stopped right away/);
-  assert.deepEqual(calls, [
-    ["sudo", ["-n", "--", helper, "stop"]],
-    ["sudo", ["-n", "--", helper, "start"]],
-  ]);
+  const wrapped = (action) => ["/usr/bin/systemd-run", ["--user", "--pipe", "--wait", "--collect", "--quiet", "--", "sudo", "-n", "--", helper, action]];
+  assert.deepEqual(calls, [wrapped("stop"), wrapped("start")]);
   assert.equal(JSON.stringify(calls).includes("secretwallet"), false);
   assert.equal(calls.some((call) => call[1].includes(script)), false);
+});
+
+test("without systemd-run the helper is still sudo -n, and the no-new-privileges error stays short", async () => {
+  const home = tempHome();
+  const helper = join(home, "hog-miner-ctl");
+  writeFileSync(helper, "#!/bin/sh\nexit 0\n");
+  chmodSync(helper, 0o755);
+  assert.deepEqual(minerRootArgv(helper, "start", ""), ["sudo", ["-n", "--", helper, "start"]]);
+  const script = join(home, "start_warthog.sh");
+  writeFileSync(script, "#!/bin/sh\nexit 0\n");
+  chmodSync(script, 0o755);
+  const calls = [];
+  const miner = createLocalMiner({
+    home,
+    scriptPath: () => script,
+    port: 3456,
+    uid: 1000,
+    rootHelper: helper,
+    systemdRun: "",
+    list: () => [],
+    spawnImpl: (cmd, args) => {
+      calls.push([cmd, args]);
+      const handlers = {};
+      return {
+        stderr: { on(event, fn) { if (event === "data") fn("sudo: The \"no new privileges\" flag is set, which prevents sudo from running as root.\n"); } },
+        on(event, fn) {
+          handlers[event] = fn;
+          if (event === "exit") queueMicrotask(() => fn(1));
+        },
+      };
+    },
+    logFile: join(home, "miner.log"),
+    settleMs: 10,
+  });
+  const started = await miner.start();
+  assert.deepEqual(calls, [["sudo", ["-n", "--", helper, "start"]]]);
+  assert.equal(started.ok, false);
+  assert.match(started.error, /could not start BzMiner as root/);
+  assert.equal(started.error.includes("container"), false);
 });
 
 function writeLauncher(home, dir) {
