@@ -139,6 +139,27 @@ function shown(value) {
   return value == null || value === "" ? "—" : String(value);
 }
 
+/** BzMiner reports hashes per second. A missing reading stays a dash. */
+function formatHashrate(hps) {
+  if (hps == null || !Number.isFinite(Number(hps))) return "—";
+  const n = Number(hps);
+  const steps = [[1e12, "TH/s"], [1e9, "GH/s"], [1e6, "MH/s"], [1e3, "kH/s"]];
+  for (const [div, unit] of steps) {
+    if (n >= div) {
+      const v = n / div;
+      return `${v >= 1000 ? String(Math.round(v)) : v.toFixed(1)} ${unit}`;
+    }
+  }
+  return `${n >= 100 ? Math.round(n) : n.toFixed(1)} H/s`;
+}
+
+function rigHashrate(m, w) {
+  if (!m || m.hashrate == null || !Number.isFinite(Number(m.hashrate))) return null;
+  if (m.bzWorker) return w.worker === m.bzWorker ? Number(m.hashrate) : null;
+  if (!w.remote) return Number(m.hashrate);
+  return null;
+}
+
 function stat(label, value, cls = "") {
   return el("div", { class: `stat ${cls}` }, el("b", { text: shown(value) }), el("span", { text: label }));
 }
@@ -332,7 +353,7 @@ function paintMining(m) {
   paintChip();
   paintNode();
   const earn = $("mining-earn");
-  if (earn) earn.textContent = `Earnings — · Luck — · ${fetchedNote()}`;
+  if (earn) earn.textContent = `Shares ${shown(m.shares)} · Jobs ${shown(m.jobs)} · ${formatHashrate(m.hashrate)} · ${fetchedNote()}`;
   paintLaunchers(m);
   const where = hogLabel();
   const rows = Array.isArray(m.workers) ? m.workers.map((worker) => ({ ...worker })) : [];
@@ -347,7 +368,14 @@ function paintMining(m) {
       lastShareAt: 0,
     });
   }
-  rows.sort((a, b) => Number(Boolean(b.connected)) - Number(Boolean(a.connected)) || String(a.worker || "").localeCompare(String(b.worker || "")));
+  rows.sort((a, b) => {
+    const ar = rigHashrate(m, a);
+    const br = rigHashrate(m, b);
+    if (ar == null && br != null) return 1;
+    if (ar != null && br == null) return -1;
+    if (ar != null && br != null && br !== ar) return br - ar;
+    return Number(Boolean(b.connected)) - Number(Boolean(a.connected)) || String(a.worker || "").localeCompare(String(b.worker || ""));
+  });
   const workers = $("mining-workers");
   workers.replaceChildren();
   if (m.lastError) workers.append(el("p", { class: "error", text: m.lastError }));
@@ -359,7 +387,7 @@ function paintMining(m) {
       el("div", { class: "ct-head" },
         el("span", { class: "ct-name", text: w.worker || "(no name)" }),
         el("span", { class: `badge ${online ? "running" : ""}`, text: online ? "online" : "offline" })),
-      el("div", { class: "ct-meta", text: `— · ${shown(w.blocks)} blocks · ${shown(w.rejected)} rejected · ${shown(w.stale)} stale${w.lastShareAt ? ` · ${ago(w.lastShareAt)}` : ""}` })));
+      el("div", { class: "ct-meta", text: `${formatHashrate(rigHashrate(m, w))} · ${shown(w.shares)} shares · ${shown(w.blocks)} blocks · ${shown(w.rejected)} rejected · ${shown(w.stale)} stale${w.lastShareAt ? ` · ${ago(w.lastShareAt)}` : ""}` })));
   }
 }
 
@@ -367,16 +395,22 @@ function minerDetail(w) {
   const where = hogLabel();
   const local = !w.remote;
   const running = Boolean(lastMining && lastMining.localMiner === "running");
+  const rate = rigHashrate(lastMining, w);
+  const devices = rate != null && lastMining && Array.isArray(lastMining.devices) ? lastMining.devices : [];
   const rows = [
-    ["Hashrate", "—"],
-    ["Temperature", "—"],
-    ["Power", "—"],
+    ["Hashrate", formatHashrate(rate)],
+    ["Shares", shown(w.shares)],
     ["Blocks", shown(w.blocks)],
     ["Rejected", shown(w.rejected)],
     ["Stale", shown(w.stale)],
     ["Status", w.connected ? "online" : "offline"],
     ["Last share", w.lastShareAt ? ago(w.lastShareAt) : "—"],
   ];
+  for (const device of devices) {
+    const temp = device.tempC == null ? "—" : `${device.tempC}°C`;
+    const power = device.powerW == null ? "—" : `${device.powerW} W`;
+    rows.push([device.name || "Device", `${formatHashrate(device.hashrate)} · ${temp} · ${power}`]);
+  }
   const actions = [];
   if (local && lastMining && lastMining.localMiner === "missing") {
     actions.push(el("p", { class: "note", text: lastMining.localMinerError || `Hog could not find BzMiner on ${where}.` }));
@@ -387,7 +421,7 @@ function minerDetail(w) {
   }
   sheet(
     el("p", { class: "sheet-title", text: w.worker || "Miner" }),
-    el("p", { class: "sheet-sub", text: local ? `${where}. Per-GPU hashrate is not on this phone yet.` : `${w.worker || "This rig"} is mining through ${where}. Start and stop run on ${where}.` }),
+    el("p", { class: "sheet-sub", text: local ? (rate != null ? `${where}. Hashrate is from BzMiner on this computer.` : `${where}. Hashrate shows once BzMiner is running here.`) : `${w.worker || "This rig"} is mining through ${where}. Its hashrate stays on that computer.` }),
     el("dl", { class: "kv" }, rows.flatMap(([key, value]) => [el("dt", { text: key }), el("dd", { text: value })])),
     actions.length ? el("div", { class: "sheet-actions" }, actions) : null);
 }
@@ -552,11 +586,13 @@ function paintHome() {
     el("p", { class: "sheet-title", text: "Mining" }),
     el("p", { text: state }),
     mining ? el("div", { class: "stats" },
+      stat("Hashrate", formatHashrate(mining.hashrate), "gold"),
+      stat("Shares", mining.shares),
+      stat("Jobs", mining.jobs),
       stat("Blocks", mining.blocks, "gold"),
       stat("Rejected", mining.rejected),
       stat("Stale", mining.stale),
       stat("Miners", mining.miners, "blue"),
-      stat("Hashrate", "—"),
       stat("Luck", "—")) : null);
   $("home-earn").replaceChildren(
     el("p", { class: "sheet-title", text: "Earnings" }),
@@ -820,21 +856,23 @@ function hogSheet() {
       sub = `latency — · sync ${height} · ${miners} miners`;
     }
     if (hog.id === cfg.nodeId) sub = `mining node · ${sub}`;
+    const where = hog.host || hog.ip || "";
     return el("button", {
-      class: `hog-row${here ? " is-on" : ""}`,
+      class: `hog-row machine${here ? " is-on" : ""}`,
       type: "button",
       onclick: () => switchHog(hog.id),
     },
       el("span", { class: "hog-name", text: name }),
-      el("span", { class: "hog-sub", text: sub }));
+      here ? el("span", { class: "badge running", text: "Showing" }) : null,
+      el("span", { class: "hog-sub", text: where ? `${where} · ${sub}` : sub }));
   });
   sheet(
-    el("p", { class: "sheet-title", text: "Your hogs" }),
-    el("p", { class: "sheet-sub", text: "Switching changes what the phone shows, not where miners mine." }),
-    el("div", { class: "hog-list" }, rows),
+    el("p", { class: "sheet-title", text: "Machines" }),
+    el("p", { class: "sheet-sub", text: "Tap a computer to show it on this phone. That does not change where miners mine." }),
+    rows.length ? el("div", { class: "hog-list" }, rows) : el("p", { class: "note", text: "No computers paired yet." }),
     el("div", { class: "sheet-actions" },
-      el("button", { class: "primary", type: "button", text: "Add hog", onclick: () => { closeSheet(); showPair("", true); } }),
-      el("button", { class: "ghost", type: "button", text: "This hog", onclick: hogDetail }),
+      el("button", { class: "primary wide", type: "button", text: "Add a machine", onclick: () => { closeSheet(); showPair("", true); } }),
+      el("button", { class: "ghost", type: "button", text: "This computer", onclick: hogDetail }),
       el("button", { class: "ghost", type: "button", text: "Settings", onclick: settingsSheet })));
 }
 
@@ -845,6 +883,8 @@ function hogDetail() {
     el("p", { class: "sheet-sub", text: "Start files on this computer. The line under the name is the path. The file has to be executable and stay in the home folder." }),
     $("mining-launchers"),
     $("mining-launcher-add"),
+    el("div", { class: "sheet-actions" },
+      el("button", { class: "ghost", type: "button", text: "Machines", onclick: hogSheet })),
     el("button", { class: "danger", type: "button", text: "Forget this hog", onclick: forgetCurrent }));
   if (lastMining) paintLaunchers(lastMining);
 }
@@ -861,7 +901,7 @@ function settingsSheet() {
       el("dt", { text: "Paired" }), el("dd", { text: String((cfg.hogs || []).length) })),
     el("p", { class: "note", text: "To cut this phone off a computer, remove it there in Settings → Tailscale → Phone app. Forget only clears it on the phone." }),
     el("div", { class: "sheet-actions" },
-      el("button", { class: "ghost", type: "button", text: "Your hogs", onclick: hogSheet })));
+      el("button", { class: "ghost", type: "button", text: "Machines", onclick: hogSheet })));
 }
 
 // ---------- start ----------
@@ -877,15 +917,21 @@ function startApp() {
 
 function paintChip() {
   const chip = $("hog-chip");
-  const text = $("hog-chip-text");
-  if (!chip || !text) return;
+  const nameEl = $("hog-chip-name");
+  const metaEl = $("hog-chip-meta");
+  if (!chip || !nameEl || !metaEl) return;
   const cfg = config();
   const name = cfg.paired ? hogLabel(cfg) : "Choose a hog";
   const rigs = lastMining && Array.isArray(lastMining.workers) ? lastMining.workers.length : null;
   const rigText = rigs == null ? "— rigs" : `${rigs} ${rigs === 1 ? "rig" : "rigs"}`;
   const age = fetchedNote();
-  text.textContent = `${name} ▾ · ${rigText} · — · ${age}`;
-  chip.setAttribute("aria-label", `${name}. ${rigText}. Hashrate is not available yet. ${age}. Switch hog.`);
+  const count = (cfg.hogs || []).length;
+  nameEl.textContent = name;
+  const rate = lastMining ? formatHashrate(lastMining.hashrate) : "—";
+  metaEl.textContent = cfg.paired ? `${rigText} · ${rate} · ${age}` : "Tap to pair a computer";
+  chip.setAttribute("aria-label", count > 1
+    ? `${name}. Switch machine. ${count} computers. ${rigText}. Hashrate ${rate}. ${age}.`
+    : `${name}. Machines. ${rigText}. Hashrate ${rate}. ${age}.`);
 }
 
 function wire() {
@@ -1011,7 +1057,7 @@ const demo = (() => {
       if (route === "mining") {
         const demoMiner = miners[currentId] || "stopped";
         const demoIp = currentId === "b" ? "100.72.197.80" : "100.119.132.89";
-        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, lastError: "", localMiner: demoMiner, localMinerError: "", tailnetAddress: demoIp, stratumPort: 3456, launcherPinned: false, launcherNote: "", launchers: demoLaunchers.map((item) => ({ ...item })), workers: [
+        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, hashrate: 431645550, bzWorker: "hog-mainnet", bzPowerW: 192.6, devices: [{ name: "GPU", hashrate: 407285361, tempC: 62, powerW: 82.5 }, { name: "CPU", hashrate: 24360189, tempC: 90.2, powerW: 110.1 }], lastError: "", localMiner: demoMiner, localMinerError: "", tailnetAddress: demoIp, stratumPort: 3456, launcherPinned: false, launcherNote: "", launchers: demoLaunchers.map((item) => ({ ...item })), workers: [
           { worker: "hog-mainnet", remote: false, connected: 1, shares: 80, blocks: 55, rejected: 6, stale: 2, lastShareAt: now - 42e3 },
           { worker: "rig2-mainnet", remote: true, connected: 1, shares: 12, blocks: 6, rejected: 1, stale: 1, lastShareAt: now - 6e5 },
         ] };

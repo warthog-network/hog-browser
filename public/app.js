@@ -11509,6 +11509,19 @@ function setText(id, text) {
   if (el) el.textContent = text;
 }
 
+function formatMiningHashrate(hps) {
+  if (hps == null || !Number.isFinite(Number(hps))) return "—";
+  const n = Number(hps);
+  const steps = [[1e12, "TH/s"], [1e9, "GH/s"], [1e6, "MH/s"], [1e3, "kH/s"]];
+  for (const [div, unit] of steps) {
+    if (n >= div) {
+      const v = n / div;
+      return `${v >= 1000 ? String(Math.round(v)) : v.toFixed(1)} ${unit}`;
+    }
+  }
+  return `${n >= 100 ? Math.round(n) : n.toFixed(1)} H/s`;
+}
+
 function paintMining(state) {
   const button = $("mining-toggle");
   const status = $("mining-status");
@@ -11555,6 +11568,9 @@ function paintMining(state) {
   setText("mining-stat-node", tab);
   setText("mining-stat-height", state.height ? Number(state.height).toLocaleString() : "—");
   setText("mining-stat-miners", String(state.miners || 0));
+  setText("mining-stat-hashrate", formatMiningHashrate(state.bzminer && state.bzminer.ok ? state.bzminer.hashrate : null));
+  setText("mining-stat-shares", String(state.shares || 0));
+  setText("mining-stat-jobs", String(state.jobs || 0));
   // Blocks the node tab was slow to confirm are "checking" until the chain settles them.
   setText("mining-stat-blocks", `${state.blocks || 0}${state.pending ? ` (+${state.pending} checking)` : ""}`);
   setText("mining-stat-rejected", `${state.rejected || 0}${state.stale ? ` (${state.stale} stale)` : ""}`);

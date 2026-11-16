@@ -385,10 +385,31 @@ export function mobileMiningView(status) {
         shares: num(w.shares),
         blocks: num(w.blocks),
         rejected: num(w.rejected),
+        stale: num(w.stale),
         lastShareAt: num(w.lastShareAt),
         lastResult: String(w.lastResult || "").slice(0, 120),
       }))
       : [],
+    ...bzminerPhoneFields(s.bzminer),
+  };
+}
+
+/** Hashrate from this computer's BzMiner dashboard. No pool URL and no wallet. */
+function bzminerPhoneFields(raw) {
+  if (!raw || raw.ok !== true || !Number.isFinite(Number(raw.hashrate))) {
+    return { hashrate: null, bzWorker: "", bzPowerW: null, devices: [] };
+  }
+  const devices = Array.isArray(raw.devices) ? raw.devices.slice(0, 16).map((device) => ({
+    name: String(device?.name || "Device").slice(0, 80),
+    hashrate: Number.isFinite(Number(device?.hashrate)) ? Number(device.hashrate) : null,
+    tempC: Number.isFinite(Number(device?.tempC)) ? Number(device.tempC) : null,
+    powerW: Number.isFinite(Number(device?.powerW)) ? Number(device.powerW) : null,
+  })) : [];
+  return {
+    hashrate: Number(raw.hashrate),
+    bzWorker: String(raw.worker || "").slice(0, 64),
+    bzPowerW: Number.isFinite(Number(raw.powerW)) ? Number(raw.powerW) : null,
+    devices,
   };
 }
 
@@ -398,7 +419,7 @@ export function mobileMiningView(status) {
  *   miningAction?: (action: "start" | "stop" | "launcher", extra?: { pool?: string, op?: string, id?: string, name?: string, script?: string }) => Promise<any>,
  *   containers: (action: string, name?: string) => Promise<any>, info?: () => any }} deps
  */
-export function createMobileApi({ state, files, mining, miningAction, containers, info = () => ({}) }) {
+export function createMobileApi({ state, files, mining, prepareMining, miningAction, containers, info = () => ({}) }) {
   return async function handle(req, res) {
     const problem = mobileRequestProblem(req);
     if (problem === "peer") {
@@ -431,7 +452,10 @@ export function createMobileApi({ state, files, mining, miningAction, containers
       if (!auth.device) return sendJson(res, 401, { ok: false, error: "This phone is not paired with hog (or was removed). Pair it again." });
 
       if (route === "session" && method === "GET") return sendJson(res, 200, { ok: true, device: auth.device, hog: info() });
-      if (route === "mining" && method === "GET") return sendJson(res, 200, mobileMiningView(mining()));
+      if (route === "mining" && method === "GET") {
+        if (typeof prepareMining === "function") await prepareMining();
+        return sendJson(res, 200, mobileMiningView(await Promise.resolve(mining())));
+      }
       if (route === "mining" && method === "POST") {
         if (typeof miningAction !== "function") return sendJson(res, 404, { ok: false, error: "Not available from the phone." });
         const body = await readJson(req);

@@ -111,11 +111,15 @@ button.top-host::after { content: " ▾"; color: var(--gold); }
 .ti-home { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3 3 11h2v9h6v-6h2v6h6v-9h2L12 3z'/%3E%3C/svg%3E"); }
 .ti-box { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 3 7v10l9 5 9-5V7l-9-5zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3zM5 9.7l6 3.3v6.6l-6-3.3V9.7zm8 9.9V13l6-3.3v6.6l-6 3.3z'/%3E%3C/svg%3E"); }
 .hog-chip {
-  display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left;
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: 16px; padding: 8px 12px;
 }
-.hog-chip-text { font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
-.hog-chip .conn { margin-top: 4px; }
+.hog-chip-main { display: grid; flex: 1; min-width: 0; gap: 1px; }
+.hog-chip-name { font-weight: 700; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hog-chip-meta { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hog-chip-caret { color: var(--gold); font-size: 18px; line-height: 1; padding-left: 4px; }
+.hog-row.machine { grid-template-columns: 1fr auto; align-items: center; }
+.hog-row.machine .hog-sub { grid-column: 1 / -1; }
 button.card { width: 100%; text-align: left; }
 #home-sync, #home-mining, #home-earn { margin-bottom: 10px; }
 #mining-earn { margin: 8px 0 12px; }
@@ -204,6 +208,7 @@ button.card { width: 100%; text-align: left; }
 .sheet-title { font-weight: 700; overflow-wrap: anywhere; margin: 0 0 4px; }
 .sheet-sub { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
 .sheet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.sheet-actions .wide { grid-column: 1 / -1; }
 .preview { display: grid; place-items: center; background: var(--deep); border-radius: 12px; overflow: hidden; min-height: 80px; }
 .preview img, .preview video { max-width: 100%; max-height: 52vh; display: block; }
 .preview audio { width: 100%; margin: 16px; }

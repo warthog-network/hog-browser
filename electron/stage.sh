@@ -39,6 +39,7 @@ cp -a \
   "${ROOT}/files.mjs" \
   "${ROOT}/mobile.mjs" \
   "${ROOT}/miner-local.mjs" \
+  "${ROOT}/bz-stats.mjs" \
   "${ROOT}/jellyfin-lan.mjs" \
   "${ROOT}/opfs-polyfill.js" \
   "${ROOT}/package.json" \

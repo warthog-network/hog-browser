@@ -346,7 +346,7 @@ export function createStratumBridge({
     const key = `${name}|${socket.peer}`;
     let w = workers.get(key);
     if (!w) {
-      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, pending: 0, lastShareAt: 0, lastResult: "" };
+      w = { worker: name, address: socket.account?.address || "", source: socket.peer, remote: !isLoopback(socket.peer), connected: 0, shares: 0, blocks: 0, rejected: 0, stale: 0, pending: 0, lastShareAt: 0, lastResult: "" };
       workers.set(key, w);
       // Keep the list bounded: drop the oldest disconnected entries.
       if (workers.size > 64) {
@@ -695,6 +695,7 @@ export function createStratumBridge({
     stats.rejected += 1;
     stats.stale += 1;
     rig.rejected += 1;
+    rig.stale += 1;
     stats.lastResult = `Block ${height} was stale (that height was already taken)`;
     rig.lastResult = stats.lastResult;
     send(socket, { id, result: null, error: [21, `Stale job: block ${height} was already found`, null] });
@@ -757,7 +758,10 @@ export function createStratumBridge({
     }
     stats.rejected += 1;
     rig.rejected += 1;
-    if (outcome.stale) stats.stale += 1;
+    if (outcome.stale) {
+      stats.stale += 1;
+      rig.stale += 1;
+    }
     rollBackOptimistic(share, outcome.stale);
     if (job.optimistic && !outcome.stale && !optimistic.off) {
       // A block on predicted work was refused for some other reason: predict no more.

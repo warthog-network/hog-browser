@@ -111,6 +111,7 @@ cp -a \
   "${HB}/files.mjs" \
   "${HB}/mobile.mjs" \
   "${HB}/miner-local.mjs" \
+  "${HB}/bz-stats.mjs" \
   "${HB}/jellyfin-lan.mjs" \
   "${HB}/mobile_guard.py" \
   "${HB}/opfs-polyfill.js" \

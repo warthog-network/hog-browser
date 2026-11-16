@@ -253,6 +253,24 @@ test("mobile API: containers and mining show only what the phone needs", async (
     assert.deepEqual(mobileMiningView(null).workers, []);
     assert.deepEqual(mobileMiningView(null).launchers, []);
     assert.equal(mobileMiningView(null).localMiner, "stopped");
+    assert.equal(mobileMiningView(null).hashrate, null);
+    const rated = mobileMiningView({
+      bzminer: {
+        ok: true,
+        hashrate: 431645550,
+        worker: "hog-mainnet",
+        powerW: 10,
+        devices: [{ name: "GPU", hashrate: 400, tempC: 60, powerW: 80, user: "secret" }],
+        pools: [{ user: "wallet" }],
+      },
+      workers: [{ worker: "hog-mainnet", stale: 2 }],
+    });
+    assert.equal(rated.hashrate, 431645550);
+    assert.equal(rated.bzWorker, "hog-mainnet");
+    assert.equal(rated.devices[0].tempC, 60);
+    assert.equal(rated.workers[0].stale, 2);
+    assert.equal(JSON.stringify(rated).includes("wallet"), false);
+    assert.equal(JSON.stringify(rated).includes("secret"), false);
   });
 });
 

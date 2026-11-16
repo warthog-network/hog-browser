@@ -16,6 +16,7 @@ import { createFilesService, handleFilesRequest } from "./files.mjs";
 import { execFile, spawn } from "node:child_process";
 import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
 import { applyMinerLauncher, createLocalMiner, defaultMinerScript, launcherView, normalizeMinerConfig } from "./miner-local.mjs";
+import { readBzminerSnapshot } from "./bz-stats.mjs";
 import { canPrompt, changeFirewall, createLanForwarder, createLanState, lanAddresses, lanStatus, runUfw, ufwEnabled } from "./jellyfin-lan.mjs";
 
 const ROOT = fileURLToPath(new URL("./public/", import.meta.url));
@@ -153,6 +154,7 @@ function mobileHogInfo() {
 const MOBILE_API = createMobileApi({
   state: MOBILE_STATE,
   files: FILES,
+  prepareMining: () => refreshBzminer(),
   mining: () => miningStatus(miningEnabled),
   miningAction: (action, extra) => mobileMiningAction(action, extra),
   containers: (action, name) => mobileContainers(action, name),
@@ -413,7 +415,23 @@ function miningStatus(enabled) {
     error: miningError,
     ...localMinerFields(),
     ...minerLauncherFields(),
+    bzminer: bzminerCache.value,
   };
+}
+
+let bzminerCache = { at: 0, value: null };
+let bzminerFlight = null;
+
+/** BzMiner's dashboard on this computer. Cached for two seconds. A miss is cached too. */
+async function refreshBzminer() {
+  if (Date.now() - bzminerCache.at < 2000) return bzminerCache.value;
+  if (!bzminerFlight) {
+    bzminerFlight = readBzminerSnapshot().then((value) => {
+      bzminerCache = { at: Date.now(), value };
+      return value;
+    }).finally(() => { bzminerFlight = null; });
+  }
+  return bzminerFlight;
 }
 
 function localMinerFields() {
@@ -2621,6 +2639,7 @@ async function handle(req, res, runtime) {
 
     if (url.pathname === "/api/mining" && req.method === "GET") {
       refreshTailnetName(tailnetAddresses().find((a) => a.family === 4)?.address || "");
+      await refreshBzminer();
       send(res, 200, miningStatus(miningEnabled));
       return;
     }
