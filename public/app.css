@@ -2246,6 +2246,7 @@ details.aave-card > :not(summary) { padding: 0 10px 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .wallet, .pane, .tabbar, #wallet-edge, #tabs-edge { transition: none; }
+}
 
 .swap-page { width: 100%; }
 .swap-page * { box-sizing: border-box; }
@@ -2390,8 +2391,6 @@ details.aave-card > :not(summary) { padding: 0 10px 10px; }
   color: inherit;
   padding: 8px 10px;
 }
-}
-
 
 /* Settings → Tailscale → Phone app */
 .phone-card .row { display: flex; gap: 8px; flex-wrap: wrap; }
