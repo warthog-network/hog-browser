@@ -13,7 +13,7 @@ import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRel
 import { createStratumBridge, headHeights, isWarthogAddress, stratumPort } from "./stratum.mjs";
 import { magicDnsName, rigNameSuggestion, tailnetAddresses } from "./tailnet.mjs";
 import { createFilesService, handleFilesRequest } from "./files.mjs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createMobileApi, createMobileListener, createMobileState, mobilePort, pairUri, qrSvg } from "./mobile.mjs";
 import { applyMinerLauncher, createLocalMiner, defaultMinerScript, launcherView, normalizeMinerConfig } from "./miner-local.mjs";
 import { canPrompt, changeFirewall, createLanForwarder, createLanState, lanAddresses, lanStatus, runUfw, ufwEnabled } from "./jellyfin-lan.mjs";
@@ -1661,6 +1661,110 @@ function decodeBasic(value) {
     .replace(/&#39;/g, "'");
 }
 
+const SAFE_TRADE_RULES = [
+  [/^\/trade\/public\/tickers\/[a-z0-9]{2,32}$/, "GET", []],
+  [/^\/trade\/public\/markets\/[a-z0-9]{2,32}\/depth$/, "GET", ["limit"]],
+  [/^\/trade\/public\/currencies\/[a-z0-9]{2,16}$/, "GET", []],
+  [/^\/trade\/account\/balances\/spot$/, "GET", []],
+  [/^\/trade\/account\/deposit_address\/[a-z0-9]{2,16}$/, "GET", ["network"]],
+  [/^\/trade\/account\/beneficiaries$/, "GET", ["currency_id", "limit"]],
+  [/^\/trade\/account\/beneficiaries$/, "POST", []],
+  [/^\/trade\/account\/beneficiaries\/generate_code$/, "POST", []],
+  [/^\/trade\/account\/withdraws$/, "POST", []],
+  [/^\/trade\/market\/orders$/, "GET", ["market", "state", "limit"]],
+  [/^\/trade\/market\/orders$/, "POST", []],
+  [/^\/trade\/market\/orders\/\d{1,20}\/cancel$/, "POST", []],
+];
+
+/** Only the SafeTrade paths the wallet calls. The page signs the request; this forwards it. */
+function safeTradeTarget(url, method) {
+  if (!url.pathname.startsWith("/api/safetrade/")) return "";
+  const rest = url.pathname.slice("/api/safetrade".length);
+  const rule = SAFE_TRADE_RULES.find(([pattern, verb]) => verb === method && pattern.test(rest));
+  if (!rule) return "";
+  const query = new URLSearchParams();
+  for (const key of rule[2]) {
+    const value = url.searchParams.get(key);
+    if (value == null || value === "") continue;
+    if (!/^[\w,.-]{1,80}$/.test(value)) return "";
+    query.set(key, value);
+  }
+  const text = query.toString();
+  return `https://safe.trade/api/v2${rest}${text ? `?${text}` : ""}`;
+}
+
+const SAFE_TRADE_PY = `
+import json, sys, urllib.error, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+incoming = json.load(sys.stdin)
+data = incoming.get("body") or ""
+request = urllib.request.Request(
+    incoming["url"],
+    data=data.encode("utf-8") if data else None,
+    headers=incoming.get("headers") or {},
+    method=incoming.get("method") or "GET",
+)
+opener = urllib.request.build_opener(NoRedirect)
+try:
+    with opener.open(request, timeout=18) as res:
+        raw = res.read(200000)
+        out = {"status": res.status, "type": res.headers.get("content-type") or "", "body": raw.decode("utf-8", "replace")}
+except urllib.error.HTTPError as err:
+    raw = err.read(200000)
+    out = {"status": err.code, "type": err.headers.get("content-type") or "", "body": raw.decode("utf-8", "replace")}
+json.dump(out, sys.stdout)
+`;
+
+function pythonSafeTrade(target, method, headers, body) {
+  const python = process.env.HOG_PYTHON || "python3";
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, ["-c", SAFE_TRADE_PY], { stdio: ["pipe", "pipe", "pipe"] });
+    const chunks = [];
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("timeout"));
+    }, 20000);
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error("SafeTrade did not answer."));
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(JSON.stringify({
+      url: target,
+      method,
+      headers,
+      body: body ? body.toString("utf8") : "",
+    }));
+  });
+}
+
+function safeTradeHeaders(req) {
+  const headers = { accept: "application/json", "user-agent": BROWSER_UA };
+  const type = String(req.headers["content-type"] || "");
+  if (/^application\/json\b/i.test(type)) headers["content-type"] = "application/json";
+  for (const name of ["x-auth-apikey", "x-auth-nonce", "x-auth-signature"]) {
+    const value = req.headers[name];
+    if (value == null || value === "") continue;
+    if (typeof value !== "string" || value.length > 512 || /[\r\n]/.test(value)) return null;
+    headers[name] = value;
+  }
+  return headers;
+}
+
 async function proxyNode(base, path, method, body) {
   const target = `${base}/${path}`;
   const response = await fetch(target, {
@@ -2434,7 +2538,8 @@ async function handle(req, res, runtime) {
       return;
     }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
-    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile" || url.pathname === "/api/jellyfin-lan") && !walletRequest) {
+    const safeTrade = url.pathname.startsWith("/api/safetrade/");
+    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile" || url.pathname === "/api/jellyfin-lan" || safeTrade) && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
       return;
     }
@@ -2606,6 +2711,33 @@ async function handle(req, res, runtime) {
         "cache-control": "no-store",
       });
       res.end(upstream.text);
+      return;
+    }
+
+    if (safeTrade) {
+      const target = safeTradeTarget(url, req.method);
+      const headers = target ? safeTradeHeaders(req) : null;
+      if (!target || !headers) {
+        send(res, 404, { ok: false, error: "Not available" });
+        return;
+      }
+      let upstream;
+      try {
+        const posted = req.method === "POST" ? await readBody(req, 16_000) : null;
+        upstream = await pythonSafeTrade(target, req.method, headers, posted);
+      } catch {
+        send(res, 502, { ok: false, error: "SafeTrade did not answer." });
+        return;
+      }
+      const text = typeof upstream.body === "string" ? upstream.body : "";
+      const type = String(upstream.type || "");
+      const status = Number(upstream.status);
+      res.writeHead(Number.isInteger(status) ? status : 502, {
+        "content-type": type.split(";")[0].toLowerCase() === "application/json" ? "application/json; charset=utf-8" : "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      });
+      res.end(text);
       return;
     }
 

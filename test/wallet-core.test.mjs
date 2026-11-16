@@ -477,6 +477,18 @@ test("fixture page navigates inside Hog", async () => {
       }),
     });
     assert.equal(blocked.status, 400);
+
+    const closed = await fetch(`${base}/api/safetrade/trade/public/tickers/wartusdt`);
+    assert.equal(closed.status, 403);
+    const ticker = await fetch(`${base}/api/safetrade/trade/public/tickers/wartusdt`, { headers });
+    const quote = await ticker.json();
+    assert.equal(ticker.status, 200);
+    assert.equal(quote.id, "wartusdt");
+    assert.ok(Number(quote.last) > 0);
+    const stray = await fetch(`${base}/api/safetrade/trade/account/withdraws`, { headers });
+    assert.equal(stray.status, 404);
+    const other = await fetch(`${base}/api/safetrade/https://example.com/`, { headers });
+    assert.equal(other.status, 404);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

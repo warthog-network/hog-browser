@@ -976,14 +976,41 @@ async function encryptWalletFile(wallet, password) {
 
 // src/safetrade.js
 var SAFE_ROOT = "https://safe.trade/api/v2";
+function safeApiRoot() {
+  const loc = globalThis.location;
+  if (loc && /^https?:$/i.test(loc.protocol) && loc.host) return `${loc.origin}/api/safetrade`;
+  return SAFE_ROOT;
+}
 var SAFE_MARKETS = [
-  { id: "wartusdt", base: "WART", quote: "USDT", amountPlaces: 4, pricePlaces: 4, minBase: 0.01 },
-  { id: "btcusdt", base: "BTC", quote: "USDT", amountPlaces: 8, pricePlaces: 1, minBase: 1e-5 },
-  { id: "ethusdt", base: "ETH", quote: "USDT", amountPlaces: 3, pricePlaces: 2, minBase: 1e-5 },
-  { id: "ethbtc", base: "ETH", quote: "BTC", amountPlaces: 4, pricePlaces: 6, minBase: 1e-4 },
-  { id: "solbtc", base: "SOL", quote: "BTC", amountPlaces: 2, pricePlaces: 8, minBase: 0.1 },
-  { id: "usdcusdt", base: "USDC", quote: "USDT", amountPlaces: 4, pricePlaces: 5, minBase: 1 }
+  { id: "wartusdt", base: "WART", quote: "USDT", amountPlaces: 4, pricePlaces: 4, totalPlaces: 4, minBase: 0.01 },
+  { id: "btcusdt", base: "BTC", quote: "USDT", amountPlaces: 8, pricePlaces: 1, totalPlaces: 4, minBase: 1e-5 },
+  { id: "ethusdt", base: "ETH", quote: "USDT", amountPlaces: 3, pricePlaces: 2, totalPlaces: 4, minBase: 1e-5 },
+  { id: "ethbtc", base: "ETH", quote: "BTC", amountPlaces: 4, pricePlaces: 6, totalPlaces: 4, minBase: 1e-4 },
+  { id: "solbtc", base: "SOL", quote: "BTC", amountPlaces: 2, pricePlaces: 8, totalPlaces: 4, minBase: 0.1 },
+  { id: "usdcusdt", base: "USDC", quote: "USDT", amountPlaces: 4, pricePlaces: 5, totalPlaces: 4, minBase: 1 }
 ];
+var SAFE_ROUTES = [
+  { id: "wart:wart-key", currency: "wart", symbol: "WART", chain: "wart", network: "Warthog", blockchainKey: "wart-key", canDeposit: true, minDeposit: 20, minWithdraw: 5, fee: 0.1, confirmations: 100, decimals: 8 },
+  { id: "btc:bitcoin-key", currency: "btc", symbol: "BTC", chain: "bitcoin", network: "Bitcoin", blockchainKey: "bitcoin-key", canDeposit: true, minDeposit: 1e-4, minWithdraw: 1e-3, fee: 1e-4, confirmations: 1, decimals: 8 },
+  { id: "eth:erc20_key", currency: "eth", symbol: "ETH", chain: "ethereum", network: "Ethereum", blockchainKey: "erc20_key", canDeposit: true, minDeposit: 0.01, minWithdraw: 0.01, fee: 4e-3, confirmations: 7, decimals: 8 },
+  { id: "usdt:erc20_key", currency: "usdt", symbol: "USDT", chain: "ethereum", network: "Ethereum", blockchainKey: "erc20_key", canDeposit: true, minDeposit: 50, minWithdraw: 50, fee: 3, confirmations: 7, decimals: 6 },
+  { id: "usdc:erc20_key", currency: "usdc", symbol: "USDC", chain: "ethereum", network: "Ethereum", blockchainKey: "erc20_key", canDeposit: true, minDeposit: 50, minWithdraw: 50, fee: 7, confirmations: 7, decimals: 6 },
+  { id: "sol:spl-key", currency: "sol", symbol: "SOL", chain: "solana", network: "Solana", blockchainKey: "spl-key", canDeposit: true, minDeposit: 5e-3, minWithdraw: 0.01, fee: 9e-3, confirmations: 32, decimals: 8 },
+  { id: "usdt:spl-key", currency: "usdt", symbol: "USDT", chain: "solana", network: "Solana", blockchainKey: "spl-key", canDeposit: true, minDeposit: 0.01, minWithdraw: 2, fee: 1, confirmations: 32, decimals: 6 },
+  { id: "usdc:spl-key", currency: "usdc", symbol: "USDC", chain: "solana", network: "Solana", blockchainKey: "spl-key", canDeposit: true, minDeposit: 1e-3, minWithdraw: 1, fee: 3, confirmations: 32, decimals: 6 }
+];
+function safePair(pay, receive) {
+  const left = String(pay || "").toLowerCase();
+  const right = String(receive || "").toLowerCase();
+  if (!left || left === right) return null;
+  const market = SAFE_MARKETS.find((row) => {
+    const base = row.base.toLowerCase();
+    const quote = row.quote.toLowerCase();
+    return base === left && quote === right || base === right && quote === left;
+  });
+  if (!market) return null;
+  return { market, side: market.base.toLowerCase() === left ? "sell" : "buy" };
+}
 function hexOf(bytes2) {
   return [...new Uint8Array(bytes2)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -1023,7 +1050,7 @@ async function safeRequest({ creds, path, method = "GET", body, fetchImpl = glob
   if (body != null) headers["content-type"] = "application/json";
   let response;
   try {
-    response = await fetchImpl(`${SAFE_ROOT}${path}`, {
+    response = await fetchImpl(`${safeApiRoot()}${path}`, {
       method,
       headers,
       body: body == null ? void 0 : JSON.stringify(body)
@@ -1039,8 +1066,10 @@ async function safeRequest({ creds, path, method = "GET", body, fetchImpl = glob
     parsed = text;
   }
   if (!response.ok) {
-    const message = parsed && typeof parsed === "object" ? parsed.error || parsed.message || parsed.errors : parsed;
-    const line = typeof message === "string" ? message : "SafeTrade rejected the request.";
+    const raw = parsed && typeof parsed === "object" ? parsed.error || parsed.message || (Array.isArray(parsed.errors) ? parsed.errors.join(" ") : parsed.errors) : parsed;
+    const text2 = typeof raw === "string" ? raw : "";
+    const auth = response.status === 401 || /authz|nonce|signature|api.?key/i.test(text2) || creds && response.status === 404 && /not_found|authz|nonce|signature/i.test(text2);
+    const line = auth ? "SafeTrade rejected that API key." : text2 || "SafeTrade rejected the request.";
     const error = new Error(line);
     error.status = response.status;
     throw error;
@@ -1134,6 +1163,588 @@ async function safeCancelOrder(creds, orderId, fetchImpl = globalThis.fetch) {
     fetchImpl
   });
   return readOrder(body);
+}
+var DEPTH_LIMIT = 500;
+function readLevels(raw, highFirst) {
+  if (!Array.isArray(raw)) return [];
+  const levels = [];
+  for (const row of raw) {
+    if (!Array.isArray(row) || row.length < 2) continue;
+    const price = Number(row[0]);
+    const amount = Number(row[1]);
+    if (!(price > 0) || !(amount > 0) || !Number.isFinite(price) || !Number.isFinite(amount)) continue;
+    levels.push({ price, amount });
+  }
+  levels.sort((a, b2) => highFirst ? b2.price - a.price : a.price - b2.price);
+  return levels;
+}
+async function safeDepth(marketId, fetchImpl = globalThis.fetch) {
+  const id2 = encodeURIComponent(marketId);
+  const body = await safeRequest({
+    path: `/trade/public/markets/${id2}/depth?limit=${DEPTH_LIMIT}`,
+    fetchImpl
+  });
+  const rec = body && typeof body === "object" ? body : {};
+  const asks = readLevels(rec.asks, false);
+  const bids = readLevels(rec.bids, true);
+  if (!asks.length && !bids.length) throw new Error("SafeTrade did not return an order book.");
+  const rawAsks = Array.isArray(rec.asks) ? rec.asks.length : 0;
+  const rawBids = Array.isArray(rec.bids) ? rec.bids.length : 0;
+  return {
+    asks,
+    bids,
+    asksCapped: rawAsks >= DEPTH_LIMIT,
+    bidsCapped: rawBids >= DEPTH_LIMIT
+  };
+}
+function walkBook(depth, side, spend, referencePrice) {
+  if (!(spend > 0) || !Number.isFinite(spend)) return null;
+  const levels = side === "buy" ? depth.asks : depth.bids;
+  if (!levels.length) return null;
+  let base = 0;
+  let quote = 0;
+  let left = spend;
+  let touched = 0;
+  for (const level of levels) {
+    if (left <= spend * 1e-12) break;
+    if (side === "buy") {
+      const levelQuote = level.price * level.amount;
+      if (!(levelQuote > 0)) continue;
+      const takeQuote = Math.min(left, levelQuote);
+      base += takeQuote / level.price;
+      quote += takeQuote;
+      left -= takeQuote;
+    } else {
+      const takeBase = Math.min(left, level.amount);
+      base += takeBase;
+      quote += takeBase * level.price;
+      left -= takeBase;
+    }
+    touched += 1;
+  }
+  if (!(base > 0) || !(quote > 0)) return null;
+  const complete = left <= Math.max(spend * 1e-9, 1e-12);
+  const capped = side === "buy" ? depth.asksCapped : depth.bidsCapped;
+  const referenceIsLast = referencePrice > 0 && Number.isFinite(referencePrice);
+  const reference = referenceIsLast ? referencePrice : levels[0].price;
+  const averagePrice = quote / base;
+  const slippageBps = side === "buy" ? Math.round((averagePrice - reference) / reference * 1e4) : Math.round((reference - averagePrice) / reference * 1e4);
+  const slippageQuote = side === "buy" ? base * (averagePrice - reference) : base * (reference - averagePrice);
+  return {
+    averagePrice,
+    base,
+    quote,
+    touched,
+    complete,
+    shortBook: !complete && capped,
+    bestPrice: levels[0].price,
+    referencePrice: reference,
+    referenceIsLast,
+    slippageBps,
+    slippageQuote
+  };
+}
+function safeSlippagePrice(last, side, slippageBps, pricePlaces) {
+  if (!Number.isInteger(slippageBps) || slippageBps < 1 || slippageBps > 5e3) return null;
+  if (!(last > 0) || !Number.isInteger(pricePlaces) || pricePlaces < 0 || pricePlaces > 12) return null;
+  const factor = side === "buy" ? 1 + slippageBps / 1e4 : 1 - slippageBps / 1e4;
+  const price = Number((last * factor).toFixed(pricePlaces));
+  return price > 0 ? price : null;
+}
+function retryableOrderShape(error) {
+  if (!error || error.status !== 400 && error.status !== 422) return false;
+  return !/market_price_exceeded|insufficient_balance|less_than_min|geater_than_max|greater_than_max|non_round/i.test(error.message || "");
+}
+async function safeSwap(creds, input, fetchImpl = globalThis.fetch) {
+  const market = input.market;
+  const side = input.side;
+  let maxPrice = null;
+  let last = 0;
+  if (input.slippageBps != null || side === "buy") {
+    const ticker = await safeTicker(market.id, fetchImpl);
+    last = Number(ticker.last);
+  }
+  if (input.slippageBps != null) {
+    maxPrice = safeSlippagePrice(last, side, input.slippageBps, market.pricePlaces);
+    if (maxPrice == null) throw new Error("That slippage does not leave a usable price.");
+  }
+  const bounded = maxPrice == null ? {} : { max_price: maxPrice };
+  if (side === "sell") {
+    const amount = floorDecimals(input.amount, market.amountPlaces);
+    if (amount < market.minBase) throw new Error(`Minimum ${market.base} sell is ${market.minBase}.`);
+    const body = await safeRequest({
+      creds,
+      path: "/trade/market/orders",
+      method: "POST",
+      body: { market: market.id, side: "sell", type: "market", amount, ...bounded },
+      fetchImpl
+    });
+    return readOrder(body);
+  }
+  const places = Number.isInteger(market.totalPlaces) ? market.totalPlaces : 4;
+  const total = floorDecimals(input.amount, places);
+  if (!(total > 0)) throw new Error("Enter an amount.");
+  const postBuy = (type, extra) => safeRequest({
+    creds,
+    path: "/trade/market/orders",
+    method: "POST",
+    body: { market: market.id, side: "buy", type, ...extra, ...bounded },
+    fetchImpl
+  });
+  try {
+    return readOrder(await postBuy("market", { total }));
+  } catch (error) {
+    if (!retryableOrderShape(error)) throw error;
+    try {
+      return readOrder(await postBuy("market_quote", { total }));
+    } catch (again) {
+      if (!retryableOrderShape(again) || !(last > 0)) throw again;
+      const amount = floorDecimals(total / last, market.amountPlaces);
+      if (amount < market.minBase) throw again;
+      return readOrder(await postBuy("market", { amount }));
+    }
+  }
+}
+async function safePublicNetwork(currency, blockchainKey, fetchImpl = globalThis.fetch) {
+  try {
+    const body = await safeRequest({
+      path: `/trade/public/currencies/${encodeURIComponent(currency)}`,
+      fetchImpl
+    });
+    const networks = body && Array.isArray(body.networks) ? body.networks : [];
+    const network = networks.find((row) => row && String(row.blockchain_key ?? "") === blockchainKey);
+    if (!network) return null;
+    return {
+      minDeposit: asNumber(network.min_deposit_amount),
+      minWithdraw: asNumber(network.min_withdraw_amount),
+      fee: asNumber(network.withdraw_fee),
+      confirmations: asNumber(network.min_confirmations),
+      depositEnabled: network.deposit_enabled !== false && String(network.status ?? "active") !== "disabled",
+      withdrawEnabled: network.withdraw_enabled !== false && String(network.status ?? "active") !== "disabled"
+    };
+  } catch {
+    return null;
+  }
+}
+async function safeDepositAddress(creds, currency, blockchainKey, fetchImpl = globalThis.fetch) {
+  const body = await safeRequest({
+    creds,
+    path: `/trade/account/deposit_address/${encodeURIComponent(currency)}?network=${encodeURIComponent(blockchainKey)}`,
+    fetchImpl
+  });
+  const nested = body && body.data && typeof body.data === "object" ? body.data : null;
+  const address = String(body?.address ?? nested?.address ?? "").split("?memo=")[0].trim();
+  if (!address) throw new Error("SafeTrade did not return a deposit address.");
+  return address;
+}
+function recordList(body) {
+  if (Array.isArray(body)) return body.filter((row) => row && typeof row === "object");
+  if (body && typeof body === "object" && Array.isArray(body.data)) {
+    return body.data.filter((row) => row && typeof row === "object");
+  }
+  return [];
+}
+function beneficiaryDestination(row) {
+  const data = row.data && typeof row.data === "object" ? row.data : null;
+  const nested = row.beneficiary && typeof row.beneficiary === "object" ? row.beneficiary : null;
+  const raw = row.address ?? row.rid ?? data?.address ?? nested?.address ?? "";
+  return String(raw).split("?memo=")[0].trim().toLowerCase();
+}
+function sameCoinAddress(row, address, blockchainKey) {
+  const chain2 = String(row.blockchain_key ?? "");
+  return beneficiaryDestination(row) === address.toLowerCase() && (chain2 === "" || chain2 === blockchainKey);
+}
+function usableBeneficiary(row) {
+  const state = String(row.state ?? "active").toLowerCase();
+  return state !== "pending" && state !== "disabled" && state !== "archived";
+}
+function readBeneficiaryId(body) {
+  const nested = body && body.data && typeof body.data === "object" ? body.data : null;
+  return asNumber(body?.id ?? nested?.id);
+}
+function readWithdraw(body) {
+  const rec = body && typeof body === "object" ? body : {};
+  return {
+    id: String(rec.id ?? ""),
+    status: String(rec.status ?? rec.state ?? ""),
+    txid: rec.txid != null ? String(rec.txid) : "",
+    amount: asNumber(rec.amount),
+    fee: asNumber(rec.fee)
+  };
+}
+async function listCoinBeneficiaries(creds, currency, fetchImpl) {
+  return recordList(await safeRequest({
+    creds,
+    path: `/trade/account/beneficiaries?currency_id=${encodeURIComponent(currency)}&limit=100`,
+    fetchImpl
+  }));
+}
+async function postCoinWithdraw(creds, coin, payload, fetchImpl, includeChain) {
+  const send = (amount2) => safeRequest({
+    creds,
+    path: "/trade/account/withdraws",
+    method: "POST",
+    body: {
+      ...payload,
+      amount: amount2,
+      currency: coin.currency,
+      ...includeChain ? { blockchain_key: coin.blockchainKey } : {}
+    },
+    fetchImpl
+  });
+  const amount = asNumber(payload.amount);
+  try {
+    return readWithdraw(await send(amount));
+  } catch (error) {
+    const reduced = floorDecimals(amount - coin.fee, coin.decimals);
+    if (!/insufficient|fee/i.test(error.message || "") || reduced < coin.min) throw error;
+    return readWithdraw(await send(reduced));
+  }
+}
+async function safeWithdrawCoin(creds, coin, input, fetchImpl = globalThis.fetch) {
+  const asset = String(coin.currency || "").toUpperCase();
+  const amount = floorDecimals(Number(input.amount), coin.decimals);
+  const address = String(input.address || "").trim();
+  if (!(amount >= coin.min)) throw new Error(`Minimum ${asset} withdraw is ${coin.min}.`);
+  if (!address) throw new Error(`This wallet has no ${asset} address to withdraw to.`);
+  const emailCode = String(input.emailCode || "").trim();
+  const otpCode = String(input.otpCode || "").trim();
+  const listed = await listCoinBeneficiaries(creds, coin.currency, fetchImpl);
+  const matches = listed.filter((row) => sameCoinAddress(row, address, coin.blockchainKey));
+  const active = matches.find(usableBeneficiary);
+  if (active) {
+    const beneficiaryId2 = asNumber(active.id);
+    if (!(beneficiaryId2 > 0)) throw new Error("SafeTrade listed this address without an id.");
+    try {
+      return await postCoinWithdraw(creds, coin, {
+        amount,
+        beneficiary_id: beneficiaryId2,
+        ...otpCode ? { otp_code: otpCode } : {}
+      }, fetchImpl, false);
+    } catch (error) {
+      if (/missing_otp|invalid_otp|otp/i.test(error.message || "")) {
+        return {
+          needCode: true,
+          message: "This address is already saved. Enter the 2FA code from your authenticator, then withdraw again."
+        };
+      }
+      throw error;
+    }
+  }
+  if (matches.some((row) => String(row.state ?? "").toLowerCase() === "pending")) {
+    throw new Error("SafeTrade has this address saved but it is not active yet. Confirm it in the SafeTrade address book, then withdraw again.");
+  }
+  if (!emailCode) {
+    await safeRequest({
+      creds,
+      path: "/trade/account/beneficiaries/generate_code",
+      method: "POST",
+      body: {
+        type: "email",
+        currency_id: coin.currency,
+        blockchain_key: coin.blockchainKey,
+        data: { address }
+      },
+      fetchImpl
+    });
+    return {
+      needCode: true,
+      message: `SafeTrade will not send ${asset} until this address is in your address book. A code is in your email. Enter that code and your 2FA code, then withdraw again.`
+    };
+  }
+  if (!otpCode) {
+    return {
+      needCode: true,
+      message: "Enter your 2FA code and withdraw again to save this address. Nothing is sent until that succeeds."
+    };
+  }
+  let created;
+  try {
+    created = await safeRequest({
+      creds,
+      path: "/trade/account/beneficiaries",
+      method: "POST",
+      body: {
+        label: coin.bookLabel || asset,
+        currency_id: coin.currency,
+        blockchain_key: coin.blockchainKey,
+        email_code: emailCode,
+        otp_code: otpCode,
+        data: { address }
+      },
+      fetchImpl
+    });
+  } catch (error) {
+    const message = error.message || "";
+    if (/2fa_disabled/i.test(message)) {
+      throw new Error("SafeTrade requires 2FA on the account before it will save a withdrawal address. Turn on 2FA in SafeTrade, then try again.");
+    }
+    if (/invalid_code|missing_email_code/i.test(message)) {
+      return {
+        needCode: true,
+        clearEmail: true,
+        message: "That email code cannot save this address. SafeTrade can send a new one. Clear the email code and withdraw again."
+      };
+    }
+    if (/invalid_otp|missing_otp/i.test(message)) {
+      return { needCode: true, message: "SafeTrade rejected the 2FA code. Enter the current authenticator code and withdraw again." };
+    }
+    throw error;
+  }
+  const beneficiaryId = readBeneficiaryId(created);
+  const state = String(created?.state ?? created?.data?.state ?? "").toLowerCase();
+  if (state === "pending" || !(beneficiaryId > 0)) {
+    return {
+      needCode: true,
+      message: "SafeTrade saved this address, but it is not active yet. Confirm it in the SafeTrade address book, then withdraw again."
+    };
+  }
+  try {
+    return await postCoinWithdraw(creds, coin, {
+      amount,
+      beneficiary_id: beneficiaryId,
+      otp_code: otpCode
+    }, fetchImpl, false);
+  } catch (error) {
+    if (/invalid_otp|missing_otp/i.test(error.message || "")) {
+      return {
+        needCode: true,
+        message: "This address is saved in the SafeTrade address book. Enter a new 2FA code and withdraw again."
+      };
+    }
+    throw error;
+  }
+}
+
+// src/chain-swap.js
+var ETH_WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+var SUSHI_ROUTER = "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F";
+var HEMI_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+var WSOL_MINT = "So11111111111111111111111111111111111111112";
+var JUPITER_QUOTE = "https://lite-api.jup.ag/swap/v1/quote";
+var HEMI_SUSHI_QUOTE = "https://api.sushi.com/swap/v7/43111";
+var JUP_BRIDGE_QUOTE = "https://bridge-api.gum.ag/api/bridge/quote";
+var ETH = { symbol: "ETH", mark: "ETH" };
+var HEMI_ETH = { symbol: "ETH", mark: "HEMIETH" };
+var BTC = { symbol: "BTC", mark: "BTC" };
+var HEMI_BTC = { symbol: "hemiBTC", mark: "HEMIBTC" };
+var SOL = { symbol: "SOL", mark: "SOL" };
+var JUP_BRIDGE = [
+  { id: "bridge:ethereum:ETH", network: "ethereum", symbol: "ETH", name: "Ether", address: "0x0000000000000000000000000000000000000000", decimals: 18, native: true },
+  { id: "bridge:ethereum:USDC", network: "ethereum", symbol: "USDC", name: "USD Coin", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6, native: false },
+  { id: "bridge:ethereum:USDT", network: "ethereum", symbol: "USDT", name: "Tether", address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", decimals: 6, native: false },
+  { id: "bridge:solana:SOL", network: "solana", symbol: "SOL", name: "Solana", address: "11111111111111111111111111111111", decimals: 9, native: true },
+  { id: "bridge:solana:USDC", network: "solana", symbol: "USDC", name: "USD Coin", address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6, native: false },
+  { id: "bridge:solana:USDT", network: "solana", symbol: "USDT", name: "Tether", address: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", decimals: 6, native: false }
+];
+function lockedSwapRoute(input) {
+  const withdraw = input.direction === "withdraw";
+  const stargate = input.chain === "hemi" && input.mode === "swap" && input.venue === "stargate";
+  const ethTunnel = input.chain === "hemi" && input.mode === "tunnel" && input.target === "eth" || input.chain === "ethereum" && input.mode === "tunnel" && input.target === "hemi";
+  if (stargate || ethTunnel) {
+    return {
+      pay: withdraw ? HEMI_ETH : ETH,
+      receive: withdraw ? ETH : HEMI_ETH,
+      subtitle: stargate ? withdraw ? "ETH \xB7 Hemi \u2192 Ethereum" : "ETH \xB7 Ethereum \u2192 Hemi" : withdraw ? "hemiETH \u2192 ETH" : "ETH \u2192 hemiETH",
+      payNetwork: withdraw ? "Hemi" : "Ethereum",
+      receiveNetwork: withdraw ? "Ethereum" : "Hemi",
+      hint: stargate ? "Stargate moves native ETH between Ethereum and Hemi. The message fee is on top of the amount." : "The Hemi standard bridge moves ETH 1 for 1. A withdrawal is proved on Ethereum, then finalized after the wait."
+    };
+  }
+  if (input.chain === "solana" && input.mode === "tunnel" && input.target === "bitcoin") {
+    return {
+      pay: withdraw ? BTC : SOL,
+      receive: withdraw ? SOL : BTC,
+      subtitle: withdraw ? "Bitcoin \u2192 Solana" : "Solana \u2192 Bitcoin",
+      payNetwork: withdraw ? "Bitcoin" : "Solana",
+      receiveNetwork: withdraw ? "Solana" : "Bitcoin",
+      hint: "This tunnel moves SOL and BTC between Solana and Bitcoin."
+    };
+  }
+  const btcTunnel = input.chain === "bitcoin" || input.chain === "hemi" && input.mode === "tunnel" && input.target === "btc";
+  if (btcTunnel) {
+    return {
+      pay: withdraw ? HEMI_BTC : BTC,
+      receive: withdraw ? BTC : HEMI_BTC,
+      subtitle: withdraw ? "hemiBTC \u2192 BTC" : "BTC \u2192 hemiBTC",
+      payNetwork: withdraw ? "Hemi" : "Bitcoin",
+      receiveNetwork: withdraw ? "Bitcoin" : "Hemi",
+      hint: "The Hemi vault tunnels Bitcoin. hemiBTC mints after confirmations, and a withdrawal pays Bitcoin back."
+    };
+  }
+  return null;
+}
+function tunnelEnds(input) {
+  if (input.mode !== "tunnel") return null;
+  const forward = forwardChains(input.chain, input.target);
+  if (!forward) return null;
+  const withdraw = input.direction === "withdraw";
+  const payChain = withdraw ? forward.to : forward.from;
+  const receiveChain = withdraw ? forward.from : forward.to;
+  return { payChain, receiveChain, subtitle: `${payChain} \u2192 ${receiveChain}` };
+}
+function forwardChains(chain2, target) {
+  if (chain2 === "bitcoin" || chain2 === "hemi" && target === "btc") return { from: "Bitcoin", to: "Hemi" };
+  if (chain2 === "hemi" && target === "eth" || chain2 === "ethereum" && target === "hemi") return { from: "Ethereum", to: "Hemi" };
+  if (chain2 === "ethereum" && target === "solana") return { from: "Ethereum", to: "Solana" };
+  if (chain2 === "solana" && target === "ethereum") return { from: "Solana", to: "Ethereum" };
+  if (chain2 === "solana" && target === "bitcoin") return { from: "Solana", to: "Bitcoin" };
+  return null;
+}
+function jupTunnelPair(input) {
+  const all = [...input.ethereum, ...input.solana];
+  const pickedPay = all.find((row) => row.id === input.payId);
+  const pickedReceive = all.find((row) => row.id === input.receiveId);
+  const otherSide = (asset) => asset.network === "ethereum" ? input.solana[0] : input.ethereum[0];
+  if (pickedPay && pickedReceive && pickedPay.network !== pickedReceive.network) {
+    return { pay: pickedPay, receive: pickedReceive };
+  }
+  if (pickedPay) {
+    const receive2 = otherSide(pickedPay);
+    if (!receive2) throw new Error("The bridge has no assets.");
+    return { pay: pickedPay, receive: receive2 };
+  }
+  if (pickedReceive) {
+    const pay2 = otherSide(pickedReceive);
+    if (!pay2) throw new Error("The bridge has no assets.");
+    return { pay: pay2, receive: pickedReceive };
+  }
+  const pay = input.page === "solana" ? input.solana[0] : input.ethereum[0];
+  const receive = input.page === "solana" ? input.ethereum[0] : input.solana[0];
+  if (!pay || !receive) throw new Error("The bridge has no assets.");
+  return { pay, receive };
+}
+function counterpartToken(tokens, pay, receiveId, chain2) {
+  const chosen = tokens.find((token) => token.id === receiveId && token.id !== pay?.id);
+  if (chosen) return chosen;
+  if (chain2 === "hemi") {
+    const usdt = tokens.find((token) => token.symbol === "USDT" && token.id !== pay?.id);
+    if (usdt) return usdt;
+  }
+  return tokens.find((token) => token.id !== pay?.id);
+}
+function sushiPath(pay, receive, weth) {
+  const payAddr = pay.native ? weth : pay.address;
+  const receiveAddr = receive.native ? weth : receive.address;
+  if (pay.native && receive.native) throw new Error("Choose two different assets.");
+  if (!pay.native && !receive.native && String(pay.address).toLowerCase() === String(receive.address).toLowerCase()) {
+    throw new Error("Choose two different assets.");
+  }
+  if (pay.native) return [weth, receiveAddr];
+  if (receive.native) return [payAddr, weth];
+  return [payAddr, weth, receiveAddr];
+}
+function padWord(value) {
+  return BigInt(value).toString(16).padStart(64, "0");
+}
+function encodeGetAmountsOut(amount, path) {
+  const addresses = path.map((addr) => String(addr).toLowerCase().replace(/^0x/, "").padStart(64, "0")).join("");
+  return `0xd06ca61f${padWord(amount)}${padWord(64)}${padWord(path.length)}${addresses}`;
+}
+function decodeAmountsOut(hex2) {
+  const body = String(hex2 || "").replace(/^0x/, "");
+  const words2 = body.match(/.{64}/g) || [];
+  if (words2.length < 3) return 0n;
+  const length = Number(BigInt(`0x${words2[1]}`));
+  if (!Number.isInteger(length) || length < 1 || words2.length < 2 + length) return 0n;
+  return BigInt(`0x${words2[1 + length]}`);
+}
+async function readJson(response) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+async function quoteJupiter({ inputMint, outputMint, amount, slippageBps, fetchImpl = globalThis.fetch }) {
+  if (inputMint === outputMint) throw new Error("Choose two different assets.");
+  const params = new URLSearchParams({
+    inputMint,
+    outputMint,
+    amount: String(amount),
+    slippageBps: String(slippageBps)
+  });
+  const response = await fetchImpl(`${JUPITER_QUOTE}?${params}`);
+  const body = await readJson(response);
+  if (!response.ok || !body || body.error || !body.outAmount) {
+    throw new Error(body?.error || body?.message || "Jupiter could not quote that swap.");
+  }
+  const labels = Array.isArray(body.routePlan) ? body.routePlan.map((leg) => leg?.swapInfo?.label).filter(Boolean) : [];
+  return {
+    outAmount: String(body.outAmount),
+    minOut: String(body.otherAmountThreshold || body.outAmount),
+    impactPct: body.priceImpactPct || "0",
+    route: labels.length ? labels.join(" \u2192 ") : "Jupiter"
+  };
+}
+async function quoteHemiSushi({ tokenIn, tokenOut, amount, slippageBps, sender, fetchImpl = globalThis.fetch }) {
+  if (String(tokenIn).toLowerCase() === String(tokenOut).toLowerCase()) throw new Error("Choose two different assets.");
+  const url = new URL(HEMI_SUSHI_QUOTE);
+  url.searchParams.set("tokenIn", tokenIn);
+  url.searchParams.set("tokenOut", tokenOut);
+  url.searchParams.set("amount", String(amount));
+  url.searchParams.set("maxSlippage", String(slippageBps / 1e4));
+  url.searchParams.set("sender", sender);
+  const response = await fetchImpl(url.toString());
+  const body = await readJson(response);
+  if (!body || typeof body !== "object") throw new Error("Sushi returned an incomplete quote.");
+  if (!response.ok || body.status !== "Success") {
+    throw new Error(body.status === "NoWay" ? "Sushi has no route for that amount on Hemi." : "Sushi returned an incomplete quote.");
+  }
+  let outAmount = 0n;
+  try {
+    outAmount = BigInt(String(body.assumedAmountOut || "0"));
+  } catch {
+    outAmount = 0n;
+  }
+  if (outAmount <= 0n) throw new Error("Sushi returned an empty quote.");
+  return { outAmount: outAmount.toString(), route: "SushiSwap" };
+}
+async function quoteJupBridge({ pay, receive, amount, ethAddress, solAddress, slippageBps, fetchImpl = globalThis.fetch }) {
+  if (pay.network === receive.network) throw new Error("Pick one asset on Ethereum and one on Solana.");
+  const ethToSol = pay.network === "ethereum";
+  const response = await fetchImpl(JUP_BRIDGE_QUOTE, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      inputToken: {
+        chainId: pay.network === "ethereum" ? "evm:1" : "solana:mainnet",
+        address: pay.address,
+        symbol: pay.symbol,
+        name: pay.name,
+        decimals: pay.decimals,
+        isNative: pay.native
+      },
+      outputToken: {
+        chainId: receive.network === "ethereum" ? "evm:1" : "solana:mainnet",
+        address: receive.address,
+        symbol: receive.symbol,
+        name: receive.name,
+        decimals: receive.decimals,
+        isNative: receive.native
+      },
+      amount: String(amount),
+      slippageBps,
+      execution: {
+        sourceAddress: ethToSol ? ethAddress : solAddress,
+        recipient: ethToSol ? solAddress : ethAddress
+      }
+    })
+  });
+  const body = await readJson(response);
+  if (response.status === 429) throw new Error("Bridge quotes are busy. Wait a moment and try again.");
+  if (!response.ok || !body || !Array.isArray(body.routes)) {
+    const minimum = body && (body.minimumUsd ?? body.minimum);
+    if (minimum != null) throw new Error(`Minimum bridge amount is $${minimum}.`);
+    throw new Error("No route is available for that amount.");
+  }
+  const routes = body.routes.filter((row) => row && (row.provider === "relay" || row.provider === "mayan") && /^\d+$/.test(String(row.outAmount || "")));
+  routes.sort((a, b2) => BigInt(a.outAmount) > BigInt(b2.outAmount) ? -1 : 1);
+  const best = routes[0];
+  if (!best) throw new Error("No route is available for that amount.");
+  const label = typeof best.routeLabel === "string" && best.routeLabel.trim() ? best.routeLabel.trim() : best.provider === "relay" ? "Relay" : "Mayan";
+  return { outAmount: String(best.outAmount), minOut: String(best.minOutAmount || best.outAmount), route: label };
 }
 
 // node_modules/ethers/lib.esm/ethers.js
@@ -24598,7 +25209,7 @@ var wordlists = {
 var AAVE_MAIN_SPOKE = "0x94e7A5dCbE816e498b89aB752661904E2F56c485";
 var AAVE_CORE_HUB = "0xCca852Bc40e560adC3b1Cc58CA5b55638ce826c9";
 var ETH_RPC = "https://ethereum.publicnode.com";
-var ETH_WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+var ETH_WETH2 = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 var WAD = 10n ** 18n;
 var RAY = 10n ** 27n;
 var MIN_SAFE_WAD = 15n * 10n ** 17n;
@@ -24607,7 +25218,7 @@ var FULL_REPAY_BUFFER_BPS = 10005n;
 var GAS_RESERVE_UNITS = 600000n;
 var GAS_RESERVE_FLOOR = 3000000000000000n;
 var AAVE_RESERVES = [
-  { id: 0, symbol: "WETH", underlying: ETH_WETH, decimals: 18, collateral: true, borrow: true },
+  { id: 0, symbol: "WETH", underlying: ETH_WETH2, decimals: 18, collateral: true, borrow: true },
   { id: 1, symbol: "wstETH", underlying: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", decimals: 18, collateral: true, borrow: false },
   { id: 2, symbol: "weETH", underlying: "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee", decimals: 18, collateral: true, borrow: false },
   { id: 3, symbol: "WBTC", underlying: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", decimals: 8, collateral: true, borrow: true },
@@ -24809,10 +25420,10 @@ async function approvalSteps(reserve, owner, amount, fetchImpl) {
   return steps;
 }
 function wrapStep(amount, label) {
-  return { label, to: ETH_WETH, data: wethIface.encodeFunctionData("deposit"), value: amount };
+  return { label, to: ETH_WETH2, data: wethIface.encodeFunctionData("deposit"), value: amount };
 }
 function unwrapStep(amount, label) {
-  return { label, to: ETH_WETH, data: wethIface.encodeFunctionData("withdraw", [amount]) };
+  return { label, to: ETH_WETH2, data: wethIface.encodeFunctionData("withdraw", [amount]) };
 }
 async function planSupply(owner, market, reserve, amount, fromEth = false, fetchImpl = globalThis.fetch) {
   if (!reserve.collateral) throw new Error(`${reserve.symbol} is not offered as collateral here.`);
@@ -27196,12 +27807,21 @@ async function maxSendableSol(address, fetchImpl = globalThis.fetch) {
 export {
   AAVE_CORE_HUB,
   AAVE_MAIN_SPOKE,
+  ETH_WETH,
+  HEMI_NATIVE,
+  JUP_BRIDGE,
   SAFE_MARKETS,
+  SAFE_ROUTES,
+  SUSHI_ROUTER,
+  WSOL_MINT,
   assertBtcAddress,
   assertSolAddress,
   base64UrlToBytes,
   bytesToBase64Url,
+  counterpartToken,
+  decodeAmountsOut,
   decryptWalletFile,
+  encodeGetAmountsOut,
   encryptWalletFile,
   fetchBtcFeeRate,
   fetchBtcUtxos,
@@ -27213,7 +27833,9 @@ export {
   healthToNumber,
   historyFilters,
   historyItemsFromNode,
+  jupTunnelPair,
   loadAaveMarket,
+  lockedSwapRoute,
   matchesHistoryFilter,
   maxSafeBorrow,
   maxSafeWithdraw,
@@ -27227,6 +27849,9 @@ export {
   planRepay,
   planSupply,
   planWithdraw,
+  quoteHemiSushi,
+  quoteJupBridge,
+  quoteJupiter,
   rateToPercent,
   readChainActivity,
   rewardWindowCounts,
@@ -27236,10 +27861,20 @@ export {
   safeBalances,
   safeBorrowHeadroomValue,
   safeCancelOrder,
+  safeDepositAddress,
+  safeDepth,
   safeLimitOrder,
   safeOpenOrders,
+  safePair,
+  safePublicNetwork,
   safeSignature,
+  safeSlippagePrice,
+  safeSwap,
   safeTicker,
+  safeWithdrawCoin,
   sealWithPrf,
-  usdOf
+  sushiPath,
+  tunnelEnds,
+  usdOf,
+  walkBook
 };

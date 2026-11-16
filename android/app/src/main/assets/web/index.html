@@ -17,7 +17,7 @@
     <p class="sub">Your home server, from your phone. Works over Tailscale.</p>
     <ol class="steps">
       <li>On the computer: hog → Settings → Tailscale → <b>Phone app</b> → Turn on → <b>Pair a phone</b>.</li>
-      <li>Here: tap <b>Scan QR</b>, or type the address and code hog shows.</li>
+      <li>Here: tap <b>Scan QR</b>, or type the address and code hog shows. Pair each computer you want to control.</li>
     </ol>
     <button id="scan-btn" class="primary big" type="button">Scan QR</button>
     <form id="pair-form" class="pair-form" autocomplete="off">
@@ -35,6 +35,7 @@
       <button class="primary" type="submit" id="pair-submit">Pair</button>
     </form>
     <p id="pair-error" class="error" role="status"></p>
+    <button id="pair-back" class="ghost big" type="button" hidden>Back to your hogs</button>
     <p id="app-version" class="note app-version"></p>
   </main>
 
@@ -44,7 +45,7 @@
       <img src="hog-logo.svg" alt="" class="top-logo">
       <div class="top-title">
         <span class="brand">HOG</span>
-        <span id="top-host" class="top-host"></span>
+        <button id="top-host" class="top-host" type="button"></button>
       </div>
       <span id="conn-dot" class="conn" title="Connection"></span>
       <button id="menu-btn" class="icon-btn" type="button" aria-label="Settings">⋮</button>
@@ -71,11 +72,20 @@
     <section id="tab-mining" class="tab" data-tab="mining" hidden>
       <div class="tab-head"><h2>Mining</h2><button class="ghost" data-refresh="mining" type="button">Refresh</button></div>
       <div id="mining-status" class="card status-card"></div>
+      <div id="mining-node" class="card"></div>
       <div id="mining-actions" class="ct-actions"></div>
       <div id="mining-stats" class="stats"></div>
+      <h3>Start file</h3>
+      <p class="note">Pick a saved start_warthog.sh. The line under the name is its path on this computer. The file has to be executable and stay in the home folder.</p>
+      <div id="mining-launchers" class="cards"></div>
+      <form id="mining-launcher-add" class="launcher-add">
+        <label>Name<input id="mining-launcher-name" maxlength="40" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name"></label>
+        <label>Path<input id="mining-launcher-path" class="mono" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="~/Downloads/bzminer_v100.02b6_linux/start_warthog.sh"></label>
+        <button class="ghost" type="submit">Save start file</button>
+        <p id="mining-launcher-note" class="note" role="status"></p>
+      </form>
       <h3>Rigs</h3>
       <div id="mining-workers" class="cards"></div>
-      <p class="note">Starts BzMiner on this computer while the phone is connected to hog.</p>
     </section>
 
     <section id="tab-files" class="tab" data-tab="files" hidden>

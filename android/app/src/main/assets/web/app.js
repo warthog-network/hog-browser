@@ -14,6 +14,9 @@ let current = "containers";
 let timers = {};
 let files = { roots: [], root: "shares", path: "", entries: [], q: "" };
 let uploads = new Map();
+let cfgCache = { paired: false, hogs: [] };
+let scannedIp = "";
+let lastMining = null;
 
 // ---------- bridge ----------
 window.hogNative = {
@@ -32,7 +35,7 @@ window.hogNative = {
     else if (ev.type === "toast") toast(ev.text, Boolean(ev.error));
   },
   scanned(text) { applyScan(text); },
-  resume() { refresh(current); },
+  resume() { config(); refresh(current); },
 };
 
 function call(fn, ...args) {
@@ -112,41 +115,72 @@ function when(ms) {
 
 // ---------- pairing ----------
 function config() {
-  if (!native) return demo.config();
-  try { return JSON.parse(native.state()); } catch { return { paired: false }; }
+  if (!native) cfgCache = demo.config();
+  else {
+    try { cfgCache = JSON.parse(native.state()); } catch { cfgCache = { paired: false, hogs: [] }; }
+  }
+  return cfgCache;
+}
+
+function hogLabel(cfg) {
+  const c = cfg || cfgCache;
+  if (c && (c.label || c.host || c.ip)) return c.label || c.host || c.ip;
+  const fresh = config();
+  return fresh.label || fresh.host || fresh.ip || "this hog";
 }
 
 function unpaired(message) {
+  const cfg = config();
+  const others = (cfg.hogs || []).filter((hog) => hog.id !== cfg.id);
+  if (others.length) {
+    toast(message || `${hogLabel(cfg)} removed this phone. Pick another hog.`, true);
+    hogSheet();
+    return new Promise(() => {});
+  }
   showPair(message || "This phone is no longer paired. Pair it again.");
   return new Promise(() => {});
 }
 
-function showPair(message = "") {
+function showPair(message = "", adding = false) {
   Object.values(timers).forEach((t) => clearTimeout(t));
   $("app-view").hidden = true;
   $("pair-view").hidden = false;
   const cfg = config();
-  if (cfg.host && !$("pair-host").value) $("pair-host").value = cfg.host;
+  const has = (cfg.hogs || []).length > 0;
+  if (adding) {
+    $("pair-host").value = "";
+    $("pair-code").value = "";
+    $("pair-port").value = "4189";
+    scannedIp = "";
+  } else if ((cfg.host || cfg.ip) && !$("pair-host").value) {
+    $("pair-host").value = cfg.host || cfg.ip;
+  }
+  $("pair-back").hidden = !(adding || has);
+  $("pair-submit").textContent = has || adding ? "Pair this hog" : "Pair";
   $("pair-error").textContent = message;
   $("app-version").textContent = cfg.version ? `Hog phone app ${cfg.version}` : "";
 }
 
-let scannedIp = "";
+function backToHogs() {
+  const cfg = config();
+  if (!cfg.paired) return;
+  $("pair-code").value = "";
+  startApp();
+}
+
 function applyScan(text) {
   try {
     const url = new URL(String(text).trim());
     if (url.protocol !== "hogpair:") throw new Error();
+    const adding = Boolean(config().paired);
+    showPair(adding ? "Adding this hog. Your other computers stay paired." : "", false);
     $("pair-host").value = url.searchParams.get("host") || url.searchParams.get("ip") || "";
     scannedIp = url.searchParams.get("ip") || "";
     $("pair-port").value = url.searchParams.get("port") || "4189";
     $("pair-code").value = url.searchParams.get("code") || "";
-    if (config().paired) {
-      $("pair-error").textContent = "This phone is already paired. Tap Pair to replace it.";
-      return;
-    }
     submitPair();
   } catch {
-    $("pair-error").textContent = "That QR code is not a hog pairing code.";
+    showPair("That QR code is not a hog pairing code.");
   }
 }
 
@@ -160,11 +194,12 @@ async function submitPair() {
   $("pair-submit").disabled = true;
   $("pair-submit").textContent = "Pairing…";
   try {
-    const res = native ? await call((id, h, i, p, c) => native.pair(id, h, i, p, c), host, scannedIp, port, code) : await demo.pair();
+    const res = native ? await call((id, h, i, p, c) => native.pair(id, h, i, p, c), host, scannedIp, port, code) : await demo.pair(host, scannedIp, port);
     if (!res.ok) throw new Error(res.body.error || `Pairing failed (${res.status || "no answer"}).`);
     $("pair-code").value = "";
+    scannedIp = "";
     startApp();
-    toast("Paired with hog.");
+    toast(`Paired with ${hogLabel()}.`);
   } catch (error) {
     $("pair-error").textContent = error.message;
   } finally {
@@ -250,20 +285,23 @@ async function loadJellyfin() {
 // ---------- mining ----------
 function paintMining(m) {
   const sync = !m.enabled ? "Solo mining is off. Start turns it on." : !m.nodeTabConnected ? "Waiting for hog's node tab." : m.synced ? `Synced at ${m.nodeHeight || m.height}` : `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
-  const rig = m.localMiner === "running" ? "BzMiner is running on this computer." : m.localMiner === "missing" ? (m.localMinerError || "Hog could not find BzMiner on this computer.") : "BzMiner is off.";
+  const where = hogLabel();
+  const rig = m.localMiner === "running" ? `BzMiner is running on ${where}.` : m.localMiner === "missing" ? (m.localMinerError || `Hog could not find BzMiner on ${where}.`) : `BzMiner is off on ${where}.`;
   const network = m.networkLabel || m.network || "";
   $("mining-status").replaceChildren(
     el("span", { class: `status-dot${m.localMiner === "running" ? " on" : ""}` }),
     el("div", { class: "status-text" },
       el("b", { text: m.localMiner === "running" ? `BzMiner${network ? ` · ${network}` : ""}` : "BzMiner is off" }),
+      el("span", { text: where }),
       el("span", { text: rig }),
       el("span", { text: sync }),
       m.localMinerError && m.localMiner !== "missing" ? el("span", { class: "error", text: m.localMinerError }) : null,
       m.lastError ? el("span", { class: "error", text: m.lastError }) : null));
+  paintNode();
   const actions = $("mining-actions");
   actions.replaceChildren();
   if (m.localMiner === "running") {
-    actions.append(el("button", { class: "danger", type: "button", text: "Stop miner", onclick: () => confirmSheet("Stop BzMiner on this computer?", "Stop", () => miningAct("stop")) }));
+    actions.append(el("button", { class: "danger", type: "button", text: "Stop miner", onclick: () => confirmSheet(`Stop BzMiner on ${where}?`, "Stop", () => miningAct("stop")) }));
   } else if (m.localMiner !== "missing") {
     actions.append(el("button", { class: "primary", type: "button", text: "Start miner", onclick: () => miningAct("start") }));
   }
@@ -272,6 +310,7 @@ function paintMining(m) {
     stat("Blocks", m.blocks, "gold"), stat("Shares", m.shares), stat("Miners", m.miners, "blue"),
     stat("Rejected", m.rejected), stat("Stale", m.stale), stat("Pending", m.pending),
     stat("Height", m.height || m.nodeHeight || 0), stat("Tip", m.tipHeight || 0), stat("Jobs", m.jobs));
+  paintLaunchers(m);
   const workers = $("mining-workers");
   workers.replaceChildren();
   if (!m.workers.length) workers.append(el("p", { class: "note", text: "No rigs connected yet." }));
@@ -282,17 +321,128 @@ function paintMining(m) {
   }
 }
 
+function stratumLiteral(host) {
+  const text = String(host || "").trim();
+  if (!text) return "";
+  return text.includes(":") ? `[${text}]` : text;
+}
+
+function nodeChoice() {
+  const cfg = config();
+  const node = (cfg.hogs || []).find((hog) => hog.id === cfg.nodeId) || null;
+  const host = cfg.nodeHost || (node ? (node.ip || node.host) : "");
+  const port = Number(cfg.nodePort) || 3456;
+  const pool = host ? `stratum+tcp://${stratumLiteral(host)}:${port}` : "";
+  return { cfg, node, host, port, pool, here: Boolean(node && cfg.id && node.id === cfg.id) };
+}
+
+function paintLaunchers(m) {
+  const box = $("mining-launchers");
+  if (!box) return;
+  const items = Array.isArray(m.launchers) ? m.launchers : [];
+  box.replaceChildren();
+  if (m.launcherNote) box.append(el("p", { class: "note", text: m.launcherNote }));
+  if (!items.length) box.append(el("p", { class: "note", text: "No start file saved yet." }));
+  for (const item of items) {
+    const actions = [];
+    if (item.id !== "pinned" && !item.active && !item.problem) {
+      actions.push(el("button", { class: "primary", type: "button", text: "Use this", onclick: () => launcherAct("select", item) }));
+    }
+    if (item.id !== "default" && item.id !== "pinned") {
+      actions.push(el("button", { class: "danger", type: "button", text: "Remove", onclick: () => confirmSheet(`Remove ${item.name}?`, "Remove", () => launcherAct("remove", item)) }));
+    }
+    box.append(el("div", { class: `card launcher${item.active ? " is-on" : ""}` },
+      el("div", { class: "ct-head" },
+        el("span", { class: "ct-name", text: item.name || "Start file" }),
+        item.active ? el("span", { class: "badge running", text: "In use" }) : null),
+      el("p", { class: "note", text: item.path || "" }),
+      item.problem ? el("p", { class: "error", text: item.problem }) : null,
+      actions.length ? el("div", { class: "ct-actions" }, actions) : null));
+  }
+}
+
+async function launcherAct(op, item) {
+  const payload = { action: "launcher", op };
+  if (op === "add") {
+    payload.name = $("mining-launcher-name").value;
+    payload.script = $("mining-launcher-path").value;
+  } else {
+    payload.id = item.id;
+  }
+  try {
+    const next = await apiPost("mining", payload);
+    if (op === "add" && next.ok) {
+      $("mining-launcher-name").value = "";
+      $("mining-launcher-path").value = "";
+    }
+    paintMining(next);
+    const where = hogLabel();
+    toast(next.ok ? (op === "select" ? `${item.name} is the start file on ${where}.` : op === "remove" ? `Removed ${item.name}.` : "Start file saved.") : (next.error || "That did not work."), !next.ok);
+  } catch (error) {
+    toast(error.message, true);
+    loadMining().catch(() => {});
+  }
+}
+
+function paintNode() {
+  const box = $("mining-node");
+  if (!box) return;
+  const choice = nodeChoice();
+  if (!choice.node || !choice.pool) {
+    box.replaceChildren(
+      el("p", { class: "sheet-title", text: "No mining node yet" }),
+      el("p", { class: "note", text: "Pick the computer that runs the Warthog node. The other computers mine to it." }),
+      el("button", { class: "primary", type: "button", text: "Use this hog as the node", onclick: setAsNode }));
+    return;
+  }
+  if (choice.here) {
+    box.replaceChildren(
+      el("p", { class: "sheet-title", text: "This hog is the mining node" }),
+      el("p", { class: "mono", text: choice.pool }),
+      el("p", { class: "note", text: "Start on this computer mines to 127.0.0.1. The other computers mine to the address above. Leave Allow rigs on my tailnet on here." }));
+    return;
+  }
+  box.replaceChildren(
+    el("p", { class: "sheet-title", text: `Mines to ${choice.node.label || choice.host}` }),
+    el("p", { class: "mono", text: `POOL="${choice.pool}"` }),
+    el("p", { class: "note", text: "Start writes that POOL line into start_warthog.sh on this computer. If this Hog is an older build, paste the line in yourself. Stop the miner first when it is already running." }),
+    el("button", { class: "ghost", type: "button", text: "Use this hog as the node", onclick: setAsNode }));
+}
+
+function setAsNode() {
+  const where = hogLabel();
+  confirmSheet(`Use ${where} as the mining node? The other computers mine to it.`, "Use this hog", () => {
+    const cfg = config();
+    const port = Number(lastMining && (lastMining.stratumPort || lastMining.configuredStratumPort)) || 3456;
+    const live = lastMining && lastMining.tailnetAddress ? String(lastMining.tailnetAddress) : "";
+    const host = live || cfg.ip || cfg.host || "";
+    if (native) native.setNode(cfg.id, port, host);
+    else demo.setNode(cfg.id, port, host);
+    if (lastMining) paintMining(lastMining);
+    else paintNode();
+    toast(`${hogLabel()} is the mining node.`);
+  });
+}
+
 async function loadMining() {
-  paintMining(await apiGet("mining"));
+  lastMining = await apiGet("mining");
+  paintMining(lastMining);
 }
 
 async function miningAct(action) {
   for (const button of $("mining-actions").querySelectorAll("button")) button.disabled = true;
+  const choice = nodeChoice();
+  const payload = { action };
+  if (action === "start" && choice.pool) {
+    payload.pool = choice.here ? `stratum+tcp://127.0.0.1:${choice.port}` : choice.pool;
+  }
   try {
-    const next = await apiPost("mining", { action });
+    const next = await apiPost("mining", payload);
     paintMining(next);
     const started = action === "start" && next.localMiner === "running";
-    toast(next.ok ? (started ? "BzMiner is running on this computer." : action === "stop" ? "BzMiner is stopping." : "Done.") : (next.error || "That did not work."), !next.ok);
+    const where = hogLabel();
+    const aimed = action === "start" && payload.pool && !String(payload.pool).includes("127.0.0.1");
+    toast(next.ok ? (started ? (aimed ? `BzMiner on ${where} is mining to ${payload.pool}.` : `BzMiner is running on ${where}.`) : action === "stop" ? `BzMiner is stopping on ${where}.` : "Done.") : (next.error || "That did not work."), !next.ok);
   } catch (error) {
     toast(error.message, true);
     loadMining().catch(() => {});
@@ -464,6 +614,59 @@ function onUploadPaint() {
   if (!uploads.size) $("files-uploads").replaceChildren();
 }
 
+// ---------- hogs ----------
+function switchHog(id) {
+  const cfg = config();
+  if (!id || id === cfg.id) { closeSheet(); return; }
+  if (native) native.select(id);
+  else demo.select(id);
+  files.path = "";
+  files.q = "";
+  files.entries = [];
+  uploads.clear();
+  const search = $("files-search");
+  if (search) search.value = "";
+  closeSheet();
+  startApp();
+  toast(`Using ${hogLabel()}.`);
+}
+
+function forgetCurrent() {
+  const name = hogLabel();
+  confirmSheet(`Forget ${name} on this phone?`, "Forget", () => {
+    if (native) native.forget();
+    else demo.forget();
+    const cfg = config();
+    if (cfg.paired) {
+      files.path = "";
+      files.q = "";
+      files.entries = [];
+      startApp();
+    } else {
+      showPair("");
+    }
+    toast(`Forgot ${name}.`);
+  });
+}
+
+function hogSheet() {
+  const cfg = config();
+  const rows = (cfg.hogs || []).map((hog) => el("button", {
+    class: `hog-row${hog.id === cfg.id ? " is-on" : ""}`,
+    type: "button",
+    onclick: () => switchHog(hog.id),
+  },
+    el("span", { class: "hog-name", text: hog.label || hog.host || hog.ip || "Hog" }),
+    el("span", { class: "hog-sub", text: [hog.id === cfg.nodeId ? "mining node" : "", hog.host && hog.ip ? hog.ip : "", hog.port || 4189].filter(Boolean).join(" · ") })));
+  sheet(
+    el("p", { class: "sheet-title", text: "Your hogs" }),
+    el("p", { class: "sheet-sub", text: "Start and stop apply to the hog you pick. Pairing another computer keeps the rest." }),
+    el("div", { class: "hog-list" }, rows),
+    el("div", { class: "sheet-actions" },
+      el("button", { class: "primary", type: "button", text: "Pair another", onclick: () => { closeSheet(); showPair("", true); } }),
+      el("button", { class: "danger", type: "button", text: "Forget this one", onclick: forgetCurrent })));
+}
+
 // ---------- menu ----------
 function menu() {
   const cfg = config();
@@ -473,10 +676,11 @@ function menu() {
       el("dt", { text: "Hog" }), el("dd", { text: `${cfg.host || cfg.ip || "?"}:${cfg.port || 4189}` }),
       cfg.ip && cfg.host ? el("dt", { text: "IP" }) : null, cfg.ip && cfg.host ? el("dd", { text: `${cfg.ip}${cfg.via === cfg.ip ? " (in use: the phone cannot look up the name)" : ""}` }) : null,
       el("dt", { text: "Phone" }), el("dd", { text: cfg.device || "" }),
-      el("dt", { text: "App" }), el("dd", { text: cfg.version || "" })),
-    el("p", { class: "note", text: "To cut this phone off, remove it in hog → Settings → Tailscale → Phone app. Forget only clears it here." }),
+      el("dt", { text: "App" }), el("dd", { text: cfg.version || "" }),
+      el("dt", { text: "Paired" }), el("dd", { text: String((cfg.hogs || []).length) })),
+    el("p", { class: "note", text: "To cut this phone off a computer, remove it there in Settings → Tailscale → Phone app. Forget only clears it on the phone." }),
     el("div", { class: "sheet-actions" },
-      el("button", { class: "danger", type: "button", text: "Forget hog", onclick: () => confirmSheet("Forget this hog on the phone?", "Forget", () => { if (native) native.forget(); showPair(""); }) }),
+      el("button", { class: "primary", type: "button", text: "Your hogs", onclick: hogSheet }),
       el("button", { class: "ghost", type: "button", text: "Close", onclick: closeSheet })));
 }
 
@@ -486,7 +690,8 @@ function startApp() {
   $("pair-view").hidden = true;
   $("app-view").hidden = false;
   const via = cfg.via || cfg.host || cfg.ip;
-  $("top-host").textContent = via ? `${via}:${cfg.port}` : "";
+  $("top-host").textContent = via ? `${via}:${cfg.port}` : "Choose a hog";
+  $("top-host").setAttribute("aria-label", via ? `Switch hog. ${via} is selected.` : "Switch hog");
   go(current);
 }
 
@@ -501,20 +706,37 @@ function wire() {
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => go(b.dataset.go)));
   document.querySelectorAll("[data-refresh]").forEach((b) => b.addEventListener("click", () => refresh(b.dataset.refresh)));
   $("menu-btn").addEventListener("click", menu);
+  $("top-host").addEventListener("click", hogSheet);
+  $("pair-back").addEventListener("click", backToHogs);
   $("sheet").addEventListener("click", (ev) => { if (ev.target.matches("[data-close]")) closeSheet(); });
   $("jelly-app").addEventListener("click", () => { if (native) native.openJellyfin(jellyUrl); else openUrl(jellyUrl); });
   $("jelly-browser").addEventListener("click", () => openUrl(jellyUrl));
   $("files-upload").addEventListener("click", () => (native ? native.upload(files.root, files.path) : onUpload({ key: "demo", name: "IMG_2041.jpg", sent: 6_291_456, total: 9_437_184 })));
   $("files-mkdir").addEventListener("click", () => promptSheet("New folder", "New folder", "Create", (name) => fileChange("mkdir", { root: files.root, path: files.path, name }, "Folder made.")));
   $("files-search-form").addEventListener("submit", (ev) => { ev.preventDefault(); files.q = $("files-search").value.trim(); loadFiles().catch((e) => toast(e.message, true)); });
+  $("mining-launcher-add").addEventListener("submit", (ev) => { ev.preventDefault(); launcherAct("add"); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("app-view").hidden) refresh(current); });
 }
 
 // ---------- demo (no native bridge: desktop preview only) ----------
 const demo = (() => {
   const params = new URLSearchParams(location.search);
-  let paired = params.get("demo") !== "pair";
-  let demoMiner = "stopped";
+  const miners = {};
+  let hogs = params.get("demo") === "pair" ? [] : [
+    { id: "a", host: "hog.tail314642.ts.net", ip: "100.119.132.89", port: 4189, label: "hog.tail314642.ts.net" },
+    { id: "b", host: "hog-1.tail314642.ts.net", ip: "100.72.197.80", port: 4189, label: "hog-1.tail314642.ts.net" },
+  ];
+  let currentId = hogs[0] ? hogs[0].id : "";
+  let paired = hogs.length > 0;
+  let nodeId = "";
+  let nodeHost = "";
+  let nodePort = 3456;
+  let demoLaunchers = [
+    { id: "default", name: "Downloads", path: "~/Downloads/bzminer_v100.02b6_linux/start_warthog.sh", active: false, problem: "" },
+    { id: "aaaaaaaaaaaaaaaa", name: "OC lock", path: "~/mining/oc/start_warthog.sh", active: true, problem: "" },
+  ];
+  miners.a = "running";
+  miners.b = "stopped";
   const now = Date.now();
   const entries = {
     "": [
@@ -529,8 +751,59 @@ const demo = (() => {
   };
   return {
     text: "# Warthog notes\n\n- solo mining on mainnet via hog\n- Jellyfin over tailnet\n",
-    config: () => ({ paired, host: "hog.tail314642.ts.net", port: 4189, device: "SM-G991U", version: "0.1.0 (demo)" }),
-    pair: async () => { paired = true; return { ok: true, status: 200, body: { ok: true } }; },
+    config: () => {
+      const cur = hogs.find((hog) => hog.id === currentId) || null;
+      return {
+        paired: paired && Boolean(cur),
+        id: cur ? cur.id : "",
+        host: cur ? cur.host : "",
+        ip: cur ? cur.ip : "",
+        port: cur ? cur.port : 4189,
+        via: cur ? (cur.host || cur.ip) : "",
+        label: cur ? cur.label : "",
+        device: "SM-G991U",
+        version: "0.1.0 (demo)",
+        nodeId,
+        nodeHost,
+        nodePort,
+        hogs: hogs.map((hog) => ({ ...hog, current: hog.id === currentId })),
+      };
+    },
+    setNode(id, port, host) {
+      const row = hogs.find((hog) => hog.id === id);
+      if (!row) return;
+      nodeId = id;
+      nodePort = Number(port) || 3456;
+      nodeHost = String(host || row.ip || row.host || "");
+    },
+    select(id) {
+      if (hogs.some((hog) => hog.id === id)) currentId = id;
+    },
+    forget() {
+      if (nodeId === currentId) { nodeId = ""; nodeHost = ""; }
+      hogs = hogs.filter((hog) => hog.id !== currentId);
+      currentId = hogs[0] ? hogs[0].id : "";
+      paired = hogs.length > 0;
+    },
+    pair: async (host, ip, port) => {
+      const h = String(host || "").trim().toLowerCase();
+      const i = String(ip || "").trim().toLowerCase();
+      const p = Number(port) || 4189;
+      let row = hogs.find((hog) => hog.port === p && ((i && hog.ip === i) || (h && hog.host === h)));
+      if (!row) {
+        if (hogs.length >= 8) return { ok: false, status: 0, body: { ok: false, error: "This phone can pair 8 hogs. Forget one first." } };
+        row = { id: Math.random().toString(16).slice(2, 10), host: h, ip: i, port: p, label: h || i };
+        hogs.push(row);
+        miners[row.id] = "stopped";
+      } else {
+        if (h) row.host = h;
+        if (i) row.ip = i;
+        row.label = row.host || row.ip;
+      }
+      currentId = row.id;
+      paired = true;
+      return { ok: true, status: 200, body: { ok: true } };
+    },
     raw: () => "hog-logo.svg",
     async get(route) {
       await new Promise((r) => setTimeout(r, 30));
@@ -544,7 +817,9 @@ const demo = (() => {
         ] };
       }
       if (route === "mining") {
-        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, lastError: "", localMiner: demoMiner, localMinerError: "", workers: [
+        const demoMiner = miners[currentId] || "stopped";
+        const demoIp = currentId === "b" ? "100.72.197.80" : "100.119.132.89";
+        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, lastError: "", localMiner: demoMiner, localMinerError: "", tailnetAddress: demoIp, stratumPort: 3456, launcherPinned: false, launcherNote: "", launchers: demoLaunchers.map((item) => ({ ...item })), workers: [
           { worker: "hog-mainnet", remote: false, connected: 1, shares: 80, blocks: 55, rejected: 6, lastShareAt: now - 42e3 },
           { worker: "rig2-mainnet", remote: true, connected: 1, shares: 12, blocks: 6, rejected: 1, lastShareAt: now - 6e5 },
         ] };
@@ -559,8 +834,25 @@ const demo = (() => {
         return { ok: true, status: 200, body: { ...data, ok: true } };
       }
       if (route === "mining") {
-        if (body.action === "start") demoMiner = "running";
-        if (body.action === "stop") demoMiner = "stopped";
+        if (body.action === "start") miners[currentId] = "running";
+        if (body.action === "stop") miners[currentId] = "stopped";
+        if (body.action === "launcher" && body.op === "select") {
+          demoLaunchers = demoLaunchers.map((item) => ({ ...item, active: item.id === body.id }));
+        }
+        if (body.action === "launcher" && body.op === "remove") {
+          demoLaunchers = demoLaunchers.filter((item) => item.id === "default" || item.id !== body.id);
+          if (!demoLaunchers.some((item) => item.active) && demoLaunchers[0]) demoLaunchers[0] = { ...demoLaunchers[0], active: true };
+        }
+        if (body.action === "launcher" && body.op === "add") {
+          const name = String(body.name || "").trim();
+          const path = String(body.script || "").trim();
+          if (!name || !path) return { ok: false, status: 200, body: { ...(await this.get("mining")), ok: false, error: "Enter a name and a path." } };
+          if (demoLaunchers.filter((item) => item.id !== "default").length >= 6) {
+            return { ok: false, status: 200, body: { ...(await this.get("mining")), ok: false, error: "Hog keeps 6 start files. Remove one to add another." } };
+          }
+          demoLaunchers = demoLaunchers.map((item) => ({ ...item, active: false }));
+          demoLaunchers.push({ id: Math.random().toString(16).slice(2, 18).padEnd(16, "a"), name, path, active: true, problem: "" });
+        }
         return { ok: true, status: 200, body: await this.get("mining") };
       }
       return { ok: true, status: 200, body: { ok: true } };

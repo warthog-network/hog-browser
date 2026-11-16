@@ -38,6 +38,11 @@ class HogApi(private val store: TokenStore) {
 
     fun current(): String = pick(store.host, store.ip)
 
+    /** The next call tries the .ts.net name again. Used when the selected hog changes. */
+    fun clearRoute() {
+        usingIp = false
+    }
+
     /** A connection to an authenticated route. Throws if this phone is not paired. */
     fun open(method: String, route: String, timeoutMs: Int = 15_000): HttpURLConnection {
         val token = store.token() ?: throw IOException("not paired")

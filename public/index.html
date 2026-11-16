@@ -1024,7 +1024,7 @@
               <div class="w-actions" id="home-actions">
                 <button type="button" id="go-send"><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="m476.59 227.05-.16-.07L49.35 49.84A23.56 23.56 0 0 0 27.14 52 24.65 24.65 0 0 0 16 72.59v113.29a24 24 0 0 0 19.52 23.57l232.93 43.07a4 4 0 0 1 0 7.86L35.53 303.45A24 24 0 0 0 16 327v113.31A23.57 23.57 0 0 0 26.59 460a23.94 23.94 0 0 0 13.22 4 24.55 24.55 0 0 0 9.52-1.93L476.4 285.94l.19-.09a32 32 0 0 0 0-58.8z"/></svg>Send</button>
                 <button type="button" id="go-receive" data-mainnet-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="M336 176h40a40 40 0 0 1 40 40v208a40 40 0 0 1-40 40H136a40 40 0 0 1-40-40V216a40 40 0 0 1 40-40h40"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="m176 272 80 80 80-80M256 48v288"/></svg>Receive</button>
-                <button type="button" id="go-swap" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="M352 144h112v112"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="m48 368 121.37-121.37a32 32 0 0 1 45.26 0l50.74 50.74a32 32 0 0 0 45.26 0L448 160"/></svg>Swap</button>
+                <button type="button" id="go-swap"><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="M352 144h112v112"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="m48 368 121.37-121.37a32 32 0 0 1 45.26 0l50.74 50.74a32 32 0 0 0 45.26 0L448 160"/></svg>Swap</button>
                 <button type="button" id="go-liquidity" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="M265.12 60.12a12 12 0 0 0-18.23 0C215.23 97.15 112 225.17 112 320c0 88.37 55.64 144 144 144s144-55.63 144-144c0-94.83-103.23-222.85-134.88-259.88zM272 412a12 12 0 0 1-11.34-16 11.89 11.89 0 0 1 11.41-8A60.06 60.06 0 0 0 332 328.07a11.89 11.89 0 0 1 8-11.41A12 12 0 0 1 356 328a84.09 84.09 0 0 1-84 84z"/></svg>Liquidity</button>
                 <button type="button" id="go-mint" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="M121.72 32a4 4 0 0 0-3.72 5.56l2.3 5.43 40.7 94.9a4 4 0 0 0 6.88.82L243 38.4a4 4 0 0 0-3.2-6.4zm298.21 26.06-41.28 96.37a4 4 0 0 0 3.68 5.57h101a4 4 0 0 0 3.4-6.11L427 57.53a4 4 0 0 0-7.07.53zM85 57.57l-59.71 96.32a4 4 0 0 0 3.4 6.11h101a4 4 0 0 0 3.67-5.58L92 58.1a4 4 0 0 0-7-.53zM393.27 32H267.82a1.94 1.94 0 0 0-1.56 3.11l79.92 106.46a1.94 1.94 0 0 0 3.34-.4L391.6 43l3.4-8.34a1.92 1.92 0 0 0-1.7-2.66zM239 448l-89.43-253.49A3.78 3.78 0 0 0 146 192H25.7a3.72 3.72 0 0 0-2.95 6l216 279.81a5.06 5.06 0 0 0 6.39 1.37 5 5 0 0 0 2.39-6.08zm247.3-256H366a3.75 3.75 0 0 0-3.54 2.51l-98.2 278.16a5.21 5.21 0 0 0 2.42 6.31 5.22 5.22 0 0 0 6.61-1.39L489.25 198a3.72 3.72 0 0 0-2.95-6zM259.2 78.93l56 74.67a4 4 0 0 1-3.2 6.4H200a4 4 0 0 1-3.2-6.4l56-74.67a4 4 0 0 1 6.4 0zm-7 310.31-67.7-191.91a4 4 0 0 1 3.77-5.33h135.46a4 4 0 0 1 3.77 5.33l-67.73 191.91a4 4 0 0 1-7.54 0z"/></svg>Mint</button>
               </div>
@@ -1034,7 +1034,7 @@
             <div id="wpage-trade" hidden>
               <p class="w-k">Trade</p>
               <div class="w-menu">
-                <button type="button" id="trade-swap" data-defi-only><span><strong>Swap</strong><small>Market and limit orders</small></span></button>
+                <button type="button" id="trade-swap"><span><strong>Swap</strong><small id="trade-swap-note">Market and limit orders</small></span></button>
                 <button type="button" id="trade-safe"><span><strong>SafeTrade</strong><small>Centralized exchange. Requires a SafeTrade account and API key</small></span></button>
                 <button type="button" id="trade-aave"><span><strong>Aave</strong><small>Supply, borrow, repay and withdraw on Ethereum</small></span></button>
               </div>
@@ -1072,42 +1072,117 @@
               <button type="button" id="copy-receive" class="primary">Copy address</button>
             </div>
 
-            <div id="wpage-swap" hidden>
+            <div id="wpage-swap" class="swap-page" hidden>
               <button type="button" class="w-back" data-back="trade">Trade</button>
-              <h3>Swap</h3>
-              <form id="swap-form" class="stack">
-                <label>Asset
-                  <span class="amount-line">
-                    <input id="swap-query" autocomplete="off" spellcheck="false" placeholder="Name or 64-hex hash" maxlength="64">
-                    <button type="button" id="swap-find" class="tiny">Find</button>
-                  </span>
-                </label>
-                <div id="swap-hits" class="w-hits"></div>
-                <label>Side
-                  <select id="swap-side">
-                    <option value="buy">Buy with WART</option>
-                    <option value="sell">Sell for WART</option>
-                  </select>
-                </label>
-                <label>Amount
-                  <span class="amount-line">
-                    <input id="swap-amount" inputmode="decimal" placeholder="0.00">
-                    <button type="button" id="swap-max" class="tiny">Max</button>
-                  </span>
-                </label>
-                <label>Limit price
-                  <input id="swap-price" inputmode="decimal" placeholder="WART per token">
-                </label>
-                <label>Decimals
-                  <input id="swap-decimals" inputmode="numeric" value="8">
-                </label>
-                <label>Fee
-                  <input id="swap-fee" inputmode="decimal" value="0.001">
-                </label>
-                <p id="swap-error" class="error" role="status"></p>
-                <p id="swap-review" class="note" hidden></p>
-                <button type="submit" class="primary" id="swap-button">Review swap</button>
-              </form>
+              <div id="swap-defi">
+                <section class="swap-card">
+                  <div class="swap-card-pad">
+                    <p class="swap-kicker">Warthog</p>
+                    <h3 id="swap-title">Swap</h3>
+                    <p id="swap-subtitle" class="swap-sub">Market fills a limit at the pool spot.</p>
+                    <div class="swap-toolbar" id="swap-dex-chips">
+                      <button type="button" class="swap-chip-btn swap-chip-btn--active" data-dex-mode="market">Market</button>
+                      <button type="button" class="swap-chip-btn" data-dex-mode="limit">Limit</button>
+                      <button type="button" class="swap-chip-btn" data-dex-mode="pool">Pool</button>
+                    </div>
+                    <form id="swap-form" class="stack">
+                      <label>Asset
+                        <span class="amount-line">
+                          <input id="swap-query" autocomplete="off" spellcheck="false" placeholder="Name or 64-hex hash" maxlength="64">
+                          <button type="button" id="swap-find" class="tiny">Find</button>
+                        </span>
+                      </label>
+                      <div id="swap-hits" class="w-hits"></div>
+                      <label>Side
+                        <select id="swap-side">
+                          <option value="buy">Buy with WART</option>
+                          <option value="sell">Sell for WART</option>
+                        </select>
+                      </label>
+                      <label>Amount
+                        <span class="amount-line">
+                          <input id="swap-amount" inputmode="decimal" placeholder="0.00">
+                          <button type="button" id="swap-max" class="tiny">Max</button>
+                        </span>
+                      </label>
+                      <div id="swap-price-row">
+                        <label>Limit price
+                          <input id="swap-price" inputmode="decimal" placeholder="WART per token">
+                        </label>
+                      </div>
+                      <details class="swap-advanced">
+                        <summary class="swap-advanced-btn">Advanced</summary>
+                        <div class="swap-advanced-body">
+                          <label>Decimals
+                            <input id="swap-decimals" inputmode="numeric" value="8">
+                          </label>
+                          <label>Fee
+                            <input id="swap-fee" inputmode="decimal" value="0.001">
+                          </label>
+                        </div>
+                      </details>
+                      <p id="swap-error" class="error" role="status"></p>
+                      <p id="swap-review" class="note" hidden></p>
+                      <button type="submit" class="swap-cta-btn" id="swap-button">Review market</button>
+                    </form>
+                    <div id="swap-pool" hidden>
+                      <p class="swap-hint">Deposit and withdraw liquidity on the pool page. The same signer places those orders.</p>
+                      <button type="button" id="swap-open-pool" class="swap-cta-btn">Open liquidity</button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+              <div id="swap-chain" hidden>
+                <section class="swap-card">
+                  <div class="swap-card-pad">
+                    <p class="swap-kicker" id="chain-swap-kicker">Swap</p>
+                    <h3 id="chain-swap-title">Swap</h3>
+                    <p id="chain-swap-sub" class="swap-sub"></p>
+                    <div class="swap-toolbar" id="chain-swap-chips"></div>
+                    <div class="swap-legs">
+                      <div class="swap-panel">
+                        <div class="swap-leg-top">
+                          <span>You pay</span>
+                          <button type="button" id="chain-swap-max" class="swap-balance-btn">Available …</button>
+                        </div>
+                        <div class="swap-amount-row">
+                          <div class="swap-amount-value"><input id="chain-swap-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+                          <select id="chain-swap-pay" class="swap-token-btn" aria-label="Pay token"></select>
+                        </div>
+                      </div>
+                      <div class="swap-legs-flip">
+                        <button type="button" id="chain-swap-flip" class="swap-flip-btn" aria-label="Flip">↕</button>
+                      </div>
+                      <div class="swap-panel">
+                        <div class="swap-leg-top">
+                          <span>You receive</span>
+                          <span id="chain-swap-receive-hint" class="swap-fine"></span>
+                        </div>
+                        <div class="swap-amount-row">
+                          <div class="swap-amount-value" id="chain-swap-out">0</div>
+                          <select id="chain-swap-receive" class="swap-token-btn" aria-label="Receive token"></select>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="swap-toolbar" id="chain-swap-slip" hidden>
+                      <button type="button" class="swap-chip-btn" data-chain-slip="50">0.5%</button>
+                      <button type="button" class="swap-chip-btn swap-chip-btn--active" data-chain-slip="100">1%</button>
+                      <button type="button" class="swap-chip-btn" data-chain-slip="300">3%</button>
+                    </div>
+                    <div id="chain-swap-summary" class="swap-summary"></div>
+                    <p id="chain-swap-error" class="error" role="status"></p>
+                    <p id="chain-swap-hint" class="swap-hint"></p>
+                    <button type="button" id="chain-swap-go" class="swap-cta-btn">Review swap</button>
+                    <div id="chain-swap-confirm" class="swap-summary" hidden>
+                      <p id="chain-swap-confirm-copy"></p>
+                      <div class="row">
+                        <button type="button" id="chain-swap-back">Back</button>
+                        <button type="button" id="chain-swap-ok" class="primary">Close</button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </div>
             </div>
 
             <div id="wpage-liquidity" hidden>
@@ -1167,10 +1242,9 @@
               </form>
             </div>
 
-            <div id="wpage-safetrade" hidden>
+            <div id="wpage-safetrade" class="swap-page" hidden>
               <button type="button" class="w-back" data-back="trade">Trade</button>
-              <h3>SafeTrade</h3>
-              <p class="note">Spot balances and limit orders on safe.trade. The API secret stays in memory until this wallet locks. Hog does not send the Warthog key.</p>
+              <p class="note">The API secret stays in memory until this wallet locks. Hog does not send the Warthog key.</p>
               <form id="safe-key-form" class="stack">
                 <label>API key
                   <input id="safe-key" autocomplete="off" spellcheck="false">
@@ -1184,33 +1258,84 @@
                 </div>
               </form>
               <div id="safe-balances"></div>
-              <form id="safe-order-form" class="stack">
-                <label>Market
-                  <select id="safe-market"></select>
-                </label>
-                <p id="safe-ticker" class="note"></p>
-                <label>Side
-                  <select id="safe-side">
-                    <option value="buy">Buy</option>
-                    <option value="sell">Sell</option>
-                  </select>
-                </label>
-                <label>Amount
-                  <span class="amount-line">
-                    <input id="safe-amount" inputmode="decimal" placeholder="0.00">
-                    <button type="button" id="safe-max" class="tiny">Max</button>
-                  </span>
-                </label>
-                <p id="safe-free" class="note"></p>
-                <label>Price
-                  <input id="safe-price" inputmode="decimal" placeholder="0.00">
-                </label>
-                <p id="safe-error" class="error" role="status"></p>
-                <button type="submit" class="primary" id="safe-order">Place limit order</button>
-              </form>
-              <p class="w-k">Open orders</p>
-              <ul id="safe-orders" class="activity"></ul>
-              <p id="safe-orders-empty" class="note">No open orders.</p>
+              <section class="swap-card">
+                <div class="swap-card-pad">
+                  <div class="swap-leg-top">
+                    <h3 id="safe-title">Swap</h3>
+                    <p id="safe-ticker" class="swap-sub"></p>
+                  </div>
+                  <div class="swap-toolbar">
+                    <button type="button" class="swap-chip-btn swap-chip-btn--active" data-safe-panel="swap">Swap</button>
+                    <button type="button" class="swap-chip-btn" data-safe-panel="limit">Limit</button>
+                    <button type="button" class="swap-chip-btn" data-safe-panel="deposit">Deposit</button>
+                    <button type="button" class="swap-chip-btn" data-safe-panel="withdraw">Withdraw</button>
+                    <select id="safe-network" class="swap-chip-btn" aria-label="SafeTrade network">
+                      <option>Warthog</option>
+                      <option>Ethereum</option>
+                      <option>Bitcoin</option>
+                      <option>Solana</option>
+                    </select>
+                  </div>
+                  <div class="swap-legs">
+                    <div class="swap-panel">
+                      <div class="swap-leg-top">
+                        <span>You pay</span>
+                        <button type="button" id="safe-max" class="swap-balance-btn">Max</button>
+                      </div>
+                      <p id="safe-free" class="swap-fine"></p>
+                      <div class="swap-amount-row">
+                        <div class="swap-amount-value"><input id="safe-amount" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+                        <select id="safe-pay" class="swap-token-btn" aria-label="Pay asset"></select>
+                      </div>
+                    </div>
+                    <div class="swap-legs-flip">
+                      <button type="button" id="safe-flip" class="swap-flip-btn" aria-label="Flip">↕</button>
+                    </div>
+                    <div class="swap-panel">
+                      <div class="swap-leg-top">
+                        <span>You receive</span>
+                        <span id="safe-receive-hint" class="swap-fine"></span>
+                      </div>
+                      <div class="swap-amount-row">
+                        <div class="swap-amount-value" id="safe-receive-amount">0</div>
+                        <select id="safe-receive" class="swap-token-btn" aria-label="Receive asset"></select>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="safe-limit-row" class="swap-toolbar" hidden>
+                    <input id="safe-price" inputmode="decimal" placeholder="Limit price" autocomplete="off">
+                    <button type="button" id="safe-last" class="swap-chip-btn">Last</button>
+                  </div>
+                  <div id="safe-withdraw-row" class="swap-toolbar" hidden>
+                    <input id="safe-email" placeholder="Email code" autocomplete="off">
+                    <input id="safe-otp" inputmode="numeric" placeholder="2FA code" autocomplete="off">
+                  </div>
+                  <div id="safe-slip" class="swap-toolbar">
+                    <button type="button" class="swap-chip-btn" data-safe-slip="">Off</button>
+                    <button type="button" class="swap-chip-btn" data-safe-slip="50">0.5%</button>
+                    <button type="button" class="swap-chip-btn swap-chip-btn--active" data-safe-slip="100">1%</button>
+                    <button type="button" class="swap-chip-btn" data-safe-slip="300">3%</button>
+                    <button type="button" class="swap-chip-btn" data-safe-slip="1500">15%</button>
+                  </div>
+                  <div id="safe-summary" class="swap-summary"></div>
+                  <div id="safe-book" class="swap-book"></div>
+                  <div id="safe-orders-wrap">
+                    <p class="swap-fine">Open on this market</p>
+                    <ul id="safe-orders" class="activity"></ul>
+                    <p id="safe-orders-empty" class="swap-fine">No open orders.</p>
+                  </div>
+                  <p id="safe-error" class="error" role="status"></p>
+                  <p id="safe-hint" class="swap-hint"></p>
+                  <button type="button" class="swap-cta-btn" id="safe-order">Review swap</button>
+                  <div id="safe-confirm" class="swap-summary" hidden>
+                    <p id="safe-confirm-copy"></p>
+                    <div class="row">
+                      <button type="button" id="safe-confirm-back">Back</button>
+                      <button type="button" id="safe-confirm-go" class="primary">Confirm</button>
+                    </div>
+                  </div>
+                </div>
+              </section>
               <button type="button" id="open-safetrade">Open safetrade.com</button>
             </div>
 

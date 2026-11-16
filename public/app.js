@@ -43,11 +43,35 @@ import {
   matchesHistoryFilter,
   readChainActivity,
   rewardWindowCounts,
+  ETH_WETH,
+  HEMI_NATIVE,
+  JUP_BRIDGE,
+  SAFE_ROUTES,
+  SUSHI_ROUTER,
+  WSOL_MINT,
+  counterpartToken,
+  decodeAmountsOut,
+  encodeGetAmountsOut,
+  jupTunnelPair,
+  lockedSwapRoute,
+  quoteHemiSushi,
+  quoteJupiter,
+  quoteJupBridge,
   safeBalances,
   safeCancelOrder,
+  safeDepositAddress,
+  safeDepth,
   safeLimitOrder,
   safeOpenOrders,
+  safePair,
+  safePublicNetwork,
+  safeSlippagePrice,
+  safeSwap,
   safeTicker,
+  safeWithdrawCoin,
+  sushiPath,
+  tunnelEnds,
+  walkBook,
   sealWithPrf,
 } from "./extra-bundle.js";
 import { answerDappRequest, CHAINS, DappError } from "./dapp-bundle.js";
@@ -177,6 +201,31 @@ let lockTimer = 0;
 let lockDeadline = 0;
 let safeCreds = null;
 let safeRows = [];
+const safeUi = {
+  panel: "swap",
+  network: "Warthog",
+  payId: "wart:wart-key",
+  receiveId: "usdt:erc20_key",
+  slippage: 100,
+  last: 0,
+  depth: null,
+  confirm: false,
+  walletFree: null,
+};
+let safePaintGen = 0;
+let swapDexMode = "market";
+const chainForm = {
+  mode: "swap",
+  venue: "stargate",
+  target: "",
+  direction: "deposit",
+  slippage: 100,
+  payId: "",
+  receiveId: "",
+};
+let chainQuoteTimer = 0;
+let chainQuoteGen = 0;
+let chainAvailable = null;
 let aaveMarket = null;
 let aaveAction = "supply";
 let aaveAssetKey = "eth";
@@ -3127,6 +3176,7 @@ function showWalletPage(name) {
   if (page === "account") paintPasskey();
   if (page === "aave") void loadAavePage();
   if (page === "safetrade") void paintSafePage();
+  if (page === "swap") paintSwapPage();
   if (page === "activity") paintActivity();
   if (page === "activity-detail") paintActivityDetail();
   if (page !== "phrase" && $("revealed-phrase")) {
@@ -4968,6 +5018,7 @@ window.__hogUpdate = paintUpdate;
 function syncNetworkActions() {
   const chain = selectedChain();
   const defi = chain === "defi";
+  const routeSwap = defi || chain === "ethereum" || chain === "bitcoin" || chain === "hemi" || chain === "solana";
   document.querySelectorAll("[data-defi-only]").forEach((node) => {
     node.hidden = !defi;
   });
@@ -4975,6 +5026,10 @@ function syncNetworkActions() {
     node.hidden = chain !== "mainnet";
   });
   $("go-receive").hidden = defi;
+  $("go-swap").hidden = !routeSwap;
+  $("trade-swap").hidden = !routeSwap;
+  const swapNote = $("trade-swap-note");
+  if (swapNote) swapNote.textContent = defi ? "Market and limit orders" : "Swap, bridge and cross-chain routes";
   $("home-actions").classList.toggle("is-quad", defi);
   $("trade-aave").hidden = chain === "bitcoin" || chain === "solana";
 }
@@ -6720,7 +6775,7 @@ function swapSpec() {
       const side = isBuy ? "Buy" : "Sell";
       const unit = isBuy ? "WART" : asset.name;
       return {
-        summary: `${side} ${amountText} ${unit} at ${price} WART. Fee ${feeText} WART.`,
+        summary: `${swapDexMode === "market" ? "Pool spot. " : ""}${side} ${amountText} ${unit} at ${price} WART. Fee ${feeText} WART.`,
         feeText,
         wartSpend,
         guard: isBuy
@@ -6882,7 +6937,7 @@ function armMarketReset(id, reviewId, buttonId, label, fields) {
   const reset = () => {
     marketReview[id] = null;
     $(reviewId).hidden = true;
-    $(buttonId).textContent = label;
+    $(buttonId).textContent = typeof label === "function" ? label() : label;
   };
   for (const field of fields) {
     $(field).addEventListener("input", reset);
@@ -8374,11 +8429,63 @@ function bind() {
   if (openAave) openAave.addEventListener("click", () => openUrl("https://app.aave.com"));
   $("swap-find").addEventListener("click", findSwapAssets);
   $("swap-max").addEventListener("click", fillSwapMax);
-  $("swap-form").addEventListener("submit", (event) => reviewMarket(event, swapSpec()));
+  $("swap-form").addEventListener("submit", (event) => submitDexSwap(event));
+  $("swap-dex-chips").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-dex-mode]");
+    if (!button) return;
+    swapDexMode = button.dataset.dexMode || "limit";
+    marketReview.swap = null;
+    paintDexMode();
+  });
+  $("swap-open-pool").addEventListener("click", () => showWalletPage("liquidity"));
+  $("chain-swap-chips").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-chain-mode], [data-chain-target], [data-chain-venue]");
+    if (!button) return;
+    if (button.dataset.chainMode) {
+      chainForm.mode = button.dataset.chainMode;
+      chainForm.target = "";
+      chainForm.direction = "deposit";
+    }
+    if (button.dataset.chainTarget) chainForm.target = button.dataset.chainTarget;
+    if (button.dataset.chainVenue) chainForm.venue = button.dataset.chainVenue;
+    chainForm.payId = "";
+    chainForm.receiveId = "";
+    $("chain-swap-amount").value = "";
+    closeChainConfirm();
+    paintChainSwap();
+  });
+  $("chain-swap-slip").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-chain-slip]");
+    if (!button) return;
+    chainForm.slippage = Number(button.dataset.chainSlip);
+    paintChainSlip();
+    scheduleChainQuote();
+  });
+  $("chain-swap-pay").addEventListener("change", () => {
+    chainForm.payId = $("chain-swap-pay").value;
+    closeChainConfirm();
+    paintChainSwap();
+  });
+  $("chain-swap-receive").addEventListener("change", () => {
+    chainForm.receiveId = $("chain-swap-receive").value;
+    closeChainConfirm();
+    paintChainSwap();
+  });
+  $("chain-swap-amount").addEventListener("input", () => {
+    const field = $("chain-swap-amount");
+    field.value = field.value.replace(/[^0-9.]/g, "");
+    closeChainConfirm();
+    scheduleChainQuote();
+  });
+  $("chain-swap-max").addEventListener("click", () => fillChainMax());
+  $("chain-swap-flip").addEventListener("click", () => flipChainSwap());
+  $("chain-swap-go").addEventListener("click", () => reviewChainSwap());
+  $("chain-swap-back").addEventListener("click", () => closeChainConfirm());
+  $("chain-swap-ok").addEventListener("click", () => closeChainConfirm());
   $("liq-form").addEventListener("submit", (event) => reviewMarket(event, depositSpec()));
   $("liq-out-form").addEventListener("submit", (event) => reviewMarket(event, withdrawSpec()));
   $("mint-form").addEventListener("submit", (event) => reviewMarket(event, mintSpec()));
-  armMarketReset("swap", "swap-review", "swap-button", "Review swap", ["swap-query", "swap-amount", "swap-price", "swap-decimals", "swap-fee", "swap-side"]);
+  armMarketReset("swap", "swap-review", "swap-button", () => (swapDexMode === "market" ? "Review market" : "Review swap"), ["swap-query", "swap-amount", "swap-price", "swap-decimals", "swap-fee", "swap-side"]);
   armMarketReset("deposit", "liq-review", "liq-button", "Review deposit", ["liq-asset", "liq-asset-amount", "liq-wart", "liq-decimals", "liq-fee"]);
   armMarketReset("withdraw", "liq-out-review", "liq-out-button", "Review withdrawal", ["liq-asset", "liq-shares", "liq-fee"]);
   armMarketReset("mint", "mint-review", "mint-button", "Review mint", ["mint-name", "mint-supply", "mint-decimals", "mint-fee"]);
@@ -8736,10 +8843,73 @@ function bind() {
     $("safe-secret").value = "";
     paintSafePage();
   });
-  $("safe-market").addEventListener("change", () => paintSafePage());
-  $("safe-side").addEventListener("change", () => paintSafeFree());
+  document.querySelector("#wpage-safetrade").addEventListener("click", (event) => {
+    const panel = event.target.closest("[data-safe-panel]");
+    if (panel) {
+      safeUi.panel = panel.dataset.safePanel || "swap";
+      safeUi.confirm = false;
+      $("safe-error").textContent = "";
+      paintSafeChrome();
+      return;
+    }
+    const slip = event.target.closest("[data-safe-slip]");
+    if (slip) {
+      safeUi.slippage = slip.dataset.safeSlip === "" ? null : Number(slip.dataset.safeSlip);
+      safeUi.confirm = false;
+      paintSafeChrome();
+    }
+  });
+  $("safe-network").addEventListener("change", () => {
+    safeUi.network = $("safe-network").value;
+    const first = routesOn(safeUi.network)[0];
+    safeUi.payId = first ? first.id : "";
+    safeUi.receiveId = "";
+    safeUi.confirm = false;
+    paintSafeChrome();
+    void refreshSafeBook();
+  });
+  $("safe-pay").addEventListener("change", () => {
+    safeUi.payId = $("safe-pay").value;
+    safeUi.confirm = false;
+    paintSafeChrome();
+    void refreshSafeBook();
+  });
+  $("safe-receive").addEventListener("change", () => {
+    safeUi.receiveId = $("safe-receive").value;
+    safeUi.confirm = false;
+    paintSafeChrome();
+    void refreshSafeBook();
+  });
+  $("safe-flip").addEventListener("click", () => flipSafeLegs());
+  $("safe-amount").addEventListener("input", () => {
+    $("safe-amount").value = $("safe-amount").value.replace(/[^0-9.]/g, "");
+    safeUi.confirm = false;
+    paintSafeQuote();
+  });
+  $("safe-price").addEventListener("input", () => {
+    $("safe-price").value = $("safe-price").value.replace(/[^0-9.]/g, "");
+    safeUi.confirm = false;
+    paintSafeQuote();
+  });
+  $("safe-last").addEventListener("click", () => {
+    if (!(safeUi.last > 0)) return;
+    const pair = currentSafePair();
+    $("safe-price").value = pair ? safeUi.last.toFixed(pair.market.pricePlaces) : String(safeUi.last);
+    paintSafeQuote();
+  });
   $("safe-max").addEventListener("click", () => fillSafeMax());
-  $("safe-order-form").addEventListener("submit", (event) => submitSafeOrder(event));
+  $("safe-order").addEventListener("click", () => reviewSafeTrade());
+  $("safe-confirm-back").addEventListener("click", () => {
+    safeUi.confirm = false;
+    $("safe-confirm").hidden = true;
+  });
+  $("safe-confirm-go").addEventListener("click", () => submitSafeTrade());
+  $("safe-book").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-book-price]");
+    if (!button || safeUi.panel !== "limit") return;
+    $("safe-price").value = button.dataset.bookPrice;
+    paintSafeQuote();
+  });
   $("safe-orders").addEventListener("click", (event) => {
     const button = event.target.closest("[data-safe-cancel]");
     if (!button || !safeCreds) return;
@@ -9605,49 +9775,626 @@ async function runAave() {
   }
 }
 
-function paintSafeMarkets() {
-  const select = $("safe-market");
-  if (!select || select.options.length) return;
-  for (const market of SAFE_MARKETS) {
-    const option = document.createElement("option");
-    option.value = market.id;
-    option.textContent = `${market.base}/${market.quote}`;
-    select.append(option);
+function trimAmount(value) {
+  if (!Number.isFinite(Number(value)) || Number(value) <= 0) return "0";
+  return Number(value).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function displayAmount(value) {
+  if (value == null) return "0";
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    if (value.str) return String(value.str);
+    if (value.E8 != null) return formatE8(BigInt(value.E8));
+  }
+  return "0";
+}
+
+function poolSpot(marketData) {
+  const pool = marketData?.liquidityPool || marketData?.liquidity;
+  if (!pool) return null;
+  const wart = Number(displayAmount(pool.wart || pool.WART));
+  const asset = Number(displayAmount(pool.asset));
+  if (!Number.isFinite(wart) || !Number.isFinite(asset) || asset <= 0) return null;
+  return wart / asset;
+}
+
+function paintDexMode() {
+  const market = swapDexMode === "market";
+  const pool = swapDexMode === "pool";
+  for (const button of document.querySelectorAll("#swap-dex-chips [data-dex-mode]")) {
+    button.classList.toggle("swap-chip-btn--active", button.dataset.dexMode === swapDexMode);
+  }
+  $("swap-title").textContent = pool ? "Pool" : market ? "Market" : "Limit";
+  $("swap-subtitle").textContent = market
+    ? "Market fills a limit at the pool spot."
+    : pool
+      ? "Add or remove liquidity."
+      : "A limit rests until it fills or you cancel it.";
+  $("swap-form").hidden = pool;
+  $("swap-pool").hidden = !pool;
+  $("swap-price-row").hidden = market || pool;
+  if (!marketReview.swap) $("swap-button").textContent = market ? "Review market" : "Review swap";
+}
+
+async function submitDexSwap(event) {
+  if (swapDexMode === "pool") {
+    event.preventDefault();
+    return;
+  }
+  if (swapDexMode === "market" && !marketReview.swap) {
+    event.preventDefault();
+    $("swap-error").textContent = "";
+    try {
+      const asset = selectedSwapAsset();
+      const data = await nodeGet(`dex/market/${asset.hash}`);
+      const spot = poolSpot(data);
+      if (!(spot > 0)) throw new Error("This pool has no spot price yet.");
+      $("swap-price").value = trimAmount(spot);
+    } catch (error) {
+      $("swap-error").textContent = error.message;
+      return;
+    }
+  }
+  return reviewMarket(event, swapSpec());
+}
+
+function paintSwapPage() {
+  const chain = selectedChain();
+  const other = chain === "ethereum" || chain === "bitcoin" || chain === "hemi" || chain === "solana";
+  $("swap-defi").hidden = other;
+  $("swap-chain").hidden = !other;
+  if (!other) {
+    paintDexMode();
+    if (chain === "mainnet") $("swap-error").textContent = "Native swap, liquidity, and mint are on the DeFi testnet. Switch with the network pill.";
+    return;
+  }
+  if (chain === "bitcoin") chainForm.mode = "tunnel";
+  paintChainSwap();
+}
+
+function tunnelChoices(chain) {
+  if (chain === "ethereum") return [["hemi", "Hemi"], ["solana", "Solana"]];
+  if (chain === "hemi") return [["btc", "Bitcoin"], ["eth", "ETH"]];
+  if (chain === "solana") return [["bitcoin", "Bitcoin"], ["ethereum", "Ethereum"]];
+  return [["hemi", "Hemi"]];
+}
+
+function holdingTokens(chain) {
+  return (HOLDINGS[chain] || []).map((token) => ({
+    ...token,
+    id: `${chain}:${token.native ? "native" : (token.address || token.mint)}`,
+    network: chain,
+    address: token.native ? "native" : (token.address || token.mint),
+  }));
+}
+
+function showChainPicks(chain, mode, venue, target) {
+  if (mode === "tunnel") return (chain === "ethereum" && target === "solana") || (chain === "solana" && target === "ethereum");
+  if (chain === "hemi" && venue === "stargate") return false;
+  return chain === "ethereum" || chain === "hemi" || chain === "solana";
+}
+
+function chainUsesSlippage(chain, mode, venue, target) {
+  if (mode === "swap" && chain !== "bitcoin" && !(chain === "hemi" && venue === "stargate")) return true;
+  return mode === "tunnel" && ((chain === "ethereum" && target === "solana") || (chain === "solana" && target === "ethereum"));
+}
+
+function chainModel() {
+  const chain = selectedChain();
+  if (chain === "bitcoin") chainForm.mode = "tunnel";
+  const mode = chainForm.mode === "tunnel" ? "tunnel" : "swap";
+  const choices = tunnelChoices(chain);
+  if (!choices.some(([id]) => id === chainForm.target)) chainForm.target = choices[0][0];
+  const target = chainForm.target;
+  const venue = chainForm.venue === "sushi" ? "sushi" : "stargate";
+  const direction = chainForm.direction === "withdraw" ? "withdraw" : "deposit";
+  const locked = lockedSwapRoute({ chain, mode, venue, target, direction });
+  const routed = tunnelEnds({ chain, mode, target, direction });
+  const jupTunnel = mode === "tunnel" && ((chain === "solana" && target === "ethereum") || (chain === "ethereum" && target === "solana"));
+  const jupPair = jupTunnel ? jupTunnelPair({
+    page: chain === "solana" ? "solana" : "ethereum",
+    payId: chainForm.payId,
+    receiveId: chainForm.receiveId,
+    ethereum: JUP_BRIDGE.filter((row) => row.network === "ethereum"),
+    solana: JUP_BRIDGE.filter((row) => row.network === "solana"),
+  }) : null;
+  const tokens = chain === "bitcoin" ? [] : holdingTokens(chain);
+  const picks = showChainPicks(chain, mode, venue, target);
+  const pay = jupPair?.pay || tokens.find((token) => token.id === chainForm.payId) || tokens[0] || null;
+  const receive = jupPair?.receive || counterpartToken(tokens, pay, chainForm.receiveId, chain) || null;
+  if (pay?.id) chainForm.payId = pay.id;
+  if (receive?.id) chainForm.receiveId = receive.id;
+  const ends = jupPair ? {
+    payChain: jupPair.pay.network === "ethereum" ? "Ethereum" : "Solana",
+    receiveChain: jupPair.receive.network === "ethereum" ? "Ethereum" : "Solana",
+    subtitle: `${jupPair.pay.network === "ethereum" ? "Ethereum" : "Solana"} → ${jupPair.receive.network === "ethereum" ? "Ethereum" : "Solana"}`,
+  } : routed;
+  const hint = jupPair
+    ? "Jupiter moves ETH, SOL, USDC, and USDT between Ethereum and Solana."
+    : locked
+      ? locked.hint
+      : chain === "hemi" && mode === "swap" && venue === "sushi"
+        ? "Sushi swaps the assets you pick on Hemi. This stays on Hemi."
+        : mode === "swap"
+          ? "A market swap. The amount you receive is an estimate until you confirm."
+          : "A tunnel moves the same coin to the other network.";
+  return {
+    chain,
+    mode,
+    venue,
+    target,
+    direction,
+    locked,
+    picks,
+    pay,
+    receive,
+    tokens,
+    ends,
+    hint,
+    choices,
+    jupPair,
+    payLabel: locked?.pay.symbol || pay?.symbol || "ETH",
+    receiveLabel: locked?.receive.symbol || receive?.symbol || "ETH",
+    subtitle: ends?.subtitle || locked?.subtitle || `${locked?.pay.symbol || pay?.symbol || ""} → ${locked?.receive.symbol || receive?.symbol || ""}`,
+  };
+}
+
+function fillTokenSelect(select, rows, value, disabled) {
+  const sig = `${disabled ? "1" : "0"}:${rows.map((row) => row.id).join("|")}`;
+  if (select.dataset.sig !== sig) {
+    select.replaceChildren();
+    for (const row of rows) {
+      const option = document.createElement("option");
+      option.value = row.id;
+      option.textContent = row.symbol;
+      select.append(option);
+    }
+    select.dataset.sig = sig;
+  }
+  select.disabled = Boolean(disabled);
+  if (value && [...select.options].some((option) => option.value === value)) select.value = value;
+}
+
+function paintChainChips(model) {
+  const host = $("chain-swap-chips");
+  host.replaceChildren();
+  const add = (label, attrs, active) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `swap-chip-btn${active ? " swap-chip-btn--active" : ""}`;
+    button.textContent = label;
+    Object.assign(button.dataset, attrs);
+    host.append(button);
+  };
+  if (model.chain !== "bitcoin") add("Swap", { chainMode: "swap" }, model.mode === "swap");
+  add("Tunnel", { chainMode: "tunnel" }, model.mode === "tunnel");
+  if (model.mode === "tunnel") {
+    if (model.choices.length === 1) {
+      const span = document.createElement("span");
+      span.className = "swap-chip-btn swap-chip-btn--active";
+      span.textContent = `To ${model.ends?.receiveChain || model.choices[0][1]}`;
+      host.append(span);
+    } else {
+      for (const [id, label] of model.choices) add(label, { chainTarget: id }, model.target === id);
+    }
+  }
+  if (model.chain === "hemi" && model.mode === "swap") {
+    add("Stargate", { chainVenue: "stargate" }, model.venue === "stargate");
+    add("Sushi", { chainVenue: "sushi" }, model.venue === "sushi");
   }
 }
 
-function currentSafeMarket() {
-  return SAFE_MARKETS.find((row) => row.id === $("safe-market").value) || SAFE_MARKETS[0];
+function paintChainSlip(model) {
+  const show = chainUsesSlippage(model.chain, model.mode, model.venue, model.target);
+  $("chain-swap-slip").hidden = !show;
+  for (const button of document.querySelectorAll("#chain-swap-slip [data-chain-slip]")) {
+    button.classList.toggle("swap-chip-btn--active", Number(button.dataset.chainSlip) === chainForm.slippage);
+  }
+}
+
+function paintChainSummary(model, route) {
+  const network = model.ends?.subtitle || CHAIN_VIEW[model.chain]?.label || model.chain;
+  $("chain-swap-summary").textContent = route
+    ? `Route · ${route}. Network · ${network}.`
+    : `Network · ${network}. Enter an amount for a quote.`;
+}
+
+function closeChainConfirm() {
+  $("chain-swap-confirm").hidden = true;
+}
+
+async function erc20Balance(chain, token, owner) {
+  const row = EVM_RPC[chain];
+  const data = `0x70a08231${owner.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+  return BigInt(await jsonRpc(row.url, "eth_call", [{ to: token, data }, "latest"]));
+}
+
+async function chainPayBalance(model) {
+  if (!session) return null;
+  const locked = model.locked;
+  if (locked && locked.pay.symbol === "BTC") {
+    if (!session.btcAddress) return null;
+    const read = await readNativeBalance("bitcoin", session.btcAddress);
+    return { raw: read.amount, decimals: 8, symbol: "BTC" };
+  }
+  if (locked && locked.pay.symbol === "hemiBTC") {
+    if (!session.evmAddress) return null;
+    const token = (HOLDINGS.hemi || []).find((row) => row.symbol === "hemiBTC");
+    return { raw: await erc20Balance("hemi", token.address, session.evmAddress), decimals: 8, symbol: "hemiBTC" };
+  }
+  if (locked && locked.pay.symbol === "ETH" && locked.payNetwork === "Ethereum") {
+    if (!session.evmAddress) return null;
+    const read = await readNativeBalance("ethereum", session.evmAddress);
+    return { raw: read.amount, decimals: 18, symbol: "ETH" };
+  }
+  if (locked && locked.pay.symbol === "ETH" && locked.payNetwork === "Hemi") {
+    if (!session.evmAddress) return null;
+    const read = await readNativeBalance("hemi", session.evmAddress);
+    return { raw: read.amount, decimals: 18, symbol: "ETH" };
+  }
+  if (locked && locked.pay.symbol === "SOL") {
+    if (!session.solAddress) return null;
+    const read = await readNativeBalance("solana", session.solAddress);
+    return { raw: read.amount, decimals: 9, symbol: "SOL" };
+  }
+  const pay = model.pay;
+  if (!pay) return null;
+  const network = pay.network || model.chain;
+  const owner = network === "solana" ? session.solAddress : session.evmAddress;
+  if (!owner) return null;
+  if (pay.native) {
+    const read = await readNativeBalance(network, owner);
+    return { raw: read.amount, decimals: pay.decimals, symbol: pay.symbol };
+  }
+  if (network === "solana") {
+    const result = await jsonRpc(SOL_RPC, "getTokenAccountsByOwner", [owner, { mint: pay.address }, { encoding: "jsonParsed" }]);
+    let sum = 0n;
+    for (const item of result?.value || []) {
+      const raw = item?.account?.data?.parsed?.info?.tokenAmount?.amount;
+      if (raw) sum += BigInt(raw);
+    }
+    return { raw: sum, decimals: pay.decimals, symbol: pay.symbol };
+  }
+  return { raw: await erc20Balance(network, pay.address, owner), decimals: pay.decimals, symbol: pay.symbol };
+}
+
+async function chainQuote(model, amountText) {
+  const amountNum = Number(amountText);
+  const described = () => ({ outText: trimAmount(amountNum), route: model.hint });
+  if (!chainUsesSlippage(model.chain, model.mode, model.venue, model.target)) return described();
+  const decimals = model.pay?.decimals ?? 18;
+  const raw = parseUnits(amountText, decimals);
+  if (raw == null || raw <= 0n) throw new Error("Enter an amount.");
+  if (model.jupPair) {
+    if (!session?.evmAddress || !session?.solAddress) throw new Error("This tunnel needs the Ethereum and Solana addresses from a recovery phrase.");
+    const quote = await quoteJupBridge({
+      pay: model.jupPair.pay,
+      receive: model.jupPair.receive,
+      amount: raw,
+      ethAddress: session.evmAddress,
+      solAddress: session.solAddress,
+      slippageBps: chainForm.slippage,
+    });
+    return {
+      outText: formatUnits(BigInt(quote.outAmount), model.jupPair.receive.decimals),
+      route: `Jupiter · ${quote.route}`,
+    };
+  }
+  if (model.chain === "solana" && model.mode === "swap") {
+    const inputMint = model.pay.native ? WSOL_MINT : model.pay.address;
+    const outputMint = model.receive.native ? WSOL_MINT : model.receive.address;
+    const quote = await quoteJupiter({ inputMint, outputMint, amount: raw, slippageBps: chainForm.slippage });
+    return { outText: formatUnits(BigInt(quote.outAmount), model.receive.decimals), route: quote.route };
+  }
+  if (model.chain === "ethereum" && model.mode === "swap") {
+    const path = sushiPath(model.pay, model.receive, ETH_WETH);
+    const data = encodeGetAmountsOut(raw, path);
+    const hex = await jsonRpc(EVM_RPC.ethereum.url, "eth_call", [{ to: SUSHI_ROUTER, data }, "latest"]);
+    const out = decodeAmountsOut(hex);
+    if (out <= 0n) throw new Error("SushiSwap has no route for that pair.");
+    return { outText: formatUnits(out, model.receive.decimals), route: "SushiSwap" };
+  }
+  if (model.chain === "hemi" && model.mode === "swap" && model.venue === "sushi") {
+    if (!session?.evmAddress) throw new Error("Hemi needs a recovery phrase.");
+    const quote = await quoteHemiSushi({
+      tokenIn: model.pay.native ? HEMI_NATIVE : model.pay.address,
+      tokenOut: model.receive.native ? HEMI_NATIVE : model.receive.address,
+      amount: raw,
+      slippageBps: chainForm.slippage,
+      sender: session.evmAddress,
+    });
+    return { outText: formatUnits(BigInt(quote.outAmount), model.receive.decimals), route: "SushiSwap on Hemi" };
+  }
+  return described();
+}
+
+function scheduleChainQuote() {
+  clearTimeout(chainQuoteTimer);
+  const model = chainModel();
+  const amount = $("chain-swap-amount").value.trim();
+  if (!(Number(amount) > 0)) {
+    $("chain-swap-out").textContent = "0";
+    paintChainSummary(model, "");
+    return;
+  }
+  $("chain-swap-out").textContent = "…";
+  chainQuoteTimer = setTimeout(() => {
+    const gen = ++chainQuoteGen;
+    chainQuote(model, amount).then((quoted) => {
+      if (gen !== chainQuoteGen) return;
+      $("chain-swap-out").textContent = quoted.outText;
+      $("chain-swap-error").textContent = "";
+      paintChainSummary(model, quoted.route);
+    }).catch((error) => {
+      if (gen !== chainQuoteGen) return;
+      $("chain-swap-out").textContent = "—";
+      $("chain-swap-error").textContent = error.message;
+      paintChainSummary(model, "");
+    });
+  }, 450);
+}
+
+function paintChainSwap() {
+  const model = chainModel();
+  const phrase = chainPhraseNote(model.chain);
+  $("chain-swap-kicker").textContent = CHAIN_VIEW[model.chain]?.label || "Swap";
+  $("chain-swap-title").textContent = model.mode === "swap" ? "Swap" : "Tunnel";
+  $("chain-swap-sub").textContent = model.subtitle;
+  $("chain-swap-go").textContent = model.mode === "swap" ? "Review swap" : "Review tunnel";
+  $("chain-swap-hint").textContent = phrase || model.hint;
+  $("chain-swap-receive-hint").textContent = model.ends
+    ? model.ends.receiveChain
+    : chainUsesSlippage(model.chain, model.mode, model.venue, model.target)
+      ? `Estimate · ${chainForm.slippage / 100}% slip`
+      : "Estimate";
+  paintChainChips(model);
+  paintChainSlip(model);
+  const payRows = model.locked
+    ? [{ id: "locked-pay", symbol: model.locked.pay.symbol }]
+    : model.jupPair
+      ? JUP_BRIDGE.filter((row) => row.network === model.jupPair.pay.network)
+      : model.tokens;
+  const receiveRows = model.locked
+    ? [{ id: "locked-receive", symbol: model.locked.receive.symbol }]
+    : model.jupPair
+      ? JUP_BRIDGE.filter((row) => row.network === model.jupPair.receive.network)
+      : model.tokens.filter((token) => token.id !== model.pay?.id);
+  fillTokenSelect($("chain-swap-pay"), payRows, model.locked ? "locked-pay" : model.pay?.id, Boolean(model.locked));
+  fillTokenSelect($("chain-swap-receive"), receiveRows, model.locked ? "locked-receive" : model.receive?.id, Boolean(model.locked));
+  const gen = ++chainQuoteGen;
+  chainAvailable = null;
+  $("chain-swap-max").textContent = "Available …";
+  chainPayBalance(model).then((row) => {
+    if (gen !== chainQuoteGen) return;
+    chainAvailable = row;
+    $("chain-swap-max").textContent = row ? `${formatUnits(row.raw, row.decimals)} ${row.symbol} free` : "Available …";
+  }).catch(() => {
+    if (gen !== chainQuoteGen) return;
+    $("chain-swap-max").textContent = "Available …";
+  });
+  scheduleChainQuote();
+}
+
+function chainPhraseNote(chain) {
+  if (!session) return "Unlock the wallet to read a balance.";
+  if ((chain === "ethereum" || chain === "hemi") && !session.evmAddress) return "Restore a 12 or 24 word phrase to open this network.";
+  if (chain === "bitcoin" && !session.btcAddress) return "Restore a 12 or 24 word phrase to open Bitcoin.";
+  if (chain === "solana" && !session.solAddress) return "Restore a 12 or 24 word phrase to open Solana.";
+  return "";
+}
+
+function fillChainMax() {
+  if (!chainAvailable || !(chainAvailable.raw > 0n)) return;
+  $("chain-swap-amount").value = formatUnits(chainAvailable.raw, chainAvailable.decimals);
+  closeChainConfirm();
+  scheduleChainQuote();
+}
+
+function flipChainSwap() {
+  const model = chainModel();
+  if (model.locked || model.ends) chainForm.direction = model.direction === "withdraw" ? "deposit" : "withdraw";
+  else if (model.pay && model.receive) {
+    chainForm.payId = model.receive.id;
+    chainForm.receiveId = model.pay.id;
+  }
+  closeChainConfirm();
+  paintChainSwap();
+}
+
+function reviewChainSwap() {
+  const amount = $("chain-swap-amount").value.trim();
+  if (!(Number(amount) > 0)) {
+    $("chain-swap-error").textContent = "Enter an amount.";
+    return;
+  }
+  const model = chainModel();
+  const out = $("chain-swap-out").textContent;
+  if (out === "…" || out === "—") {
+    $("chain-swap-error").textContent = $("chain-swap-error").textContent || "Wait for the quote.";
+    return;
+  }
+  $("chain-swap-error").textContent = "";
+  $("chain-swap-confirm").hidden = false;
+  $("chain-swap-confirm-copy").textContent = `You pay ${amount} ${model.payLabel}. You receive about ${out} ${model.receiveLabel}. ${$("chain-swap-summary").textContent} This preview quotes the route and does not broadcast that swap.`;
+}
+
+function safeErrorText(error) {
+  const message = error?.message || "SafeTrade did not answer.";
+  if (/failed to fetch|networkerror|load failed/i.test(message)) return "SafeTrade did not answer.";
+  if (/allow.?list|whitelist|ipv6|not allowed ip|ip address/i.test(message)) {
+    return "SafeTrade accepts the call only from a trusted IPv4.";
+  }
+  return message;
+}
+
+function routesOn(network) {
+  return SAFE_ROUTES.filter((route) => route.network === network);
+}
+
+function routeById(id) {
+  return SAFE_ROUTES.find((route) => route.id === id) || null;
+}
+
+function currentSafePay() {
+  return routeById(safeUi.payId) || routesOn(safeUi.network)[0] || null;
+}
+
+function partnerRoutes(pay) {
+  if (!pay) return [];
+  const seen = new Set();
+  const out = [];
+  for (const row of SAFE_ROUTES) {
+    if (row.currency === pay.currency || seen.has(row.currency)) continue;
+    if (!safePair(pay.currency, row.currency)) continue;
+    const pick = SAFE_ROUTES.find((item) => item.currency === row.currency && item.network === safeUi.network)
+      || SAFE_ROUTES.find((item) => item.currency === row.currency);
+    if (!pick) continue;
+    seen.add(row.currency);
+    out.push(pick);
+  }
+  return out;
+}
+
+function currentSafeReceive() {
+  const pay = currentSafePay();
+  if (!pay) return null;
+  if (safeUi.panel === "deposit" || safeUi.panel === "withdraw") return pay;
+  const partners = partnerRoutes(pay);
+  return partners.find((row) => row.id === safeUi.receiveId) || partners[0] || null;
+}
+
+function currentSafePair() {
+  const pay = currentSafePay();
+  const receive = currentSafeReceive();
+  if (!pay || !receive || safeUi.panel === "deposit" || safeUi.panel === "withdraw") return null;
+  return safePair(pay.currency, receive.currency);
 }
 
 function safeBalance(asset) {
   return safeRows.find((row) => row.asset === String(asset || "").toUpperCase()) || { asset, available: 0, locked: 0 };
 }
 
-function paintSafeFree() {
-  const line = $("safe-free");
-  if (!line) return;
-  if (!safeCreds) {
-    line.textContent = "";
-    return;
+function fillSelect(select, rows, value) {
+  const sig = rows.map((row) => row.id).join("|");
+  if (select.dataset.sig !== sig) {
+    select.replaceChildren();
+    for (const row of rows) {
+      const option = document.createElement("option");
+      option.value = row.id;
+      option.textContent = row.symbol;
+      select.append(option);
+    }
+    select.dataset.sig = sig;
   }
-  const market = currentSafeMarket();
-  const side = $("safe-side").value;
-  const asset = side === "sell" ? market.base : market.quote;
-  const row = safeBalance(asset);
-  line.textContent = `${asset}: ${row.available} free; ${row.locked} locked in open orders.`;
+  if (value && [...select.options].some((option) => option.value === value)) select.value = value;
+}
+
+function safeReceiveText() {
+  const pay = currentSafePay();
+  const value = Number($("safe-amount").value);
+  if (!(value > 0)) return "0";
+  if (safeUi.panel === "deposit") return trimAmount(value);
+  if (safeUi.panel === "withdraw" && pay) return trimAmount(Math.max(0, value - pay.fee));
+  const pair = currentSafePair();
+  if (!pair) return "—";
+  if (safeUi.panel === "swap" && safeUi.slippage == null && safeUi.depth) {
+    const fill = walkBook(safeUi.depth, pair.side, value, safeUi.last);
+    if (!fill) return "—";
+    return pair.side === "buy" ? trimAmount(fill.base) : trimAmount(fill.quote);
+  }
+  if (safeUi.panel === "limit") {
+    const price = Number($("safe-price").value);
+    if (!(price > 0)) return "0";
+    return pair.side === "sell" ? trimAmount(value * price) : trimAmount(value / price);
+  }
+  if (!(safeUi.last > 0)) return "…";
+  return pair.side === "buy" ? trimAmount(value / safeUi.last) : trimAmount(value * safeUi.last);
+}
+
+function paintSafeQuote() {
+  const pay = currentSafePay();
+  const receive = currentSafeReceive();
+  const trading = safeUi.panel === "swap" || safeUi.panel === "limit";
+  $("safe-receive-amount").textContent = safeReceiveText();
+  $("safe-receive-hint").textContent = !trading
+    ? (safeUi.panel === "deposit" ? "On SafeTrade" : "In this wallet · after the fee")
+    : safeUi.panel === "limit"
+      ? "If the limit fills, before the fee"
+      : safeUi.slippage == null
+        ? "Estimate · from the order book, before the fee"
+        : "Estimate · at the last price, before the fee";
+  const pair = currentSafePair();
+  const lines = [];
+  if (trading && pay && receive && !pair) lines.push(`SafeTrade has no ${pay.symbol}/${receive.symbol} market.`);
+  if (safeUi.panel === "swap" && pair && safeUi.slippage != null && safeUi.last > 0) {
+    const worst = safeSlippagePrice(safeUi.last, pair.side, safeUi.slippage, pair.market.pricePlaces);
+    if (worst != null) lines.push(`Worst price ${worst} ${pair.market.quote}.`);
+  }
+  if (safeUi.panel === "swap" && pair && safeUi.slippage == null) {
+    const value = Number($("safe-amount").value);
+    const fill = safeUi.depth && value > 0 ? walkBook(safeUi.depth, pair.side, value, safeUi.last) : null;
+    if (fill) lines.push(`Average ${trimAmount(fill.averagePrice)} ${pair.market.quote}. Slippage ${fill.slippageBps} bps.`);
+    else lines.push("No price cap. The book average shows here before the order is sent.");
+  }
+  $("safe-summary").textContent = lines.join(" ");
+  const spot = pay ? safeBalance(pay.symbol) : null;
+  if (safeUi.panel === "deposit") {
+    $("safe-free").textContent = safeUi.walletFree?.missing
+      || (safeUi.walletFree ? `${safeUi.walletFree.text} ${pay?.symbol || ""} in this wallet` : "Checking the wallet balance.");
+  } else if (!safeCreds) {
+    $("safe-free").textContent = "Check balances first.";
+  } else if (spot) {
+    $("safe-free").textContent = spot.locked > 0
+      ? `${trimAmount(spot.available)} ${pay.symbol} free · ${trimAmount(spot.locked)} locked`
+      : `${trimAmount(spot.available)} ${pay.symbol} free`;
+  }
+}
+
+function paintSafeChrome() {
+  const pay = currentSafePay();
+  const receive = currentSafeReceive();
+  if (pay) safeUi.payId = pay.id;
+  if (receive && safeUi.panel !== "deposit" && safeUi.panel !== "withdraw") safeUi.receiveId = receive.id;
+  const trading = safeUi.panel === "swap" || safeUi.panel === "limit";
+  $("safe-title").textContent = safeUi.panel === "limit" ? "Limit" : safeUi.panel === "swap" ? "Swap" : safeUi.panel === "deposit" ? "Deposit" : "Withdraw";
+  $("safe-network").value = safeUi.network;
+  for (const button of document.querySelectorAll("#wpage-safetrade [data-safe-panel]")) {
+    button.classList.toggle("swap-chip-btn--active", button.dataset.safePanel === safeUi.panel);
+  }
+  for (const button of document.querySelectorAll("#safe-slip [data-safe-slip]")) {
+    const bps = button.dataset.safeSlip === "" ? null : Number(button.dataset.safeSlip);
+    button.classList.toggle("swap-chip-btn--active", bps === safeUi.slippage);
+  }
+  fillSelect($("safe-pay"), routesOn(safeUi.network), pay?.id);
+  $("safe-receive").hidden = !trading;
+  if (trading) fillSelect($("safe-receive"), partnerRoutes(pay), receive?.id);
+  $("safe-limit-row").hidden = safeUi.panel !== "limit";
+  $("safe-withdraw-row").hidden = safeUi.panel !== "withdraw";
+  $("safe-slip").hidden = safeUi.panel !== "swap";
+  $("safe-book").hidden = !trading;
+  $("safe-orders-wrap").hidden = safeUi.panel !== "limit";
+  $("safe-confirm").hidden = !safeUi.confirm;
+  const labels = { swap: "Review swap", limit: "Review limit", deposit: "Review deposit", withdraw: "Review withdraw" };
+  $("safe-order").textContent = labels[safeUi.panel] || "Review";
+  $("safe-hint").textContent = safeUi.panel === "limit"
+    ? "A limit rests at the price you type until it fills or you cancel it."
+    : safeUi.panel === "swap"
+      ? "The swap stays on SafeTrade until you withdraw."
+      : safeUi.panel === "deposit"
+        ? "Deposit sends from this wallet. WART uses Warthog mainnet."
+        : "Withdraw pays back to this wallet. SafeTrade asks for an email code and 2FA the first time.";
+  paintSafeQuote();
 }
 
 function paintSafeBalances() {
   const host = $("safe-balances");
-  if (!host) return;
   host.replaceChildren();
   if (!safeCreds) {
     const note = document.createElement("p");
     note.className = "note";
     note.textContent = "Enter the API key to see free and locked balances.";
     host.append(note);
-    paintSafeFree();
     return;
   }
   const rows = safeRows.filter((row) => row.available > 0 || row.locked > 0);
@@ -9656,25 +10403,32 @@ function paintSafeBalances() {
     note.className = "note";
     note.textContent = "No spot balance on SafeTrade.";
     host.append(note);
+    return;
   }
   for (const row of rows) {
     const line = document.createElement("p");
     line.className = "note";
-    line.textContent = `${row.asset}: ${row.available} free; ${row.locked} locked in open orders.`;
+    line.textContent = row.locked > 0
+      ? `${row.asset}: ${trimAmount(row.available)} free; ${trimAmount(row.locked)} locked in open orders.`
+      : `${row.asset}: ${trimAmount(row.available)} free`;
     host.append(line);
   }
-  paintSafeFree();
+}
+
+function paintSafeOrdersEmpty() {
+  $("safe-orders").replaceChildren();
+  $("safe-orders-empty").hidden = false;
 }
 
 async function paintSafeOrders() {
   const list = $("safe-orders");
-  if (!list) return;
   list.replaceChildren();
-  if (!safeCreds) {
+  const pair = currentSafePair();
+  if (!safeCreds || !pair) {
     $("safe-orders-empty").hidden = false;
     return;
   }
-  const rows = await safeOpenOrders(safeCreds, currentSafeMarket().id);
+  const rows = await safeOpenOrders(safeCreds, pair.market.id);
   $("safe-orders-empty").hidden = rows.length > 0;
   for (const row of rows) {
     const li = document.createElement("li");
@@ -9690,80 +10444,450 @@ async function paintSafeOrders() {
   }
 }
 
-async function paintSafePage() {
-  paintSafeMarkets();
-  const error = $("safe-error");
-  if (error) error.textContent = "";
+function paintSafeBook() {
+  const host = $("safe-book");
+  host.replaceChildren();
+  const pair = currentSafePair();
+  if (!pair) return;
+  if (!safeUi.depth) {
+    const note = document.createElement("p");
+    note.className = "swap-fine";
+    note.textContent = "Reading the book…";
+    host.append(note);
+    return;
+  }
+  const add = (level, kind, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = kind === "ask" ? "is-ask" : "is-bid";
+    if (safeUi.panel === "swap" && currentSafePair()?.side === (kind === "ask" ? "buy" : "sell") && index < 8) {
+      const value = Number($("safe-amount").value);
+      const fill = value > 0 ? walkBook(safeUi.depth, currentSafePair().side, value, safeUi.last) : null;
+      if (fill && index < fill.touched) button.classList.add("is-touch");
+    }
+    button.dataset.bookPrice = String(level.price);
+    button.textContent = `${level.price} · ${level.amount}`;
+    host.append(button);
+  };
+  safeUi.depth.asks.slice(0, 8).slice().reverse().forEach((level, index, rows) => add(level, "ask", rows.length - 1 - index));
+  safeUi.depth.bids.slice(0, 8).forEach((level, index) => add(level, "bid", index));
+}
+
+async function refreshSafeBook() {
+  const pair = currentSafePair();
+  if (!pair || (safeUi.panel !== "swap" && safeUi.panel !== "limit")) {
+    safeUi.depth = null;
+    paintSafeBook();
+    return;
+  }
   try {
-    const ticker = await safeTicker(currentSafeMarket().id);
-    $("safe-ticker").textContent = `${ticker.market} last ${ticker.last}${ticker.change ? ` (${ticker.change}%)` : ""}`;
-  } catch (err) {
-    $("safe-ticker").textContent = err.message;
+    safeUi.depth = await safeDepth(pair.market.id);
+    paintSafeBook();
+    paintSafeQuote();
+  } catch (error) {
+    safeUi.depth = null;
+    $("safe-book").textContent = safeErrorText(error);
+  }
+}
+
+async function nodeOn(base, path, body) {
+  if (body == null) {
+    const response = await fetch(`/api/node?base=${encodeURIComponent(base)}&path=${encodeURIComponent(path)}`);
+    const json = await response.json();
+    if (!response.ok || json.code !== 0) throw new Error(json.error || "The Warthog node did not answer");
+    return json.data;
+  }
+  const response = await fetch("/api/node", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ base, path, body }),
+  });
+  const json = await response.json();
+  if (!response.ok || json.code !== 0) throw new Error(json.error || "The node rejected the transaction");
+  return json.data;
+}
+
+async function loadSafeWallet() {
+  const pay = currentSafePay();
+  safeUi.walletFree = null;
+  if (safeUi.panel !== "deposit" || !pay || !session) {
+    paintSafeQuote();
+    return;
+  }
+  try {
+    if (pay.chain === "wart") {
+      const base = NETWORKS.mainnet.base;
+      const data = await nodeOn(base, `account/${session.address}/wart_balance`).catch(() => nodeOn(base, `account/${session.address}/balance`));
+      const live = breakdownOf(data);
+      safeUi.walletFree = { text: formatE8(live.available), raw: live.available, locked: live.locked + live.mempool };
+    } else if (pay.chain === "bitcoin") {
+      if (!session.btcAddress) safeUi.walletFree = { missing: "Bitcoin needs a recovery phrase." };
+      else {
+        const read = await readNativeBalance("bitcoin", session.btcAddress);
+        safeUi.walletFree = { text: formatUnits(read.amount, 8), raw: read.amount };
+      }
+    } else if (pay.chain === "solana") {
+      if (!session.solAddress) safeUi.walletFree = { missing: "Solana needs a recovery phrase." };
+      else if (pay.currency !== "sol") safeUi.walletFree = { missing: "This preview cannot sign an SPL token transfer. Native SOL can be deposited." };
+      else {
+        const read = await readNativeBalance("solana", session.solAddress);
+        safeUi.walletFree = { text: formatUnits(read.amount, 9), raw: read.amount };
+      }
+    } else if (!session.evmAddress) {
+      safeUi.walletFree = { missing: "Ethereum needs a recovery phrase." };
+    } else if (pay.currency === "eth") {
+      const read = await readNativeBalance("ethereum", session.evmAddress);
+      safeUi.walletFree = { text: formatUnits(read.amount, 18), raw: read.amount };
+    } else {
+      const token = (HOLDINGS.ethereum || []).find((row) => row.symbol === pay.symbol);
+      if (!token?.address) safeUi.walletFree = { missing: `This wallet cannot send ${pay.symbol} on Ethereum yet.` };
+      else {
+        const raw = await erc20Balance("ethereum", token.address, session.evmAddress);
+        safeUi.walletFree = { text: formatUnits(raw, token.decimals), raw };
+      }
+    }
+  } catch (error) {
+    safeUi.walletFree = { missing: error.message };
+  }
+  paintSafeQuote();
+}
+
+async function paintSafePage() {
+  const gen = ++safePaintGen;
+  $("safe-error").textContent = "";
+  paintSafeChrome();
+  if (safeCreds) {
+    const host = $("safe-balances");
+    host.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "Checking SafeTrade…";
+    host.append(note);
+  } else {
+    paintSafeBalances();
+  }
+  const pair = currentSafePair();
+  const pay = currentSafePay();
+  try {
+    if (pair) {
+      const ticker = await safeTicker(pair.market.id);
+      if (gen !== safePaintGen) return;
+      safeUi.last = Number(ticker.last) || 0;
+      $("safe-ticker").textContent = `${ticker.market} last ${ticker.last}${ticker.change ? ` (${ticker.change}%)` : ""}`;
+    } else if (pay) {
+      safeUi.last = 0;
+      $("safe-ticker").textContent = `${pay.symbol} · ${safeUi.network}`;
+    }
+  } catch (error) {
+    if (gen === safePaintGen) $("safe-ticker").textContent = safeErrorText(error);
+  }
+  if (safeUi.panel === "swap" || safeUi.panel === "limit") void refreshSafeBook();
+  else {
+    safeUi.depth = null;
+    paintSafeBook();
   }
   if (!safeCreds) {
     safeRows = [];
     paintSafeBalances();
-    $("safe-orders").replaceChildren();
-    $("safe-orders-empty").hidden = false;
-    return;
-  }
-  try {
-    safeRows = await safeBalances(safeCreds);
-    paintSafeBalances();
-    await paintSafeOrders();
-  } catch (err) {
-    if (error) error.textContent = err.message;
-  }
-}
-
-function fillSafeMax() {
-  const error = $("safe-error");
-  if (error) error.textContent = "";
-  const market = currentSafeMarket();
-  const side = $("safe-side").value;
-  const price = Number($("safe-price").value);
-  if (side === "sell") {
-    $("safe-amount").value = String(safeBalance(market.base).available);
-    return;
-  }
-  const quote = safeBalance(market.quote);
-  if (!(price > 0)) {
-    if (error) error.textContent = "Enter a price to fill the buy amount from the free balance.";
-    return;
-  }
-  const amount = Math.floor((quote.available / price) * 10 ** market.amountPlaces) / 10 ** market.amountPlaces;
-  $("safe-amount").value = String(amount > 0 ? amount : 0);
-}
-
-async function submitSafeOrder(event) {
-  event.preventDefault();
-  const error = $("safe-error");
-  if (error) error.textContent = "";
-  if (!safeCreds) {
-    if (error) error.textContent = "Enter the API key first.";
-    return;
-  }
-  const market = currentSafeMarket();
-  const side = $("safe-side").value;
-  const amount = Number($("safe-amount").value);
-  const price = Number($("safe-price").value);
-  try {
-    safeRows = await safeBalances(safeCreds);
-    paintSafeBalances();
-    const spend = side === "sell" ? safeBalance(market.base) : safeBalance(market.quote);
-    const need = side === "sell" ? amount : amount * price;
-    if (!(amount > 0) || !(price > 0)) throw new Error("Enter an amount and a price.");
-    if (need > spend.available + 1e-12) {
-      if (side === "sell") $("safe-amount").value = String(spend.available);
-      else if (price > 0) $("safe-amount").value = String(spend.available / price);
-      throw new Error(`Only ${spend.available} ${spend.asset} free; ${spend.locked} locked in open orders.`);
+    paintSafeOrdersEmpty();
+  } else {
+    try {
+      safeRows = await safeBalances(safeCreds);
+      if (gen !== safePaintGen) return;
+      paintSafeBalances();
+      if (safeUi.panel === "limit") await paintSafeOrders();
+      else paintSafeOrdersEmpty();
+    } catch (error) {
+      if (gen !== safePaintGen) return;
+      safeRows = [];
+      $("safe-error").textContent = safeErrorText(error);
+      const host = $("safe-balances");
+      host.replaceChildren();
+      const note = document.createElement("p");
+      note.className = "note";
+      note.textContent = "Balances are unavailable.";
+      host.append(note);
     }
-    const order = await safeLimitOrder(safeCreds, { market, side, amount, price });
-    $("safe-amount").value = "";
+  }
+  if (safeUi.panel === "deposit") void loadSafeWallet();
+  paintSafeQuote();
+}
+
+function flipSafeLegs() {
+  if (safeUi.panel === "deposit") safeUi.panel = "withdraw";
+  else if (safeUi.panel === "withdraw") safeUi.panel = "deposit";
+  else {
+    const pay = currentSafePay();
+    const receive = currentSafeReceive();
+    if (pay && receive) {
+      safeUi.payId = receive.id;
+      safeUi.receiveId = pay.id;
+      safeUi.network = receive.network;
+    }
+  }
+  safeUi.confirm = false;
+  paintSafeChrome();
+  void paintSafePage();
+}
+
+async function fillSafeMax() {
+  $("safe-error").textContent = "";
+  const pay = currentSafePay();
+  if (!pay) return;
+  if (safeUi.panel === "deposit") {
+    if (!safeUi.walletFree || safeUi.walletFree.missing) {
+      $("safe-error").textContent = safeUi.walletFree?.missing || "Checking the wallet balance.";
+      return;
+    }
+    let text = safeUi.walletFree.text;
+    try {
+      if (pay.currency === "eth" && session?.evmAddress) {
+        const reserve = await evmTransferReserve("ethereum");
+        const room = safeUi.walletFree.raw > reserve ? safeUi.walletFree.raw - reserve : 0n;
+        text = formatUnits(room, 18);
+      } else if (pay.currency === "sol" && session?.solAddress) {
+        text = formatUnits(await maxSendableSol(session.solAddress), 9);
+      } else if (pay.chain === "bitcoin" && session?.btcAddress) {
+        const [utxos, rate] = await Promise.all([fetchBtcUtxos(session.btcAddress), fetchBtcFeeRate()]);
+        text = formatUnits(maxSendableBtc(utxos.filter((row) => row.confirmed !== false), rate), 8);
+      }
+    } catch (error) {
+      $("safe-error").textContent = error.message;
+      return;
+    }
+    $("safe-amount").value = text;
+    paintSafeQuote();
+    return;
+  }
+  const row = safeBalance(pay.symbol);
+  $("safe-amount").value = trimAmount(row.available);
+  if (row.locked > 0 && !(row.available > 0)) {
+    $("safe-error").textContent = `Only ${trimAmount(row.available)} ${pay.symbol} free; ${trimAmount(row.locked)} locked in open orders.`;
+  }
+  paintSafeQuote();
+}
+
+function safeProblem() {
+  const pay = currentSafePay();
+  const value = Number($("safe-amount").value);
+  if (!safeCreds) return "Enter the API key first.";
+  if (!pay || !(value > 0)) return "Enter an amount.";
+  const trading = safeUi.panel === "swap" || safeUi.panel === "limit";
+  if (trading) {
+    const pair = currentSafePair();
+    const receive = currentSafeReceive();
+    if (!pair) return `SafeTrade has no ${pay.symbol}/${receive?.symbol || "—"} market.`;
+    if (safeUi.panel === "limit") {
+      const price = Number($("safe-price").value);
+      if (!(price > 0)) return "Enter a limit price.";
+      const baseSize = pair.side === "sell" ? value : value / price;
+      if (!(baseSize > 0) || baseSize < pair.market.minBase) return `Minimum ${pair.side} is ${pair.market.minBase} ${pair.market.base}.`;
+    } else if (pair.side === "sell" && value < pair.market.minBase) {
+      return `Minimum ${pair.market.base} sell is ${pair.market.minBase}.`;
+    }
+    const spot = safeBalance(pay.symbol);
+    if (value > spot.available + 1e-12) {
+      $("safe-amount").value = trimAmount(spot.available);
+      return `Only ${trimAmount(spot.available)} ${pay.symbol} free; ${trimAmount(spot.locked)} locked in open orders.`;
+    }
+    return "";
+  }
+  if (safeUi.panel === "deposit") {
+    if (pay.chain === "solana" && pay.currency !== "sol") return "This preview cannot sign an SPL token transfer. Native SOL can be deposited.";
+    if (value + 1e-12 < pay.minDeposit) return `Minimum ${pay.symbol} deposit is ${pay.minDeposit}.`;
+    if (safeUi.walletFree?.missing) return safeUi.walletFree.missing;
+    if (safeUi.walletFree && Number(safeUi.walletFree.text) + 1e-9 < value) {
+      $("safe-amount").value = safeUi.walletFree.text;
+      return `Only ${safeUi.walletFree.text} ${pay.symbol} is in this wallet.`;
+    }
+    return "";
+  }
+  if (!safeWithdrawAddress(pay)) return `This wallet has no ${pay.symbol} address to withdraw to.`;
+  if (value + 1e-12 < pay.minWithdraw) return `Minimum ${pay.symbol} withdraw is ${pay.minWithdraw}.`;
+  const spot = safeBalance(pay.symbol);
+  if (value > spot.available + 1e-12) {
+    $("safe-amount").value = trimAmount(spot.available);
+    return `Only ${trimAmount(spot.available)} ${pay.symbol} free; ${trimAmount(spot.locked)} locked in open orders.`;
+  }
+  return "";
+}
+
+function safeWithdrawAddress(route) {
+  if (!session || !route) return "";
+  if (route.chain === "wart") return session.address || "";
+  if (route.chain === "ethereum") return session.evmAddress || "";
+  if (route.chain === "bitcoin") return session.btcAddress || "";
+  if (route.chain === "solana") return session.solAddress || "";
+  return "";
+}
+
+function reviewSafeTrade() {
+  $("safe-error").textContent = "";
+  const problem = safeProblem();
+  if (problem) {
+    $("safe-error").textContent = problem;
+    safeUi.confirm = false;
+    $("safe-confirm").hidden = true;
+    return;
+  }
+  const pay = currentSafePay();
+  const receive = currentSafeReceive();
+  const amount = $("safe-amount").value.trim();
+  safeUi.confirm = true;
+  $("safe-confirm").hidden = false;
+  const action = safeUi.panel;
+  const receiveText = $("safe-receive-amount").textContent;
+  $("safe-confirm-copy").textContent = action === "deposit"
+    ? `Send ${amount} ${pay.symbol} from this wallet to the SafeTrade deposit address.`
+    : action === "withdraw"
+      ? `Withdraw about ${receiveText} ${pay.symbol} to this wallet after the fee.`
+      : `Pay ${amount} ${pay.symbol} for about ${receiveText} ${receive?.symbol || ""}.`;
+  $("safe-confirm-go").textContent = action === "deposit" ? "Confirm deposit" : action === "withdraw" ? "Confirm withdraw" : action === "limit" ? "Confirm limit" : "Confirm swap";
+}
+
+function erc20TransferData(to, amount) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(to)) throw new Error("SafeTrade returned a deposit address this wallet cannot send to.");
+  const addr = to.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  return `0xa9059cbb${addr}${amount.toString(16).padStart(64, "0")}`;
+}
+
+async function sendSafeWart(to, amountText) {
+  const dest = to.trim().replace(/^0x/i, "").toLowerCase();
+  if (!validateAddress(dest)) throw new Error("SafeTrade returned a deposit address this wallet cannot send to.");
+  const amount = parseWartToE8(amountText);
+  if (amount == null || amount <= 0n) throw new Error("Enter an amount greater than 0, with at most 8 decimals.");
+  const base = NETWORKS.mainnet.base;
+  const feeData = await nodeOn(base, "tools/encode16bit/from_string/0.001");
+  const fee = BigInt(feeData.roundedE8 ?? feeData.rounded?.E8);
+  const liveData = await nodeOn(base, `account/${session.address}/wart_balance`).catch(() => nodeOn(base, `account/${session.address}/balance`));
+  const live = breakdownOf(liveData);
+  if (amount + fee > live.available) {
+    const room = live.available > fee ? live.available - fee : 0n;
+    $("safe-amount").value = formatE8(room);
+    throw new Error(`Only ${formatE8(live.available)} free; ${formatE8(live.locked + live.mempool)} locked in open orders.`);
+  }
+  const head = await nodeOn(base, "chain/head");
+  const chain = head.chainHead || head;
+  if (!chain.pinHash || chain.pinHeight == null) throw new Error("Chain head is missing a pin");
+  const tx = await signHeld("transfer", {
+    pinHash: chain.pinHash,
+    pinHeight: chain.pinHeight,
+    nonceId: crypto.getRandomValues(new Uint32Array(1))[0],
+    feeE8: fee,
+    toAddr: dest,
+    amountE8: amount,
+    network: "mainnet",
+  });
+  const result = await nodeOn(base, "transaction/add", tx);
+  return result?.txHash || result?.hash || "submitted";
+}
+
+async function sendSafeDeposit(route, amountText, dest) {
+  if (route.chain === "wart") return sendSafeWart(dest, amountText);
+  if (route.chain === "bitcoin") {
+    if (!session.btcAddress) throw new Error("Bitcoin needs a recovery phrase.");
+    const to = assertBtcAddress(dest);
+    const amount = parseUnits(amountText, 8);
+    if (amount == null || amount <= 0n) throw new Error("Enter an amount.");
+    const [utxos, rate] = await Promise.all([fetchBtcUtxos(session.btcAddress), fetchBtcFeeRate()]);
+    const max = maxSendableBtc(utxos.filter((row) => row.confirmed !== false), rate);
+    if (amount > max) throw new Error(`Only ${formatUnits(max, 8)} BTC can be sent after the network fee.`);
+    return vaultCall("sendBtc", { to, amount });
+  }
+  if (route.chain === "solana") {
+    if (route.currency !== "sol") throw new Error("This preview cannot sign an SPL token transfer. Native SOL can be deposited.");
+    if (!session.hasPhrase || !session.solAddress) throw new Error("Solana needs a recovery phrase.");
+    assertSolAddress(dest);
+    const amount = parseUnits(amountText, 9);
+    if (amount == null || amount <= 0n) throw new Error("Enter an amount.");
+    const max = await maxSendableSol(session.solAddress);
+    if (amount > max) throw new Error(`Only ${formatUnits(max, 9)} SOL can be sent after the network fee and the rent reserve.`);
+    return vaultCall("sendSol", { to: dest.trim(), amount });
+  }
+  if (!session.evmAddress) throw new Error("Ethereum needs a recovery phrase.");
+  if (route.currency === "eth") {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(dest)) throw new Error("SafeTrade returned a deposit address this wallet cannot send to.");
+    const amount = parseUnits(amountText, 18);
+    if (amount == null || amount <= 0n) throw new Error("Enter an amount.");
+    const live = await readNativeBalance("ethereum", session.evmAddress);
+    const reserve = await evmTransferReserve("ethereum");
+    if (amount + reserve > live.amount) throw new Error(`Only ${formatNative(live.amount, 18)} ETH available, and the network fee is extra.`);
+    return vaultCall("sendNativeEvm", { to: dest, amount, chain: "ethereum" });
+  }
+  const token = (HOLDINGS.ethereum || []).find((row) => row.symbol === route.symbol);
+  if (!token?.address) throw new Error(`This wallet cannot send ${route.symbol} on Ethereum yet.`);
+  const amount = parseUnits(amountText, token.decimals);
+  if (amount == null || amount <= 0n) throw new Error("Enter an amount.");
+  const raw = await erc20Balance("ethereum", token.address, session.evmAddress);
+  if (amount > raw) throw new Error(`Only ${formatUnits(raw, token.decimals)} ${route.symbol} free.`);
+  return vaultCall("sendEvmCall", { to: token.address, data: erc20TransferData(dest, amount), value: 0n, chain: "ethereum" });
+}
+
+async function submitSafeTrade() {
+  const button = $("safe-confirm-go");
+  button.disabled = true;
+  $("safe-error").textContent = "";
+  try {
+    if (!safeCreds) throw new Error("Enter the API key first.");
+    const pay = currentSafePay();
+    const receive = currentSafeReceive();
+    const value = Number($("safe-amount").value);
+    if (safeUi.panel === "swap" || safeUi.panel === "limit") {
+      safeRows = await safeBalances(safeCreds);
+      paintSafeBalances();
+      const problem = safeProblem();
+      if (problem) throw new Error(problem);
+      const pair = currentSafePair();
+      if (safeUi.panel === "limit") {
+        const price = Number($("safe-price").value);
+        const base = pair.side === "sell" ? value : value / price;
+        const order = await safeLimitOrder(safeCreds, { market: pair.market, side: pair.side, amount: base, price });
+        $("safe-hint").textContent = `Limit ${pair.side} resting at ${order.price || price} ${pair.market.quote}.`;
+      } else {
+        const order = await safeSwap(safeCreds, { market: pair.market, side: pair.side, amount: value, slippageBps: safeUi.slippage });
+        $("safe-hint").textContent = order.filled > 0
+          ? `Filled ${order.filled} ${pair.market.base}.`
+          : `Order ${order.id || "sent"} is ${order.state || "placed"}.`;
+      }
+      $("safe-amount").value = "";
+    } else if (safeUi.panel === "deposit") {
+      const limits = await safePublicNetwork(pay.currency, pay.blockchainKey);
+      if (limits && !limits.depositEnabled) throw new Error("SafeTrade has deposits turned off for this coin.");
+      if (limits && value + 1e-12 < limits.minDeposit) throw new Error(`Minimum ${pay.symbol} deposit is ${limits.minDeposit}.`);
+      const dest = await safeDepositAddress(safeCreds, pay.currency, pay.blockchainKey);
+      const sent = await sendSafeDeposit(pay, $("safe-amount").value.trim(), dest);
+      $("safe-hint").textContent = `${$("safe-amount").value.trim()} ${pay.symbol} sent to SafeTrade. ${sent}`;
+      $("safe-amount").value = "";
+    } else {
+      const result = await safeWithdrawCoin(safeCreds, {
+        currency: pay.currency,
+        blockchainKey: pay.blockchainKey,
+        min: pay.minWithdraw,
+        fee: pay.fee,
+        decimals: pay.decimals,
+        bookLabel: pay.symbol,
+      }, {
+        amount: value,
+        address: safeWithdrawAddress(pay),
+        emailCode: $("safe-email").value,
+        otpCode: $("safe-otp").value,
+      });
+      if (result?.needCode) {
+        if (result.clearEmail) $("safe-email").value = "";
+        throw new Error(result.message);
+      }
+      $("safe-email").value = "";
+      $("safe-otp").value = "";
+      $("safe-hint").textContent = `Withdraw ${result.amount || value} ${pay.symbol} submitted.`;
+      $("safe-amount").value = "";
+    }
+    safeUi.confirm = false;
+    $("safe-confirm").hidden = true;
     await paintSafePage();
-    $("safe-ticker").textContent = `Order ${order.id || "sent"} is ${order.state || "open"}. ${$("safe-ticker").textContent}`;
-  } catch (err) {
-    if (error) error.textContent = err.message;
+  } catch (error) {
+    $("safe-error").textContent = safeErrorText(error);
+  } finally {
+    button.disabled = false;
   }
 }
 

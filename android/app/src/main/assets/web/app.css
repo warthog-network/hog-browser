@@ -91,6 +91,8 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); text-tran
 .top-title { display: grid; flex: 1; min-width: 0; }
 .brand { color: var(--gold); font-size: 16px; letter-spacing: 0.24em; }
 .top-host { color: var(--muted); font-size: 11px; font-family: "Share Tech Mono", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.top-host { display: block; width: 100%; margin: 0; padding: 0; border: 0; background: none; text-align: left; }
+button.top-host::after { content: " ▾"; color: var(--gold); }
 .conn { width: 10px; height: 10px; border-radius: 50%; background: #52525b; }
 .conn.ok { background: var(--ok); box-shadow: 0 0 8px rgba(143, 191, 120, 0.6); }
 .conn.bad { background: var(--danger); }
@@ -141,6 +143,10 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); text-tran
 .status-text b { font-family: "Orbitron", sans-serif; font-size: 15px; letter-spacing: 0.04em; }
 .status-text span { color: var(--muted); font-size: 13px; }
 #mining-actions { margin: 12px 0 0; }
+#mining-launchers { margin-bottom: 4px; }
+.launcher.is-on { border-color: rgba(253, 185, 19, 0.55); }
+.launcher .note { margin: 6px 0 0; overflow-wrap: anywhere; }
+.launcher-add { display: grid; gap: 8px; margin: 10px 0 4px; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
 .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
 .stat b { display: block; font-family: "Share Tech Mono", monospace; font-size: 20px; color: var(--text); }
@@ -178,6 +184,12 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); text-tran
   position: absolute; left: 0; right: 0; bottom: 0; max-height: 88vh; overflow: auto; background: var(--panel);
   border-top: 1px solid rgba(253, 185, 19, 0.35); border-radius: 18px 18px 0 0; padding: 18px 16px calc(18px + var(--safe-bottom));
 }
+.hog-list { display: grid; gap: 8px; margin: 4px 0 12px; }
+.hog-row { display: grid; gap: 2px; width: 100%; text-align: left; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 12px; padding: 12px; }
+.hog-row.is-on { border-color: rgba(253, 185, 19, 0.55); }
+.hog-name { font-weight: 700; overflow-wrap: anywhere; }
+.hog-sub { color: var(--muted); font-family: "Share Tech Mono", monospace; font-size: 12px; }
+.hog-row.is-on .hog-name::before { content: "● "; color: var(--gold); }
 .sheet-title { font-weight: 700; overflow-wrap: anywhere; margin: 0 0 4px; }
 .sheet-sub { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
 .sheet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }

@@ -179,15 +179,48 @@ class MainActivity : Activity() {
 
     inner class Bridge {
         @JavascriptInterface
-        fun state(): String = JSONObject()
-            .put("paired", store.paired)
-            .put("host", store.host)
-            .put("ip", store.ip)
-            .put("via", if (store.paired) api.current() else "")
-            .put("port", store.port)
-            .put("device", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
-            .put("version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-            .toString()
+        fun state(): String {
+            val hogs = org.json.JSONArray()
+            for (hog in store.list()) {
+                hogs.put(
+                    JSONObject()
+                        .put("id", hog.id)
+                        .put("host", hog.host)
+                        .put("ip", hog.ip)
+                        .put("port", hog.port)
+                        .put("label", hog.label)
+                        .put("current", hog.id == store.id())
+                )
+            }
+            return JSONObject()
+                .put("paired", store.paired)
+                .put("id", store.id())
+                .put("host", store.host)
+                .put("ip", store.ip)
+                .put("via", if (store.paired) api.current() else "")
+                .put("port", store.port)
+                .put("device", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                .put("version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                .put("hogs", hogs)
+                .put("nodeId", store.nodeId())
+                .put("nodeHost", store.nodeHost())
+                .put("nodePort", store.nodePort())
+                .toString()
+        }
+
+        /** Remember which paired hog the other computers mine to. */
+        @JavascriptInterface
+        fun setNode(id: String, port: Int, host: String): String {
+            store.setNode(id, port, host)
+            return state()
+        }
+
+        /** Switch which paired computer the phone talks to. */
+        @JavascriptInterface
+        fun select(id: String): String {
+            if (store.select(id)) api.clearRoute()
+            return state()
+        }
 
         @JavascriptInterface
         fun pair(id: Int, rawHost: String, rawIp: String, port: Int, code: String) {
@@ -201,22 +234,38 @@ class MainActivity : Activity() {
                 done(id, 0, JSONObject().put("ok", false).put("error", it).toString())
                 return
             }
+            if (!store.canSave(host, ip, port)) {
+                done(id, 0, JSONObject().put("ok", false).put("error", "This phone can pair ${TokenStore.MAX_HOGS} hogs. Forget one first.").toString())
+                return
+            }
             io.execute {
                 try {
+                    // A previous hog may have fallen back to its IP. This pair starts from the name.
+                    api.clearRoute()
                     val resp = api.pair(host, ip, port, code, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
                     if (resp.status == 200) {
                         val body = JSONObject(resp.text)
                         val token = body.getString("token")
-                        store.save(host, ip, port, token)
+                        try {
+                            store.save(host, ip, port, token)
+                        } catch (e: IllegalStateException) {
+                            api.clearRoute()
+                            done(id, 0, JSONObject().put("ok", false).put("error", "This phone can pair ${TokenStore.MAX_HOGS} hogs. Forget one first.").toString())
+                            return@execute
+                        }
                         // The token stays on the Kotlin side; the page only learns it worked.
                         done(id, 200, JSONObject().put("ok", true).put("device", body.optJSONObject("device")).toString())
                     } else {
+                        api.clearRoute()
                         done(id, resp.status, resp.text)
                     }
                 } catch (e: java.net.UnknownHostException) {
+                    api.clearRoute()
                     done(id, 0, JSONObject().put("ok", false).put("error", "This phone cannot look up $host. In the Tailscale app turn on Use Tailscale DNS, or type hog's Tailscale IP (100.x) as the address.").toString())
                 } catch (e: Exception) {
-                    done(id, 0, JSONObject().put("ok", false).put("error", "Could not reach hog at ${api.pick(host, ip)}:$port. Is Tailscale on, and Phone app turned on in hog? (${e.message ?: "network error"})").toString())
+                    val where = try { api.pick(host, ip) } catch (e2: Exception) { host.ifEmpty { ip } }
+                    api.clearRoute()
+                    done(id, 0, JSONObject().put("ok", false).put("error", "Could not reach hog at $where:$port. Is Tailscale on, and Phone app turned on in hog? (${e.message ?: "network error"})").toString())
                 }
             }
         }
@@ -296,7 +345,10 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun forget() = store.forget()
+        fun forget() {
+            store.forget()
+            api.clearRoute()
+        }
     }
 
     @Deprecated("Deprecated in Java")

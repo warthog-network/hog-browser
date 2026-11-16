@@ -8,7 +8,7 @@ import { buildSignedBtcTx } from "../src/btc-send.js";
 import { buildSolTransfer } from "../src/sol-send.js";
 import { rowsFromBitcoin, rowsFromEvm, rowsFromSolana } from "../src/chain-activity.js";
 import { decryptWalletFile, encryptWalletFile } from "../src/wallet-file.js";
-import { safeSignature } from "../src/safetrade.js";
+import { safeBalances, safeSignature } from "../src/safetrade.js";
 import { formatHealth, planBorrow, rateToPercent, safeBorrowHeadroomValue, usdOf } from "../src/aave.js";
 import { openWithPrf, sealWithPrf } from "../src/passkey.js";
 import { createVault } from "../src/vault-core.js";
@@ -71,6 +71,14 @@ test("wallet file v3 and its envelope round-trip", async () => {
   const again = await decryptWalletFile(wrapped, "password123");
   assert.equal(again.address, wallet.address);
   await assert.rejects(() => decryptWalletFile(file, "nope"), /password/i);
+});
+
+test("a missing SafeTrade key is told apart from an empty balance", async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({ errors: ["record.not_found"] }), { status: 404, headers: { "content-type": "application/json" } });
+  await assert.rejects(
+    () => safeBalances({ apiKey: "demo-key", secret: "demo-secret" }, fetchImpl),
+    /SafeTrade rejected that API key/,
+  );
 });
 
 test("SafeTrade signatures match HMAC-SHA256 of nonce plus key", async () => {
