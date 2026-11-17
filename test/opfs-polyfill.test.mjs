@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
-import { applyOpfs } from "../server.mjs";
+import { applyOpfs, opfsOpens } from "../server.mjs";
 
 const POLYFILL = readFileSync(new URL("../opfs-polyfill.js", import.meta.url), "utf8");
 
@@ -19,6 +19,29 @@ function batch(list) {
   }
   return Buffer.concat(parts);
 }
+
+test("a chain file stays open across page reads and closes when the node unlocks it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hog-opfs-fd-"));
+  try {
+    await applyOpfs(root, "create", "chain.db3");
+    await applyOpfs(root, "write", "chain.db3", Buffer.from("abcdefghij"), { at: "0" });
+    assert.equal(opfsOpens(root, "chain.db3"), 1);
+    for (let i = 0; i < 20; i += 1) {
+      const read = await applyOpfs(root, "read", "chain.db3", Buffer.alloc(0), { at: "0", len: "10" });
+      assert.equal(Buffer.from(read.body.toString(), "base64").toString(), "abcdefghij");
+    }
+    assert.equal(opfsOpens(root, "chain.db3"), 1, "page reads reuse the open chain file");
+    const disk = await readFile(join(root, "chain.db3"));
+    assert.equal(disk.toString(), "abcdefghij");
+    const token = (await applyOpfs(root, "lock", "chain.db3")).body.toString();
+    assert.equal((await applyOpfs(root, "unlock", "chain.db3", Buffer.alloc(0), { token })).status, 200);
+    await applyOpfs(root, "read", "chain.db3", Buffer.alloc(0), { at: "0", len: "4" });
+    assert.equal(opfsOpens(root, "chain.db3"), 2, "unlock closes it; the next read opens it again");
+    assert.equal((await applyOpfs(root, "remove", "chain.db3")).status, 200);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("node storage applies a write batch in order and can fsync it", async () => {
   const root = await mkdtemp(join(tmpdir(), "hog-opfs-"));
@@ -248,4 +271,80 @@ test("a failed early push keeps its writes held; flush sends them once storage a
   assert.equal(files.get("chain.db3").length, big.length);
   assert.equal(files.get("chain.db3")[big.length - 1], 5);
   await h.close();
+});
+
+test("Chromium keeps its own storage and caches chain pages around it", async () => {
+  let disk = Buffer.alloc(0);
+  const native = {
+    reads: 0,
+    writes: 0,
+    flushes: 0,
+    read(buffer, options) {
+      this.reads += 1;
+      const at = Number(options.at || 0);
+      const n = Math.max(0, Math.min(buffer.length, disk.length - at));
+      if (n > 0) Buffer.from(disk.subarray(at, at + n)).copy(Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength));
+      return n;
+    },
+    write(buffer, options) {
+      this.writes += 1;
+      const at = Number(options.at || 0);
+      const bytes = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      if (disk.length < at + bytes.length) disk = Buffer.concat([disk, Buffer.alloc(at + bytes.length - disk.length)]);
+      bytes.copy(disk, at);
+      return bytes.length;
+    },
+    flush() { this.flushes += 1; return Promise.resolve(); },
+    truncate(size) {
+      disk = size <= disk.length ? Buffer.from(disk.subarray(0, size)) : Buffer.concat([disk, Buffer.alloc(size - disk.length)]);
+      return Promise.resolve();
+    },
+    close() { return Promise.resolve(); },
+    getSize() { return Promise.resolve(disk.length); },
+  };
+  class FileSystemFileHandle {
+    createSyncAccessHandle() { return Promise.resolve(native); }
+  }
+  const clock = { now: 1_000_000 };
+  const context = {
+    FileSystemFileHandle,
+    navigator: { userAgentData: { brands: [{ brand: "Chromium" }] }, storage: {} },
+    Date: { now: () => clock.now },
+    setInterval: () => 1,
+    clearInterval: () => {},
+    Uint8Array,
+    Promise,
+  };
+  context.self = context;
+  vm.createContext(context);
+  vm.runInContext(POLYFILL, context);
+  const fh = new context.FileSystemFileHandle();
+  const handle = await fh.createSyncAccessHandle();
+  const page = new Uint8Array(4096).fill(7);
+  for (let i = 0; i < 200; i += 1) assert.equal(handle.write(page, { at: i * 4096 }), 4096);
+  assert.equal(native.writes, 0, "page writes stay in memory until flush");
+  const sample = new Uint8Array(4096);
+  assert.equal(handle.read(sample, { at: 50 * 4096 }), 4096);
+  assert.equal(sample[0], 7);
+  const readsAfterFill = native.reads;
+  assert.equal(handle.read(sample, { at: 50 * 4096 }), 4096);
+  assert.equal(native.reads, readsAfterFill, "a repeated page does not hit storage again");
+  await handle.flush();
+  assert.equal(native.flushes, 1);
+  assert.ok(native.writes > 0 && native.writes < 40, `writes are coalesced (${native.writes})`);
+  assert.equal(disk.length, 200 * 4096);
+  assert.equal(disk[disk.length - 1], 7);
+  await handle.truncate(10);
+  assert.equal(disk.length, 10);
+  const tail = new Uint8Array(8);
+  assert.equal(handle.read(tail, { at: 8 }), 2);
+  const writesBeforeHold = native.writes;
+  handle.write(new Uint8Array([1, 2, 3]), { at: 0 });
+  assert.equal(native.writes, writesBeforeHold, "a fresh write still waits");
+  clock.now += 2100;
+  handle.write(new Uint8Array([4]), { at: 3 });
+  assert.ok(native.writes > writesBeforeHold, "bytes held for two seconds are written even without flush");
+  await handle.close();
+  assert.equal(disk[0], 1);
+  assert.equal(disk[3], 4);
 });

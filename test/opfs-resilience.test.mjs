@@ -14,8 +14,11 @@ import {
   logOpfs,
   nodeRecoveryScript,
   nodeHeadHeight,
+  nodeHeadMark,
   nodeSyncedFlag,
   NODE_STALL_MS,
+  NODE_BUSY_MS,
+  NODE_WEDGE_MS,
   opfsErrorStatus,
   opfsLogInternals,
   rewriteHtml,
@@ -91,17 +94,19 @@ test("the node page gets Hog's recovery script; other sites do not", () => {
 });
 
 /** The recovery script against a fake node page. */
-function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, head = null, running = false } = {}) {
+function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, busyMs = 1_500, wedgeMs = 20 * 60_000, head = null, running = false, deferHead = false } = {}) {
   const store = new Map();
   const listeners = [];
   const posted = [];
   let now = 1_000_000;
   let reloads = 0;
   let clicks = 0;
+  let releaseHead = null;
   const tickers = [];
   const button = { textContent: running ? "Stop node" : "Start node", disabled: false, click() { clicks += 1; } };
   let headValue = head;
   const body = { innerText: text, appendChild() {} };
+  const script = nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000, stallMs, busyMs, wedgeMs });
   const context = {
     Date: { now: () => now },
     JSON,
@@ -123,7 +128,8 @@ function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, head = 
     wartNode: {
       virtual_get: (path) => {
         if (path !== "/chain/head") return Promise.reject(new Error("unexpected path"));
-        return Promise.resolve(headValue);
+        if (!deferHead) return Promise.resolve(headValue);
+        return new Promise((resolve) => { releaseHead = () => resolve(headValue); });
       },
     },
   };
@@ -134,11 +140,13 @@ function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, head = 
   }
   context.window = context;
   vm.createContext(context);
-  vm.runInContext(nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000, stallMs }), context);
+  vm.runInContext(script, context);
   return {
     body,
     button,
     setHead(next) { headValue = next; },
+    add(ms) { now += ms; },
+    release() { const go = releaseHead; releaseHead = null; if (go) go(); },
     tick(ms = 2000) { now += ms; for (const fn of tickers) fn(); },
     fail() { for (const l of listeners) l.onmessage?.({ data: { type: "storage-failure" } }); },
     reloadPage() {
@@ -146,7 +154,7 @@ function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, head = 
       tickers.length = 0;
       listeners.length = 0;
       context.window.__hogNodeRecovery = false;
-      vm.runInContext(nodeRecoveryScript({ waitMs: 65_000, quietMs: 30 * 60_000, stallMs }), context);
+      vm.runInContext(script, context);
     },
     get reloads() { return reloads; },
     get clicks() { return clicks; },
@@ -199,8 +207,13 @@ test("nodeHeadHeight reads the same payload shapes as the in-page node", () => {
   assert.equal(nodeHeadHeight({ chainHead: { height: 12, synced: true } }), 12);
   assert.equal(nodeHeadHeight('{"data":{"height":"100","synced":false}}'), 100);
   assert.equal(nodeHeadHeight({ synced: true }), 0);
+  assert.equal(nodeHeadMark({ data: { height: 10, hash: "abc" } }), "10:abc");
+  assert.equal(nodeHeadMark({ chainHead: { height: 12, hash: "def" } }), "12:def");
+  assert.equal(nodeHeadMark({ synced: true }), "0:");
   assert.equal(nodeSyncedFlag({ data: { height: 2778390, synced: false } }), false);
   assert.equal(NODE_STALL_MS, 3 * 60_000);
+  assert.equal(NODE_BUSY_MS, 1_500);
+  assert.equal(NODE_WEDGE_MS, 45 * 60_000);
 });
 
 test("a running unsynced node whose height is stuck is reloaded and Start is pressed", async () => {
@@ -266,6 +279,54 @@ test("the stall watchdog does not restart a node that is still advancing, synced
   stopped.tick(180_000);
   await Promise.resolve();
   assert.equal(stopped.reloads, 0);
+});
+
+test("a slow chain head means the node is applying blocks, so Hog waits", async () => {
+  const page = recoveryPage({
+    running: true,
+    stallMs: 180_000,
+    busyMs: 1_500,
+    wedgeMs: 45 * 60_000,
+    deferHead: true,
+    head: { data: { height: 100, synced: false, hash: "aa" } },
+  });
+  page.tick();
+  page.add(4_000);
+  page.release();
+  await Promise.resolve();
+  assert.equal(page.reloads, 0, "the first sample only records the height");
+  for (let i = 0; i < 6; i += 1) {
+    page.tick(60_000);
+    page.add(4_000);
+    page.release();
+    await Promise.resolve();
+  }
+  assert.equal(page.reloads, 0, "several slow minutes on the same height are work, not a stall");
+  page.setHead({ data: { height: 100, synced: false, hash: "bb" } });
+  page.tick(180_000);
+  page.release();
+  await Promise.resolve();
+  assert.equal(page.reloads, 0, "a new tip hash is progress");
+  page.tick(180_000);
+  page.release();
+  await Promise.resolve();
+  assert.equal(page.reloads, 1, "a fast reply at the same tip is a stuck peer");
+});
+
+test("a chain head that never returns is restarted after the long backstop", () => {
+  const page = recoveryPage({
+    running: true,
+    stallMs: 180_000,
+    wedgeMs: 10_000,
+    deferHead: true,
+    head: { data: { height: 100, synced: false } },
+  });
+  page.tick();
+  page.tick(9_000);
+  assert.equal(page.reloads, 0);
+  page.tick(2_000);
+  assert.equal(page.reloads, 1);
+  assert.ok(page.posted.some((m) => m.type === "node-stall-restart"));
 });
 
 // ---------------------------------------------------------------------------

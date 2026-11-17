@@ -46,6 +46,11 @@ const OPFS_SLOW_MS = 5_000;
 // the queue per file so a retried call can never land before the call it
 // repeats, and keep the log readable when something keeps failing.
 const opfsQueues = new Map();
+// One open descriptor per chain file. Sync does millions of page reads; opening
+// and closing a multi-gigabyte database on every one of them dominates on a
+// slow disk. The descriptor stays until the node unlocks, moves, or deletes it.
+const opfsFiles = new Map();
+const opfsOpenCount = new Map();
 const opfsLog = { windowStart: 0, lines: 0, suppressed: 0, limit: 20, windowMs: 60_000, write: (line) => console.log(line) };
 // Fault injection for resilience tests only; off unless these are set.
 // HOG_OPFS_FAULTS=0.02 fails ~2% of storage calls in one of four ways (refused,
@@ -644,6 +649,29 @@ export function nodeHeadHeight(body) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/**
+ * Height plus tip hash. A reorg can keep the same height and still be progress.
+ * Kept self-contained: this function is pasted into the node page.
+ * @param {unknown} body
+ */
+export function nodeHeadMark(body) {
+  let data = body;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      return "0:";
+    }
+  }
+  if (!data || typeof data !== "object") return "0:";
+  if (data.data && typeof data.data === "object") data = data.data;
+  const head = data.chainHead && typeof data.chainHead === "object" ? data.chainHead : data;
+  const n = Number(head.height ?? data.height);
+  const height = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  const hash = typeof head.hash === "string" ? head.hash : "";
+  return `${height}:${hash}`;
+}
+
 export function nodeSyncScript() {
   return `(function () {
   if (window.__hogNodeSync) return;
@@ -678,19 +706,27 @@ export function nodeSyncScript() {
  * after the old threads' storage lock has lapsed. A second failure within
  * NODE_RESTART_QUIET_MS is left for the user.
  *
- * The same restart is used if the node stays running and unsynced but its
- * height does not move for NODE_STALL_MS (a stuck block request or stale
- * peer descriptor that never times out). That is the same action as Stop
- * then Start in the node UI, after the storage lock lapses.
+ * The same restart is used if the node stays running and unsynced but makes
+ * no progress. A stuck peer answers /chain/head quickly while the height sits
+ * still, so that restarts after NODE_STALL_MS. Applying a batch on a slow CPU
+ * blocks that same call for seconds, so those replies reset the idle clock
+ * instead of looking like a stall. A height that stays put for NODE_WEDGE_MS
+ * even while the node looks busy is restarted anyway.
+ * Either restart is the same action as Stop then Start in the node UI, after
+ * the storage lock lapses.
  */
 export const NODE_RESTART_WAIT_MS = 65_000;
 export const NODE_RESTART_QUIET_MS = 30 * 60_000;
 export const NODE_STALL_MS = 3 * 60_000;
+export const NODE_BUSY_MS = 1_500;
+export const NODE_WEDGE_MS = 45 * 60_000;
 
 export function nodeRecoveryScript(options = {}) {
   const waitMs = Number(options.waitMs ?? NODE_RESTART_WAIT_MS);
   const quietMs = Number(options.quietMs ?? NODE_RESTART_QUIET_MS);
   const stallMs = Number(options.stallMs ?? NODE_STALL_MS);
+  const busyMs = Number(options.busyMs ?? NODE_BUSY_MS);
+  const wedgeMs = Number(options.wedgeMs ?? NODE_WEDGE_MS);
   const tickMs = Number(options.tickMs ?? 2000);
   return `(function () {
   if (window.__hogNodeRecovery) return;
@@ -699,11 +735,14 @@ export function nodeRecoveryScript(options = {}) {
   var WAIT_MS = ${waitMs};
   var QUIET_MS = ${quietMs};
   var STALL_MS = ${stallMs};
+  var BUSY_MS = ${busyMs};
+  var WEDGE_MS = ${wedgeMs};
   var GIVE_UP_MS = 120000;
   var readSynced = ${nodeSyncedFlag.toString()};
   var readHeight = ${nodeHeadHeight.toString()};
+  var readMark = ${nodeHeadMark.toString()};
   var lastFailure = 0;
-  var stall = { height: 0, since: 0 };
+  var stall = { mark: "", since: 0, flatSince: 0, pending: false, asked: 0 };
   var channel = null;
   try {
     channel = new BroadcastChannel("hog-opfs");
@@ -743,7 +782,9 @@ export function nodeRecoveryScript(options = {}) {
       if (left > 0) {
         var wait = Math.ceil(left / 1000);
         note(state.reason === "node-stall-restart"
-          ? "Hog: the node has not advanced for " + Math.round(STALL_MS / 60000) + " minutes while still syncing. Your chain data is fine; restarting the node in " + wait + " s."
+          ? (state.pace === "busy"
+            ? "Hog: sync has been on the same height for a long time. Your chain data is fine; restarting the node in " + wait + " s."
+            : "Hog: the node has not advanced for " + Math.round(STALL_MS / 60000) + " minutes while still syncing. Your chain data is fine; restarting the node in " + wait + " s.")
           : "Hog: a storage request failed. Your chain data is fine; restarting the node in " + wait + " s.");
         return;
       }
@@ -768,39 +809,59 @@ export function nodeRecoveryScript(options = {}) {
     }
     checkStall();
   }
-  function beginRestart(type) {
+  function beginRestart(type, pace) {
     var state = load();
     var now = Date.now();
     if (state.startAt) return;
     if (state.last && now - state.last < QUIET_MS) return;
-    save({ last: now, startAt: now + WAIT_MS, reason: type });
+    save({ last: now, startAt: now + WAIT_MS, reason: type, pace: pace || "" });
     tell(type);
     location.reload();
   }
   function checkStall() {
     if (startButton()) {
-      stall = { height: 0, since: 0 };
+      stall = { mark: "", since: 0, flatSince: 0, pending: false, asked: 0 };
       return;
     }
     var state = load();
     if (state.last && Date.now() - state.last < QUIET_MS) return;
+    var now = Date.now();
+    // One head request at a time. A pile of them behind a slow batch steals
+    // the node thread the moment that batch finishes.
+    if (stall.pending) {
+      if (stall.asked && now - stall.asked >= WEDGE_MS) beginRestart("node-stall-restart", "busy");
+      return;
+    }
     var mod = window.wartNode || window.Module;
     if (!mod || typeof mod.virtual_get !== "function") return;
+    stall.pending = true;
+    stall.asked = now;
     Promise.resolve(mod.virtual_get("/chain/head")).then(function (raw) {
+      stall.pending = false;
       var synced = readSynced(raw);
       var height = readHeight(raw);
-      var now = Date.now();
+      var mark = readMark(raw);
+      var answered = Date.now();
+      var busy = answered - stall.asked >= BUSY_MS;
       if (synced || !height) {
-        stall = { height: height || 0, since: now };
+        stall.mark = mark;
+        stall.since = answered;
+        stall.flatSince = answered;
         return;
       }
-      if (stall.height !== height || !stall.since) {
-        stall = { height: height, since: now };
+      if (stall.mark !== mark || !stall.since) {
+        stall.mark = mark;
+        stall.since = answered;
+        stall.flatSince = answered;
         return;
       }
-      if (now - stall.since < STALL_MS) return;
-      beginRestart("node-stall-restart");
-    }).catch(function () {});
+      // A slow reply means the node thread was busy applying blocks. An idle
+      // stuck peer answers immediately, and that clock is the one that restarts.
+      if (busy) stall.since = answered;
+      if (!stall.flatSince) stall.flatSince = stall.since;
+      if (answered - stall.since < STALL_MS && answered - stall.flatSince < WEDGE_MS) return;
+      beginRestart("node-stall-restart", answered - stall.flatSince >= WEDGE_MS ? "busy" : "idle");
+    }).catch(function () { stall.pending = false; });
   }
   setInterval(tick, ${tickMs});
 })();`;
@@ -2159,6 +2220,53 @@ function dropOpfsLocks(full) {
   }
 }
 
+async function opfsFd(full) {
+  const cached = opfsFiles.get(full);
+  if (cached) return cached;
+  const handle = await open(full, "r+");
+  opfsFiles.set(full, handle);
+  opfsOpenCount.set(full, (opfsOpenCount.get(full) || 0) + 1);
+  return handle;
+}
+
+async function closeOpfsFd(full) {
+  const handle = opfsFiles.get(full);
+  if (!handle) return;
+  opfsFiles.delete(full);
+  try {
+    await handle.close();
+  } catch {
+    // The next storage call opens a fresh descriptor.
+  }
+}
+
+async function closeOpfsUnder(full) {
+  const prefix = `${full}/`;
+  const keys = [];
+  for (const key of opfsFiles.keys()) {
+    if (key === full || key.startsWith(prefix)) keys.push(key);
+  }
+  for (const key of keys) await closeOpfsFd(key);
+}
+
+async function withOpfsFd(full, fn) {
+  try {
+    return await fn(await opfsFd(full));
+  } catch (error) {
+    await closeOpfsFd(full);
+    throw error;
+  }
+}
+
+/** How many times this chain file was opened. Tests use it. */
+export function opfsOpens(root, rel) {
+  try {
+    return opfsOpenCount.get(opfsFull(root, rel).full) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * Disk files behind the in-browser node. WebKitGTK's sync file handle
  * returns NotSupportedError, so the node tab stores chain data here.
@@ -2210,25 +2318,15 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
     if (!Number.isInteger(len) || len < 0 || len > 32_000_000) throw opfsFail(400, "Bad length");
     if (len === 0 || offset >= info.size) return opfsResult(200, "");
     const take = Math.min(len, info.size - offset);
-    const handle = await open(full, "r");
-    try {
-      const buf = Buffer.alloc(take);
-      const { bytesRead } = await handle.read(buf, 0, take, offset);
-      return opfsResult(200, buf.subarray(0, bytesRead).toString("base64"));
-    } finally {
-      await handle.close();
-    }
+    const buf = Buffer.alloc(take);
+    const { bytesRead } = await withOpfsFd(full, (handle) => handle.read(buf, 0, take, offset));
+    return opfsResult(200, buf.subarray(0, bytesRead).toString("base64"));
   }
   if (op === "write") {
     const offset = at();
     if (offset + body.length > 16 * 1024 * 1024 * 1024) throw opfsFail(413, "That file is too large");
-    const handle = await open(full, "r+");
-    try {
-      const { bytesWritten } = await handle.write(body, 0, body.length, offset);
-      return opfsResult(200, String(bytesWritten));
-    } finally {
-      await handle.close();
-    }
+    const { bytesWritten } = await withOpfsFd(full, (handle) => handle.write(body, 0, body.length, offset));
+    return opfsResult(200, String(bytesWritten));
   }
   if (op === "writev") {
     // Batched writes from the node tab's sync handle: [f64 offset][u32 length][bytes]...
@@ -2243,9 +2341,8 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
       writes.push({ offset, bytes: body.subarray(pos + 12, pos + 12 + length) });
       pos += 12 + length;
     }
-    const handle = await open(full, "r+");
     let total = 0;
-    try {
+    await withOpfsFd(full, async (handle) => {
       for (const { offset, bytes } of writes) {
         let done = 0;
         while (done < bytes.length) {
@@ -2256,14 +2353,11 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
         total += done;
       }
       if (params.sync === "1") await handle.sync();
-    } finally {
-      await handle.close();
-    }
+    });
     return opfsResult(200, String(total));
   }
   if (op === "truncate" || op === "flush") {
-    const handle = await open(full, "r+");
-    try {
+    await withOpfsFd(full, async (handle) => {
       if (op === "truncate") {
         const size = Number(params.size ?? 0);
         if (!Number.isFinite(size) || size < 0) throw opfsFail(400, "Bad size");
@@ -2271,9 +2365,7 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
       } else {
         await handle.sync();
       }
-    } finally {
-      await handle.close();
-    }
+    });
     return opfsResult(200, "ok");
   }
   if (op === "remove") {
@@ -2285,8 +2377,10 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
     if (kind === "directory") {
       const recursive = params.recursive === "1" || params.recursive === "true";
       if (!recursive && (await readdir(full)).length) return opfsResult(409, "not empty");
+      await closeOpfsUnder(full);
       await rm(full, { recursive: true });
     } else {
+      await closeOpfsFd(full);
       await rm(full);
     }
     dropOpfsLocks(full);
@@ -2294,6 +2388,8 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
   }
   if (op === "move") {
     const dest = opfsFull(root, params.to || "");
+    await closeOpfsFd(full);
+    await closeOpfsFd(dest.full);
     await rename(full, dest.full);
     opfsLocks.delete(full);
     return opfsResult(200, "ok");
@@ -2329,6 +2425,7 @@ export async function applyOpfs(root, op, rel, body = Buffer.alloc(0), params = 
     if (!current) return opfsResult(200, "ok"); // already released (a retried unlock)
     if (current.token !== String(params.token || "")) return opfsResult(409, "locked");
     opfsLocks.delete(full);
+    await closeOpfsFd(full);
     return opfsResult(200, "ok");
   }
   throw opfsFail(400, "Unknown storage request");

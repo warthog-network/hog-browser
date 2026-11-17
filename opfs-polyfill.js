@@ -1,17 +1,254 @@
 /* Hog disk storage for the Warthog WASM node.
-   WebKitGTK exposes the file system API, then rejects createSyncAccessHandle.
-   This runs inside wart-node.js, including its pthread worker. */
+   WebKitGTK exposes the file system API, then rejects createSyncAccessHandle,
+   so that browser talks to Hog's disk endpoint. Chromium's own storage works,
+   but each SQLite page is a separate sync call; the wrapper below caches
+   those reads and holds writes until flush. This runs inside wart-node.js,
+   including its pthread worker. */
 (() => {
   if (globalThis.__hogOpfs) return;
   globalThis.__hogOpfs = true;
-  // Chromium (Hog's Electron preview, Brave) has a working origin private
-  // file system with sync access handles. Keep it; only WebKitGTK needs this.
   // navigator.userAgentData exists only in Chromium, in pages and workers.
+  let chromium = false;
   try {
-    if (typeof navigator !== "undefined" && navigator.userAgentData
+    chromium = typeof navigator !== "undefined" && !!navigator.userAgentData
       && typeof FileSystemFileHandle !== "undefined"
-      && typeof FileSystemFileHandle.prototype.createSyncAccessHandle === "function") return;
+      && typeof FileSystemFileHandle.prototype.createSyncAccessHandle === "function";
   } catch (e) {}
+  if (chromium) {
+    installChromiumCache();
+    return;
+  }
+
+  // Read cache and write holding for Chromium's native sync file handles.
+  // SQLite flushes when a commit must reach disk. Log files never flush, so
+  // held bytes are written after HOLD_MS even without one. Durability of the
+  // chain matches the browser: flush() still calls the native flush.
+  function installChromiumCache() {
+    const NativeFile = globalThis.FileSystemFileHandle;
+    const nativeOpen = NativeFile && NativeFile.prototype && NativeFile.prototype.createSyncAccessHandle;
+    if (typeof nativeOpen !== "function" || nativeOpen.__hogCached) return;
+    const CHUNK = 64 * 1024;
+    const CACHE_CHUNKS = 1024;
+    const PENDING_LIMIT = 8 * 1024 * 1024;
+    const PENDING_HARD_LIMIT = 64 * 1024 * 1024;
+    const HOLD_MS = 2000;
+
+    function wrapNativeAccess(raw) {
+      const cache = new Map();
+      const dirty = new Map();
+      let pendingBytes = 0;
+      let pendingSince = 0;
+      let size = 0;
+      let sizeKnown = false;
+      let closed = false;
+
+      function ensure(index) {
+        const hit = cache.get(index);
+        if (hit) {
+          cache.delete(index);
+          cache.set(index, hit);
+          return hit;
+        }
+        const bytes = new Uint8Array(CHUNK);
+        const n = Number(raw.read(bytes, { at: index * CHUNK }));
+        if (!Number.isFinite(n) || n < 0) throw new TypeError("Short read");
+        const entry = { bytes, valid: n };
+        cache.set(index, entry);
+        if (n > 0 && n < CHUNK) {
+          size = Math.max(size, index * CHUNK + n);
+          sizeKnown = true;
+        } else if (n === 0 && index === 0) {
+          size = Math.max(size, 0);
+          sizeKnown = true;
+        } else if (n === CHUNK && size < (index + 1) * CHUNK) {
+          size = (index + 1) * CHUNK;
+        }
+        evict();
+        return entry;
+      }
+
+      function evict() {
+        while (cache.size > CACHE_CHUNKS) {
+          let dropped = false;
+          for (const index of cache.keys()) {
+            if (dirty.has(index)) continue;
+            cache.delete(index);
+            dropped = true;
+            break;
+          }
+          if (dropped) continue;
+          writeBack();
+          const oldest = cache.keys().next().value;
+          if (oldest == null) break;
+          cache.delete(oldest);
+        }
+      }
+
+      function writeBack() {
+        if (!dirty.size) return;
+        for (const [index, range] of dirty) {
+          const entry = cache.get(index);
+          if (!entry) continue;
+          const slice = entry.bytes.subarray(range.lo, range.hi);
+          const n = Number(raw.write(slice, { at: index * CHUNK + range.lo }));
+          if (n !== slice.byteLength) throw new TypeError("Short write");
+        }
+        dirty.clear();
+        pendingBytes = 0;
+        pendingSince = 0;
+      }
+
+      function sendAged(force) {
+        if (closed || !dirty.size) return;
+        if (!force && pendingBytes < PENDING_LIMIT && Date.now() - pendingSince < HOLD_MS) return;
+        try {
+          writeBack();
+        } catch (error) {
+          if (force || pendingBytes >= PENDING_HARD_LIMIT) throw error;
+        }
+      }
+
+      const timer = setInterval(() => {
+        try { sendAged(false); } catch (e) {}
+      }, 1000);
+
+      function finishClose() {
+        if (closed) return Promise.resolve();
+        sendAged(true);
+        const flushed = raw.flush();
+        const after = flushed && typeof flushed.then === "function" ? flushed : Promise.resolve();
+        return after.then(() => {
+          closed = true;
+          clearInterval(timer);
+          return raw.close();
+        });
+      }
+
+      return {
+        read(buffer, options) {
+          const view = buffer instanceof Uint8Array
+            ? buffer
+            : new Uint8Array(buffer.buffer || buffer, buffer.byteOffset || 0, buffer.byteLength);
+          const at = options && options.at ? Number(options.at) : 0;
+          let done = 0;
+          while (done < view.byteLength) {
+            const pos = at + done;
+            const index = Math.floor(pos / CHUNK);
+            const offset = pos - index * CHUNK;
+            const entry = ensure(index);
+            if (offset >= entry.valid) break;
+            const take = Math.min(view.byteLength - done, entry.valid - offset);
+            view.set(entry.bytes.subarray(offset, offset + take), done);
+            done += take;
+          }
+          return done;
+        },
+        write(buffer, options) {
+          const view = buffer instanceof Uint8Array
+            ? buffer
+            : new Uint8Array(buffer.buffer || buffer, buffer.byteOffset || 0, buffer.byteLength);
+          const at = options && options.at ? Number(options.at) : 0;
+          if (!view.byteLength) return 0;
+          const bytes = new Uint8Array(view.byteLength);
+          bytes.set(view);
+          const first = Math.floor(at / CHUNK);
+          const last = Math.floor((at + bytes.byteLength - 1) / CHUNK);
+          for (let index = first; index <= last; index += 1) {
+            const entry = ensure(index);
+            const base = index * CHUNK;
+            const from = Math.max(base, at);
+            const to = Math.min(base + CHUNK, at + bytes.byteLength);
+            entry.bytes.set(bytes.subarray(from - at, to - at), from - base);
+            const end = to - base;
+            if (end > entry.valid) entry.valid = end;
+            // Dirty before the next chunk is loaded. Eviction must not drop
+            // bytes this write just placed.
+            const lo = from - base;
+            const hi = to - base;
+            const prev = dirty.get(index);
+            dirty.set(index, prev ? { lo: Math.min(prev.lo, lo), hi: Math.max(prev.hi, hi) } : { lo, hi });
+          }
+          if (!pendingBytes) pendingSince = Date.now();
+          pendingBytes += bytes.byteLength;
+          const end = at + bytes.byteLength;
+          if (end > size) size = end;
+          sendAged(false);
+          return bytes.byteLength;
+        },
+        flush() {
+          try {
+            sendAged(true);
+            const out = raw.flush();
+            return out && typeof out.then === "function" ? out : Promise.resolve();
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        },
+        getSize() {
+          if (sizeKnown) return Promise.resolve(size);
+          return Promise.resolve(raw.getSize()).then((n) => {
+            const native = Number(n) || 0;
+            size = Math.max(size, native);
+            sizeKnown = true;
+            return size;
+          });
+        },
+        truncate(next) {
+          try {
+            sendAged(true);
+            const target = Number(next);
+            const out = raw.truncate(target);
+            const apply = () => {
+              size = target;
+              sizeKnown = true;
+              const keep = Math.floor(target / CHUNK);
+              for (const index of Array.from(cache.keys())) {
+                if (index > keep) cache.delete(index);
+              }
+              for (const index of Array.from(dirty.keys())) {
+                if (index > keep) dirty.delete(index);
+              }
+              const edge = cache.get(keep);
+              if (edge) {
+                const within = target - keep * CHUNK;
+                if (edge.valid > within) edge.valid = within;
+                edge.bytes.fill(0, within);
+                const range = dirty.get(keep);
+                if (range && range.lo >= within) dirty.delete(keep);
+                else if (range && range.hi > within) range.hi = within;
+              }
+            };
+            return Promise.resolve(out).then(apply);
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        },
+        close() {
+          try {
+            return Promise.resolve(finishClose());
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        },
+      };
+    }
+
+    function createSyncAccessHandle(...args) {
+      return Promise.resolve(nativeOpen.apply(this, args)).then(wrapNativeAccess);
+    }
+    Object.defineProperty(createSyncAccessHandle, "length", { value: nativeOpen.length });
+    createSyncAccessHandle.__hogCached = true;
+    try {
+      Object.defineProperty(NativeFile.prototype, "createSyncAccessHandle", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: createSyncAccessHandle,
+      });
+    } catch (e) {
+      NativeFile.prototype.createSyncAccessHandle = createSyncAccessHandle;
+    }
+  }
 
   function fail(name, message) {
     if (name === "TypeError") return new TypeError(message);
