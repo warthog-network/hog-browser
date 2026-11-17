@@ -101,7 +101,7 @@ class HogServer {
     this.port = port;
     this.nodePort = nodePort;
     this.shared = false;
-    const env = { ...this.env, ELECTRON_RUN_AS_NODE: "1", HOG_PORT: String(port) };
+    const env = { ...this.env, ELECTRON_RUN_AS_NODE: "1", HOG_PORT: String(port), HOG_CHROMIUM: "1" };
     if (nodePort !== DEFAULT_NODE_PORT) env.HOG_NODE_PORT = String(nodePort);
     this.log(`Hog preview: starting server.mjs on ${port} (node tab ${nodePort}).`);
     // Electron's bundled Node via ELECTRON_RUN_AS_NODE (process.execPath),

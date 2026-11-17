@@ -6,7 +6,7 @@ import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promis
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
 import { isIP } from "node:net";
-import { extname, join, normalize } from "node:path";
+import { extname, isAbsolute, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { MINING_NETWORKS, bzminerCommand, createMiningRelay, miningPort, pageRelayPageScript, pageRelayScript, resolveMiningNetwork } from "./mining.mjs";
@@ -714,6 +714,10 @@ export function nodeSyncScript() {
  * even while the node looks busy is restarted anyway.
  * Either restart is the same action as Stop then Start in the node UI, after
  * the storage lock lapses.
+ *
+ * "Database corrupted, block height not consecutive" is a gap in the saved
+ * headers. Restarting opens the same file and throws the same line, so Hog
+ * asks the window to delete that chain and load the node page again.
  */
 export const NODE_RESTART_WAIT_MS = 65_000;
 export const NODE_RESTART_QUIET_MS = 30 * 60_000;
@@ -777,6 +781,20 @@ export function nodeRecoveryScript(options = {}) {
   function tick() {
     var state = load();
     var now = Date.now();
+    var text = document.body ? String(document.body.innerText || "") : "";
+    if (/block height not consecutive/i.test(text)) {
+      if (state.chainReset) {
+        note("Hog: this chain still has a gap. Quit Hog and open it again, then press Start once.");
+        return;
+      }
+      save({ last: state.last || 0, chainReset: now });
+      note("Hog: the saved chain skips a block height. Replacing that chain.");
+      tell("node-chain-reset");
+      return;
+    }
+    if (state.chainReset && now - state.chainReset < 120000 && startButton()) {
+      note("Hog replaced the broken chain. Press Start once.");
+    }
     if (state.startAt) {
       var left = state.startAt - now;
       if (left > 0) {
@@ -800,7 +818,6 @@ export function nodeRecoveryScript(options = {}) {
       }
       return;
     }
-    var text = document.body ? String(document.body.innerText || "") : "";
     if (/SQLite disk I\\/O error/i.test(text)) {
       if (/malformed|not a database|SQLITE_CORRUPT/i.test(text)) return;
       if (channel && now - lastFailure > GIVE_UP_MS) return;
@@ -2184,6 +2201,114 @@ function opfsRootFor(origin) {
   return join(base, safe);
 }
 
+function chromiumPreviewData() {
+  if (process.env.HOG_PREVIEW_DATA) return process.env.HOG_PREVIEW_DATA;
+  if (process.platform === "win32") {
+    return process.env.APPDATA ? join(process.env.APPDATA, "hog-chromium-preview") : "";
+  }
+  return join(homedir(), ".local", "share", "hog-chromium-preview");
+}
+
+/**
+ * Delete the chain the browser node will open again.
+ * Chromium keeps it in the preview profile. WebKit keeps it under Hog's opfs folder.
+ * The wallet store next to the Chromium chain is left in place.
+ * @param {{ chromium?: boolean, opfsRoot?: string, opfsBase?: string, previewData?: string }} [options]
+ */
+export async function resetNodeChainFiles({
+  chromium = process.env.HOG_CHROMIUM === "1",
+  opfsRoot = "",
+  opfsBase = "",
+  previewData = "",
+} = {}) {
+  const removed = [];
+  if (chromium) {
+    const root = normalize(previewData || chromiumPreviewData());
+    const marker = root ? join(root, "Partitions", "hog") : "";
+    if (!root || !isAbsolute(root) || normalize(root) === normalize(homedir()) || !existsSync(marker)) {
+      return { ok: false, error: "The Chromium chain folder is not the Hog preview profile.", removed };
+    }
+    const webStorage = join(marker, "WebStorage");
+    if (existsSync(webStorage)) {
+      const buckets = await readdir(webStorage, { withFileTypes: true });
+      for (const bucket of buckets) {
+        if (!bucket.isDirectory()) continue;
+        const files = normalize(join(webStorage, bucket.name, "FileSystem"));
+        const under = `${normalize(webStorage)}${sep}`;
+        if (!files.startsWith(under) || !existsSync(files)) continue;
+        await rm(files, { recursive: true, force: true });
+        removed.push(files);
+      }
+    }
+    return { ok: true, removed };
+  }
+  const base = normalize(opfsBase || process.env.HOG_OPFS_ROOT || join(homedir(), ".local/share/hog-browser/opfs"));
+  const target = normalize(opfsRoot || opfsRootFor(NODE_ORIGIN));
+  const prefix = `${base}${sep}`;
+  if (!isAbsolute(target) || target === base || !target.startsWith(prefix)) {
+    return { ok: false, error: "The chain folder is outside Hog storage.", removed };
+  }
+  await closeOpfsUnder(target);
+  dropOpfsLocks(target);
+  if (existsSync(target)) {
+    await rm(target, { recursive: true, force: true });
+    removed.push(target);
+  }
+  return { ok: true, removed };
+}
+
+/** Hog window listener. The node page asks for this when its chain has a height gap. */
+export function nodeChainResetClient() {
+  return `(function () {
+  if (window.__hogChainReset) return;
+  window.__hogChainReset = true;
+  var busy = false;
+  function banner(text) {
+    if (!document.body) return;
+    var el = document.getElementById("hog-chain-reset");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "hog-chain-reset";
+      el.setAttribute("role", "status");
+      el.style.cssText = "position:fixed;left:12px;bottom:12px;z-index:2147483647;max-width:28rem;padding:8px 12px;border-radius:8px;background:#222;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4)";
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.style.display = text ? "block" : "none";
+  }
+  window.addEventListener("message", function (event) {
+    var frame = document.getElementById("node-frame");
+    if (!frame || event.source !== frame.contentWindow) return;
+    var data = event.data;
+    if (!data || data.source !== "hog" || data.type !== "node-chain-reset") return;
+    if (busy) return;
+    busy = true;
+    var again = frame.getAttribute("src") || "";
+    banner("Hog is replacing the broken chain. Press Start once when the node page comes back.");
+    frame.src = "about:blank";
+    setTimeout(function () {
+      fetch("/api/node-chain-reset", { method: "POST" }).then(function (res) {
+        busy = false;
+        if (!res.ok) {
+          banner("Hog could not replace the chain. Quit Hog and open it again, then press Start once.");
+          return;
+        }
+        if (again && again !== "about:blank") frame.src = again;
+      }).catch(function () {
+        busy = false;
+        banner("Hog could not replace the chain. Quit Hog and open it again, then press Start once.");
+      });
+    }, 3000);
+  });
+})();`;
+}
+
+export function withNodeChainReset(html) {
+  const tag = `<script>${nodeChainResetClient().replace(/<\/script/gi, "<\\/script")}</script>`;
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (head) => `${head}${tag}`);
+  return `${tag}${html}`;
+}
+
 function opfsFull(root, rel) {
   const relative = opfsRelative(rel);
   const full = relative ? join(root, relative) : root;
@@ -2660,7 +2785,7 @@ async function handle(req, res, runtime) {
     }
     const walletRequest = hasGate(req) && hostName(req) === WALLET_HOST;
     const safeTrade = url.pathname.startsWith("/api/safetrade/");
-    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile" || url.pathname === "/api/jellyfin-lan" || safeTrade) && !walletRequest) {
+    if ((url.pathname === "/api/browse" || url.pathname === "/api/node" || url.pathname === "/api/node-chain-reset" || url.pathname === "/api/favicon" || url.pathname === "/api/mining" || url.pathname === "/api/mobile" || url.pathname === "/api/jellyfin-lan" || safeTrade) && !walletRequest) {
       send(res, 403, { ok: false, error: "Open Hog to browse" });
       return;
     }
@@ -2822,6 +2947,12 @@ async function handle(req, res, runtime) {
       return;
     }
 
+    if (url.pathname === "/api/node-chain-reset" && req.method === "POST") {
+      const result = await resetNodeChainFiles();
+      send(res, result.ok ? 200 : 400, result);
+      return;
+    }
+
     if (url.pathname === "/api/node" && (req.method === "GET" || req.method === "POST")) {
       const payload = req.method === "POST" ? await readJson(req) : {};
       const base = req.method === "GET" ? url.searchParams.get("base") : payload.base;
@@ -2874,8 +3005,11 @@ async function handle(req, res, runtime) {
       send(res, 403, { ok: false, error: "Forbidden" });
       return;
     }
-    const data = await readFile(filePath);
+    let data = await readFile(filePath);
     const type = TYPES[extname(filePath)] || "application/octet-stream";
+    if (requested === "/index.html" && hostName(req) === WALLET_HOST && req.method !== "HEAD") {
+      data = withNodeChainReset(data.toString("utf8"));
+    }
     if (type.startsWith("video/") && req.method === "GET") {
       sendMedia(res, data, type, req.headers.range);
       return;

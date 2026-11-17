@@ -90,7 +90,12 @@ function log(text) {
   appLogs.append(text);
 }
 
-const server = new HogServer({ root: ROOT, log, logs: appLogs });
+const server = new HogServer({
+  root: ROOT,
+  log,
+  logs: appLogs,
+  env: { ...process.env, HOG_PREVIEW_DATA: PREVIEW_DATA },
+});
 let guard = null;
 let win = null;
 let pages = null;

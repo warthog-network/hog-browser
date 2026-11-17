@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,9 @@ import {
   nodeHeadHeight,
   nodeHeadMark,
   nodeSyncedFlag,
+  resetNodeChainFiles,
+  startServer,
+  withNodeChainReset,
   NODE_STALL_MS,
   NODE_BUSY_MS,
   NODE_WEDGE_MS,
@@ -94,8 +98,9 @@ test("the node page gets Hog's recovery script; other sites do not", () => {
 });
 
 /** The recovery script against a fake node page. */
-function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, busyMs = 1_500, wedgeMs = 20 * 60_000, head = null, running = false, deferHead = false } = {}) {
+function recoveryPage({ text = "", channel = true, stallMs = 3 * 60_000, busyMs = 1_500, wedgeMs = 20 * 60_000, head = null, running = false, deferHead = false, saved = null } = {}) {
   const store = new Map();
+  if (saved) store.set("hogNodeAutoRestart", JSON.stringify(saved));
   const listeners = [];
   const posted = [];
   let now = 1_000_000;
@@ -199,6 +204,76 @@ test("the node page is not restarted for corruption or for errors Hog's storage 
   notOurs.body.innerText = "SQLite disk I/O error opening chain.db3.";
   notOurs.tick();
   assert.equal(notOurs.reloads, 0, "no storage failure was reported by Hog's polyfill");
+});
+
+test("a chain whose block heights skip is replaced once and is not started again", () => {
+  const page = recoveryPage({
+    text: "ERROR: Database corrupted, block height not consecutive",
+    saved: { last: 1, startAt: 1 },
+  });
+  page.tick();
+  assert.equal(page.reloads, 0);
+  assert.equal(page.clicks, 0);
+  assert.equal(page.posted.filter((m) => m.type === "node-chain-reset").length, 1);
+  page.tick();
+  assert.equal(page.posted.filter((m) => m.type === "node-chain-reset").length, 1);
+});
+
+test("the Hog window deletes the Chromium chain files and leaves the wallet store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hog-chain-"));
+  const preview = join(root, "hog-chromium-preview");
+  const chain = join(preview, "Partitions", "hog", "WebStorage", "1", "FileSystem", "t", "00");
+  const wallet = join(preview, "Partitions", "hog", "Local Storage");
+  await mkdir(chain, { recursive: true });
+  await mkdir(wallet, { recursive: true });
+  await writeFile(join(chain, "00000010"), "SQLite format 3");
+  await writeFile(join(wallet, "keep"), "wallet");
+  try {
+    const result = await resetNodeChainFiles({ chromium: true, previewData: preview });
+    assert.equal(result.ok, true);
+    assert.equal(existsSync(join(preview, "Partitions", "hog", "WebStorage", "1", "FileSystem")), false);
+    assert.equal(await readFile(join(wallet, "keep"), "utf8"), "wallet");
+    const refused = await resetNodeChainFiles({ chromium: true, previewData: root });
+    assert.equal(refused.ok, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Hog window deletes the WebKit node chain and leaves other sites", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hog-opfs-"));
+  const node = join(root, "https_browser-node.netlify.app");
+  const other = join(root, "https_example.com");
+  await mkdir(join(node, "defi"), { recursive: true });
+  await mkdir(other, { recursive: true });
+  await writeFile(join(node, "chain.db3"), "old");
+  await writeFile(join(node, "defi", "chain.db3"), "old");
+  await writeFile(join(other, "chain.db3"), "keep");
+  try {
+    const result = await resetNodeChainFiles({ chromium: false, opfsRoot: node, opfsBase: root });
+    assert.equal(result.ok, true);
+    assert.equal(existsSync(node), false);
+    assert.equal(await readFile(join(other, "chain.db3"), "utf8"), "keep");
+    const refused = await resetNodeChainFiles({ chromium: false, opfsRoot: root, opfsBase: root });
+    assert.equal(refused.ok, false);
+    assert.equal(existsSync(other), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the Hog window page offers the chain reset and refuses it without the gate", async () => {
+  assert.match(withNodeChainReset("<html><head></head><body></body></html>"), /__hogChainReset/);
+  const server = await startServer(0);
+  const { port } = server.address();
+  try {
+    const home = await fetch(`http://127.0.0.1:${port}/`);
+    assert.match(await home.text(), /id="node-frame"[\s\S]*__hogChainReset|__hogChainReset[\s\S]*id="node-frame"/);
+    const closed = await fetch(`http://127.0.0.1:${port}/api/node-chain-reset`, { method: "POST" });
+    assert.equal(closed.status, 403);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 

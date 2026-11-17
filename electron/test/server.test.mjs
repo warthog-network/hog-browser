@@ -32,6 +32,7 @@ test("launch error includes the server's last lines", async () => {
       assert.equal(cmd, "/opt/Hog (Chromium preview)/hog-chromium-preview");
       assert.deepEqual(args, ["server.mjs"]);
       assert.equal(opts.env.ELECTRON_RUN_AS_NODE, "1");
+      assert.equal(opts.env.HOG_CHROMIUM, "1");
       return child;
     },
     log: () => {},
