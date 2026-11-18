@@ -291,7 +291,7 @@ test("nodeHeadHeight reads the same payload shapes as the in-page node", () => {
   assert.equal(NODE_WEDGE_MS, 45 * 60_000);
 });
 
-test("a running unsynced node whose height is stuck is reloaded and Start is pressed", async () => {
+test("a flat height while the node still answers is left running", async () => {
   const page = recoveryPage({
     running: true,
     stallMs: 180_000,
@@ -299,25 +299,13 @@ test("a running unsynced node whose height is stuck is reloaded and Start is pre
   });
   page.tick();
   await Promise.resolve();
-  assert.equal(page.reloads, 0, "needs a few minutes with no progress first");
   page.tick(120_000);
   await Promise.resolve();
-  assert.equal(page.reloads, 0);
   page.tick(60_000);
   await Promise.resolve();
-  assert.equal(page.reloads, 1);
-  assert.ok(page.posted.some((m) => m.type === "node-stall-restart"));
-  page.reloadPage();
-  page.button.textContent = "Start node";
-  page.tick(30_000);
-  assert.equal(page.clicks, 0, "waits for the old storage lock to lapse");
-  page.tick(36_000);
-  assert.equal(page.clicks, 1);
-  // A second stall within the quiet window is left for the user.
-  page.button.textContent = "Stop node";
-  page.tick(180_000);
+  page.tick(45 * 60_000);
   await Promise.resolve();
-  assert.equal(page.reloads, 1);
+  assert.equal(page.reloads, 0, "a slow batch keeps the same height and must not be reloaded");
 });
 
 test("the stall watchdog does not restart a node that is still advancing, synced, or stopped", async () => {
@@ -385,7 +373,7 @@ test("a slow chain head means the node is applying blocks, so Hog waits", async 
   page.tick(180_000);
   page.release();
   await Promise.resolve();
-  assert.equal(page.reloads, 1, "a fast reply at the same tip is a stuck peer");
+  assert.equal(page.reloads, 0, "a fast reply at the same tip is still a live node");
 });
 
 test("a chain head that never returns is restarted after the long backstop", () => {

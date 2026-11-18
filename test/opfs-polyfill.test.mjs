@@ -320,9 +320,14 @@ test("Chromium keeps its own storage and caches chain pages around it", async ()
   vm.runInContext(POLYFILL, context);
   const fh = new context.FileSystemFileHandle();
   const handle = await fh.createSyncAccessHandle();
+  assert.equal(handle.write(new Uint8Array([9]), { at: 0 }), 1);
+  clock.now += 2100;
+  assert.equal(handle.write(new Uint8Array([8]), { at: 1 }), 1);
+  assert.ok(native.writes > 0, "a file that has never committed still saves its log bytes");
+  const afterLog = native.writes;
   const page = new Uint8Array(4096).fill(7);
   for (let i = 0; i < 200; i += 1) assert.equal(handle.write(page, { at: i * 4096 }), 4096);
-  assert.equal(native.writes, 0, "page writes stay in memory until flush");
+  assert.equal(native.writes, afterLog, "page writes stay in memory until flush");
   const sample = new Uint8Array(4096);
   assert.equal(handle.read(sample, { at: 50 * 4096 }), 4096);
   assert.equal(sample[0], 7);
@@ -343,7 +348,7 @@ test("Chromium keeps its own storage and caches chain pages around it", async ()
   assert.equal(native.writes, writesBeforeHold, "a fresh write still waits");
   clock.now += 2100;
   handle.write(new Uint8Array([4]), { at: 3 });
-  assert.ok(native.writes > writesBeforeHold, "bytes held for two seconds are written even without flush");
+  assert.equal(native.writes, writesBeforeHold, "after a commit, pages wait for the next flush");
   await handle.close();
   assert.equal(disk[0], 1);
   assert.equal(disk[3], 4);

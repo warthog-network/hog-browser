@@ -706,14 +706,12 @@ export function nodeSyncScript() {
  * after the old threads' storage lock has lapsed. A second failure within
  * NODE_RESTART_QUIET_MS is left for the user.
  *
- * The same restart is used if the node stays running and unsynced but makes
- * no progress. A stuck peer answers /chain/head quickly while the height sits
- * still, so that restarts after NODE_STALL_MS. Applying a batch on a slow CPU
- * blocks that same call for seconds, so those replies reset the idle clock
- * instead of looking like a stall. A height that stays put for NODE_WEDGE_MS
- * even while the node looks busy is restarted anyway.
- * Either restart is the same action as Stop then Start in the node UI, after
- * the storage lock lapses.
+ * A height that sits still is left alone. On a slow machine one batch of
+ * blocks takes longer than a few minutes, and reloading in the middle of that
+ * write is what leaves the block heights with a gap. Hog restarts only when
+ * /chain/head itself never returns for NODE_WEDGE_MS, which means the node
+ * thread is stuck inside a batch. That restart is the same action as Stop
+ * then Start in the node UI, after the storage lock lapses.
  *
  * "Database corrupted, block height not consecutive" is a gap in the saved
  * headers. Restarting opens the same file and throws the same line, so Hog
@@ -746,7 +744,7 @@ export function nodeRecoveryScript(options = {}) {
   var readHeight = ${nodeHeadHeight.toString()};
   var readMark = ${nodeHeadMark.toString()};
   var lastFailure = 0;
-  var stall = { mark: "", since: 0, flatSince: 0, pending: false, asked: 0 };
+  var stall = { pending: false, asked: 0 };
   var channel = null;
   try {
     channel = new BroadcastChannel("hog-opfs");
@@ -800,9 +798,7 @@ export function nodeRecoveryScript(options = {}) {
       if (left > 0) {
         var wait = Math.ceil(left / 1000);
         note(state.reason === "node-stall-restart"
-          ? (state.pace === "busy"
-            ? "Hog: sync has been on the same height for a long time. Your chain data is fine; restarting the node in " + wait + " s."
-            : "Hog: the node has not advanced for " + Math.round(STALL_MS / 60000) + " minutes while still syncing. Your chain data is fine; restarting the node in " + wait + " s.")
+          ? "Hog: the chain head stopped answering. Your chain data is fine; restarting the node in " + wait + " s."
           : "Hog: a storage request failed. Your chain data is fine; restarting the node in " + wait + " s.");
         return;
       }
@@ -837,14 +833,15 @@ export function nodeRecoveryScript(options = {}) {
   }
   function checkStall() {
     if (startButton()) {
-      stall = { mark: "", since: 0, flatSince: 0, pending: false, asked: 0 };
+      stall = { pending: false, asked: 0 };
       return;
     }
     var state = load();
     if (state.last && Date.now() - state.last < QUIET_MS) return;
     var now = Date.now();
     // One head request at a time. A pile of them behind a slow batch steals
-    // the node thread the moment that batch finishes.
+    // the node thread the moment that batch finishes. A reply, however long
+    // it took and whatever height it reports, means the node is still working.
     if (stall.pending) {
       if (stall.asked && now - stall.asked >= WEDGE_MS) beginRestart("node-stall-restart", "busy");
       return;
@@ -853,31 +850,8 @@ export function nodeRecoveryScript(options = {}) {
     if (!mod || typeof mod.virtual_get !== "function") return;
     stall.pending = true;
     stall.asked = now;
-    Promise.resolve(mod.virtual_get("/chain/head")).then(function (raw) {
+    Promise.resolve(mod.virtual_get("/chain/head")).then(function () {
       stall.pending = false;
-      var synced = readSynced(raw);
-      var height = readHeight(raw);
-      var mark = readMark(raw);
-      var answered = Date.now();
-      var busy = answered - stall.asked >= BUSY_MS;
-      if (synced || !height) {
-        stall.mark = mark;
-        stall.since = answered;
-        stall.flatSince = answered;
-        return;
-      }
-      if (stall.mark !== mark || !stall.since) {
-        stall.mark = mark;
-        stall.since = answered;
-        stall.flatSince = answered;
-        return;
-      }
-      // A slow reply means the node thread was busy applying blocks. An idle
-      // stuck peer answers immediately, and that clock is the one that restarts.
-      if (busy) stall.since = answered;
-      if (!stall.flatSince) stall.flatSince = stall.since;
-      if (answered - stall.since < STALL_MS && answered - stall.flatSince < WEDGE_MS) return;
-      beginRestart("node-stall-restart", answered - stall.flatSince >= WEDGE_MS ? "busy" : "idle");
     }).catch(function () { stall.pending = false; });
   }
   setInterval(tick, ${tickMs});

@@ -20,9 +20,10 @@
   }
 
   // Read cache and write holding for Chromium's native sync file handles.
-  // SQLite flushes when a commit must reach disk. Log files never flush, so
-  // held bytes are written after HOLD_MS even without one. Durability of the
-  // chain matches the browser: flush() still calls the native flush.
+  // SQLite flushes when a commit must reach disk. Writing those pages earlier
+  // leaves a chain whose block heights skip when the tab is closed mid-sync.
+  // After the first flush, dirty pages stay in memory until the next flush.
+  // A log file never flushes, so its bytes are written after HOLD_MS.
   function installChromiumCache() {
     const NativeFile = globalThis.FileSystemFileHandle;
     const nativeOpen = NativeFile && NativeFile.prototype && NativeFile.prototype.createSyncAccessHandle;
@@ -41,6 +42,7 @@
       let size = 0;
       let sizeKnown = false;
       let closed = false;
+      let committed = false;
 
       function ensure(index) {
         const hit = cache.get(index);
@@ -76,11 +78,9 @@
             dropped = true;
             break;
           }
-          if (dropped) continue;
-          writeBack();
-          const oldest = cache.keys().next().value;
-          if (oldest == null) break;
-          cache.delete(oldest);
+          // Dirty chain pages stay until flush. Pushing them out early is a
+          // torn commit if the tab closes before SQLite finishes the transaction.
+          if (!dropped) break;
         }
       }
 
@@ -100,6 +100,9 @@
 
       function sendAged(force) {
         if (closed || !dirty.size) return;
+        // A chain database has already committed once. Later pages wait for
+        // SQLite's own flush so a restart cannot save half a block batch.
+        if (!force && committed) return;
         if (!force && pendingBytes < PENDING_LIMIT && Date.now() - pendingSince < HOLD_MS) return;
         try {
           writeBack();
@@ -178,6 +181,7 @@
         flush() {
           try {
             sendAged(true);
+            committed = true;
             const out = raw.flush();
             return out && typeof out.then === "function" ? out : Promise.resolve();
           } catch (error) {
@@ -199,6 +203,7 @@
             const target = Number(next);
             const out = raw.truncate(target);
             const apply = () => {
+              committed = true;
               size = target;
               sizeKnown = true;
               const keep = Math.floor(target / CHUNK);
