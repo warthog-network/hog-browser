@@ -28,33 +28,40 @@
       <button type="button" id="forward" class="icon" aria-label="Forward" disabled>→</button>
       <button type="button" id="reload" class="icon" aria-label="Reload">↻</button>
       <button type="button" id="stop" class="icon" aria-label="Stop" hidden>✕</button>
-      <button type="button" id="home-btn" class="icon" aria-label="Home">⌂</button>
+      <button type="button" id="home-btn" class="icon" aria-label="General" title="General">⌂</button>
+      <button type="button" id="world-btn" class="icon" aria-label="New tab" title="New tab" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" stroke-width="1.7"></circle>
+          <ellipse cx="12" cy="12" rx="3.5" ry="8.25" fill="none" stroke="currentColor" stroke-width="1.7"></ellipse>
+          <path d="M4.1 12h15.8M6.4 8.1h11.2M6.4 15.9h11.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
+        </svg>
+      </button>
       <form id="omnibox" class="omnibox">
         <input id="address" type="text" autocomplete="off" spellcheck="false" placeholder="Search or URL" aria-label="Address" role="combobox" aria-expanded="false" aria-controls="suggestions">
         <div id="suggestions" class="suggestions" hidden></div>
       </form>
       <button type="button" id="star" class="icon" aria-label="Bookmark this page (Ctrl+D)" title="Bookmark this page (Ctrl+D)" aria-pressed="false">☆</button>
-      <div id="bookmarks" class="bookmarks" aria-label="Favorites"></div>
+      <div id="bookmarks" class="bookmarks" aria-label="Favorites" hidden></div>
       <button type="button" id="bookmarks-btn" class="icon" aria-label="Bookmarks (Ctrl+Shift+O)" title="Bookmarks (Ctrl+Shift+O)">▤</button>
-      <button type="button" id="zoom-btn" class="zoom" aria-label="Reset zoom">100%</button>
-      <button type="button" id="shields" class="icon" aria-label="How this tab is opened" title="How this tab is opened" aria-expanded="false">◈</button>
-      <button type="button" id="history-btn" class="icon" aria-label="History" aria-expanded="false">◷</button>
+      <div class="settings-anchor">
+        <button type="button" id="page-menu-btn" class="icon" aria-label="Page" title="Zoom, site info, history" aria-haspopup="menu" aria-controls="page-menu" aria-expanded="false">⋯</button>
+        <div id="page-menu" class="popover settings-menu" role="menu" hidden>
+          <ul>
+            <li><button type="button" id="zoom-btn" role="menuitem"><span>Reset zoom</span><small id="zoom-label">100%</small></button></li>
+            <li><button type="button" id="shields" role="menuitem" aria-expanded="false"><span>How this tab is opened</span><small>Direct, isolated, or node</small></button></li>
+            <li><button type="button" id="history-btn" role="menuitem" aria-expanded="false"><span>History</span><small>Pages opened in Hog</small></button></li>
+          </ul>
+        </div>
+      </div>
       <div class="settings-anchor">
         <button type="button" id="settings-btn" class="icon" aria-label="Settings" title="Settings" aria-haspopup="menu" aria-controls="settings-menu" aria-expanded="false">⚙</button>
         <div id="settings-menu" class="popover settings-menu" role="menu" hidden>
           <ul>
             <li><button type="button" role="menuitem" data-settings="bookmarks"><span>Bookmarks</span><small>Folders, favorites, import and export · Ctrl+Shift+O</small></button></li>
             <li><button type="button" role="menuitem" data-settings="general"><span>General</span><small>Updates and default browser</small><span id="hog-update-menu-badge" class="hog-update-badge" hidden>Update available</span></button></li>
-            <li><button type="button" role="menuitem" data-settings="explorer"><span>Files</span><small>Browse, upload and share ~/hog-shares · hog://files</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="files"><span>Library</span><small>Jellyfin library and Files folders</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="containers"><span>Containers</span><small>Images, runtimes, and logs</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="networks"><span>Networks</span><small>Docker networks</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="tailscale"><span>Tailscale</span><small>Sign in, Jellyfin, and phone folders</small></button></li>
-            <li><button type="button" role="menuitem" data-settings="mining"><span>Solo mining</span><small>BzMiner to the node tab (DeFi testnet)</small></button></li>
           </ul>
         </div>
       </div>
-      <button type="button" id="node-btn" class="zoom node-btn" aria-label="Warthog node">Node</button>
       <div id="winctl" class="winctl" hidden>
         <button type="button" id="win-min" aria-label="Minimize">–</button>
         <button type="button" id="win-max" aria-label="Maximize">▢</button>
@@ -121,8 +128,9 @@
             <div class="shortcuts toolbox-shortcuts">
               <button type="button" data-settings="containers">Containers</button>
               <button type="button" data-settings="explorer">Files</button>
-              <button type="button" data-settings="files">Library</button>
               <button type="button" data-settings="tailscale">Tailscale</button>
+              <button type="button" data-settings="mining">Mining</button>
+              <button type="button" id="node-btn" class="node-btn" aria-label="Warthog node">Node</button>
             </div>
           </div>
         </section>
@@ -334,12 +342,12 @@
         <section class="home" id="browser-settings" hidden>
           <div class="settings-shell">
             <nav id="settings-nav" class="settings-nav" aria-label="Settings">
-              <button type="button" data-settings="general"><span>General</span><small>Updates and browser</small></button>
-              <button type="button" data-settings="files"><span>Files</span><small>Library</small></button>
-              <button type="button" data-settings="containers"><span>Containers</span><small>Images and logs</small></button>
-              <button type="button" data-settings="networks"><span>Networks</span><small>Docker networks</small></button>
-              <button type="button" data-settings="tailscale"><span>Tailscale</span><small>Phone access</small></button>
-              <button type="button" data-settings="mining"><span>Solo mining</span><small>BzMiner</small></button>
+              <button type="button" data-settings="general" data-area="prefs"><span>General</span><small>Updates and browser</small></button>
+              <button type="button" data-settings="containers" data-area="home"><span>Containers</span><small>Images and logs</small></button>
+              <button type="button" data-settings="files" data-area="home"><span>Files</span><small>What hog://files shows</small></button>
+              <button type="button" data-settings="networks" data-area="home"><span>Networks</span><small>Docker networks</small></button>
+              <button type="button" data-settings="tailscale" data-area="home"><span>Tailscale</span><small>Phone access</small></button>
+              <button type="button" data-settings="mining" data-area="home"><span>Solo mining</span><small>BzMiner</small></button>
             </nav>
             <div class="settings-panes">
           <div id="settings-general" hidden>
@@ -350,7 +358,7 @@
               <p class="eyebrow">Hog</p>
               <div class="engine-row default-browser-row">
                 <div class="default-browser-copy">
-                  <strong>Updates</strong>
+                  <strong>Updates <span id="hog-update-pill" class="status-pill is-muted">Checking</span></strong>
                   <p id="hog-update-status" class="note" role="status">Checking the installed Hog version…</p>
                   <p id="hog-update-error" class="error" role="status"></p>
                   <p id="hog-update-manual" class="note" hidden>
@@ -380,10 +388,10 @@
           </div>
           <div id="settings-files" hidden>
             <p class="eyebrow">Files</p>
-            <h1>Library</h1>
-            <p class="lede">Films and photos in ~/hog-shares show up in Jellyfin at /media.</p>
-            <section id="files-roots-card" class="endpoint-row files-roots-card" aria-label="Files folders">
-              <p class="eyebrow">Files folders</p>
+            <h1>Files</h1>
+            <p class="lede">Browse and upload in hog://files. This page only chooses which folders that browser can open. Films in ~/hog-shares show up in Jellyfin at /media.</p>
+            <section id="files-roots-card" class="endpoint-row files-roots-card" aria-label="Places">
+              <p class="eyebrow">Places</p>
               <p class="note">hog://files always shows ~/hog-shares. Add other folders here, such as ~/Videos or a disk under /media. Hog refuses your whole home folder, hidden folders and its own wallet data.</p>
               <ul id="files-roots-list" class="files-roots-list"></ul>
               <form id="files-root-form" class="files-root-form">
@@ -394,7 +402,7 @@
               <p id="files-root-status" class="note" role="status"></p>
               <button type="button" id="files-open" class="tiny">Open hog://files →</button>
             </section>
-            <div id="media-library" class="endpoint-row">
+            <div id="media-library" class="endpoint-row" hidden>
               <p class="eyebrow">Files</p>
               <p class="note">In Jellyfin, add a library at /media. Drop films onto the dashed box, or use Add files, Add folder, or New folder. Those land in ~/hog-shares, which Jellyfin already reads.</p>
               <div id="share-drop" class="share-drop">
@@ -426,6 +434,7 @@
           <p class="lede">Containers run from Hog, not from a web page. Each one drops extra privileges and cannot see the wallet. Pick Docker Engine or Docker Desktop for each container.</p>
           <div class="engine-row">
             <p id="docker-state" class="note">Checking whether Docker is running…</p>
+            <span id="docker-pill" class="status-pill is-muted">Checking</span>
             <button type="button" id="start-docker">Start Docker</button>
           </div>
           <div id="docker-install-row" class="gpu-install-row" hidden>
@@ -692,6 +701,7 @@
                 <div class="default-browser-copy">
                   <strong>Local mining port</strong>
                   <p id="mining-status" class="note" role="status">Off. Turn this on to let BzMiner connect.</p>
+                  <span id="mining-pill" class="status-pill is-muted">Off</span>
                   <p id="mining-error" class="error" role="status"></p>
                 </div>
                 <button type="button" id="mining-toggle" aria-pressed="false">Turn on</button>
@@ -762,6 +772,7 @@
                 <button type="button" id="jellyfin-copy" hidden>Copy</button>
               </div>
               <div id="tailscale-setup">
+                <span id="tailscale-pill" class="status-pill is-muted" hidden></span>
                 <p id="tailscale-auth" class="note" role="status"></p>
                 <p id="tailscale-error" class="error" role="status"></p>
                 <button type="button" id="tailscale-up" hidden>Sign in</button>
@@ -773,6 +784,7 @@
             </section>
             <section id="samba-card" class="connect-card samba-card" aria-label="Network drive">
               <p class="eyebrow">Network drive (Samba)</p>
+              <span id="samba-pill" class="status-pill is-muted">Off</span>
               <p id="samba-state" class="note" role="status">Off. Turn it on to open ~/hog-shares as a drive on your phone or another computer in your tailnet.</p>
               <form id="samba-form" class="samba-form">
                 <label>User
@@ -784,7 +796,7 @@
                 <button type="submit">Save sign-in</button>
               </form>
               <div class="row">
-                <button type="button" id="samba-toggle" class="primary">Turn on</button>
+                <button type="button" id="samba-toggle" class="quiet-action">Turn on</button>
               </div>
               <p id="samba-error" class="error" role="status"></p>
               <ul id="samba-links" class="fx-smb-links samba-links" hidden></ul>
@@ -1087,6 +1099,13 @@
                 <button type="button" id="go-mint" data-defi-only><svg viewBox="0 0 512 512" aria-hidden="true"><path fill="currentColor" d="M121.72 32a4 4 0 0 0-3.72 5.56l2.3 5.43 40.7 94.9a4 4 0 0 0 6.88.82L243 38.4a4 4 0 0 0-3.2-6.4zm298.21 26.06-41.28 96.37a4 4 0 0 0 3.68 5.57h101a4 4 0 0 0 3.4-6.11L427 57.53a4 4 0 0 0-7.07.53zM85 57.57l-59.71 96.32a4 4 0 0 0 3.4 6.11h101a4 4 0 0 0 3.67-5.58L92 58.1a4 4 0 0 0-7-.53zM393.27 32H267.82a1.94 1.94 0 0 0-1.56 3.11l79.92 106.46a1.94 1.94 0 0 0 3.34-.4L391.6 43l3.4-8.34a1.92 1.92 0 0 0-1.7-2.66zM239 448l-89.43-253.49A3.78 3.78 0 0 0 146 192H25.7a3.72 3.72 0 0 0-2.95 6l216 279.81a5.06 5.06 0 0 0 6.39 1.37 5 5 0 0 0 2.39-6.08zm247.3-256H366a3.75 3.75 0 0 0-3.54 2.51l-98.2 278.16a5.21 5.21 0 0 0 2.42 6.31 5.22 5.22 0 0 0 6.61-1.39L489.25 198a3.72 3.72 0 0 0-2.95-6zM259.2 78.93l56 74.67a4 4 0 0 1-3.2 6.4H200a4 4 0 0 1-3.2-6.4l56-74.67a4 4 0 0 1 6.4 0zm-7 310.31-67.7-191.91a4 4 0 0 1 3.77-5.33h135.46a4 4 0 0 1 3.77 5.33l-67.73 191.91a4 4 0 0 1-7.54 0z"/></svg>Mint</button>
               </div>
               <button type="button" id="go-receive-defi" class="w-back" data-defi-only>Receive</button>
+              <section class="home-activity" aria-label="Recent activity">
+                <div class="card-head">
+                  <span>Recent</span>
+                  <button type="button" id="home-activity-all" class="tiny">Activity</button>
+                </div>
+                <div id="home-activity-list"></div>
+              </section>
             </div>
 
             <div id="wpage-trade" hidden>
@@ -1304,6 +1323,7 @@
               <button type="button" class="w-back" data-back="trade">Trade</button>
               <p class="note">The API secret stays in memory until this wallet locks. Hog does not send the Warthog key.</p>
               <form id="safe-key-form" class="stack">
+                <p id="safe-key-status" class="swap-fine"></p>
                 <label>API key
                   <input id="safe-key" autocomplete="off" spellcheck="false">
                 </label>
@@ -1311,9 +1331,10 @@
                   <input id="safe-secret" type="password" autocomplete="off">
                 </label>
                 <div class="row">
-                  <button type="submit" class="primary">Use key</button>
+                  <button type="submit" class="primary" id="safe-check">Check balances</button>
                   <button type="button" id="safe-clear">Clear key</button>
                 </div>
+                <p id="safe-check-error" class="error" role="status"></p>
               </form>
               <div id="safe-balances"></div>
               <section class="swap-card">
@@ -1563,7 +1584,10 @@
               <div class="row">
                 <button type="button" id="refresh">Refresh</button>
                 <button type="button" id="lock">Lock</button>
-                <button type="button" id="forget-open" class="danger">Forget</button>
+              </div>
+              <div class="forget-zone">
+                <p class="note">Forget deletes the key stored in this window. Lock only hides it until you type the password.</p>
+                <button type="button" id="forget-open" class="danger">Forget this wallet</button>
               </div>
             </div>
 

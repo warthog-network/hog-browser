@@ -72,6 +72,7 @@ const PAGE_MENUS = [
   ["suggestions", "suggestions"],
   ["history-panel", "history"],
   ["settings-menu", "settings"],
+  ["page-menu", "page"],
 ];
 const COVER_SELECTOR = [
   ".popover", ".picker", ".connect-card", "[role=dialog]", "[role=menu]",

@@ -201,6 +201,9 @@ let lockTimer = 0;
 let lockDeadline = 0;
 let safeCreds = null;
 let safeRows = [];
+let safeChecked = false;
+let safeChecking = false;
+let safeCheckGen = 0;
 const safeUi = {
   panel: "swap",
   network: "Warthog",
@@ -316,10 +319,20 @@ function dropSession() {
   lockDeadline = 0;
   safeCreds = null;
   safeRows = [];
+  safeChecked = false;
+  safeChecking = false;
+  safeCheckGen += 1;
   const safeKey = $("safe-key");
   const safeSecret = $("safe-secret");
   if (safeKey) safeKey.value = "";
   if (safeSecret) safeSecret.value = "";
+  const safeCheckError = $("safe-check-error");
+  if (safeCheckError) safeCheckError.textContent = "";
+  safeUi.walletFree = null;
+  if ($("safe-balances")) paintSafeBalances();
+  if ($("safe-key-status")) paintSafeKeyStatus();
+  if ($("safe-check")) paintSafeCheckButton();
+  if ($("safe-free")) paintSafeQuote();
   vaultCall("lock", {}).catch(() => {});
   session = null;
   balance = null;
@@ -685,6 +698,7 @@ function showBrowserSettings() {
   frame.removeAttribute("srcdoc");
   if (frame.getAttribute("src")) frame.src = "about:blank";
   parkNode();
+  paintWorldButton();
   $("browser-settings").hidden = false;
   $("settings-btn").classList.add("is-open");
   reportView(false);
@@ -693,6 +707,25 @@ function showBrowserSettings() {
 }
 
 const SETTINGS_SECTIONS = ["general", "files", "containers", "networks", "tailscale", "mining"];
+
+function applyHomeIntro() {
+  const hero = document.querySelector("#home .home-hero");
+  if (!hero) return;
+  try {
+    hero.hidden = localStorage.getItem("hog-intro-seen") === "1";
+  } catch {
+    hero.hidden = false;
+  }
+}
+
+function markHomeIntro() {
+  try {
+    localStorage.setItem("hog-intro-seen", "1");
+  } catch {
+    // The new-tab hero stays until storage is available.
+  }
+  applyHomeIntro();
+}
 
 function normalizeSettingsPage(page) {
   if (page === "docker") return "containers";
@@ -716,6 +749,10 @@ function showSettingsPage(page) {
   if (menu) menu.hidden = true;
   $("settings-btn").setAttribute("aria-expanded", "false");
   $("settings-btn").classList.add("is-open");
+  document.querySelectorAll("#settings-nav [data-area]").forEach((button) => {
+    button.hidden = false;
+  });
+  markHomeIntro();
   document.querySelectorAll("#settings-menu [data-settings], #settings-nav [data-settings]").forEach((button) => {
     button.setAttribute("aria-current", button.dataset.settings === next ? "page" : "false");
   });
@@ -740,10 +777,22 @@ function showSettingsPage(page) {
   }
 }
 
+function paintWorldButton() {
+  const button = $("world-btn");
+  if (!button) return;
+  const on = home.hidden === false;
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
 function showHome() {
   viewSeq += 1;
   hideBrowserSettings();
   hideShell();
+  hideBookmarksView();
+  hideFilesView();
+  hideBookmarkRow();
+  hideSuggestions();
+  closePopovers();
   home.hidden = false;
   frame.hidden = true;
   status.hidden = true;
@@ -751,6 +800,7 @@ function showHome() {
   frame.removeAttribute("srcdoc");
   if (frame.getAttribute("src")) frame.src = "about:blank";
   parkNode();
+  paintWorldButton();
   reportView(false);
 }
 
@@ -765,6 +815,7 @@ function showStatus(message) {
   statusText.textContent = message;
   frame.removeAttribute("srcdoc");
   parkNode();
+  paintWorldButton();
   reportView(false);
 }
 
@@ -779,6 +830,7 @@ function showNative() {
   frame.removeAttribute("srcdoc");
   if (frame.getAttribute("src")) frame.src = "about:blank";
   parkNode();
+  paintWorldButton();
   reportView(true);
 }
 
@@ -805,6 +857,7 @@ function showNode(frameUrl) {
     }
   }
   if (next && nodeFrame.getAttribute("src") !== next) nodeFrame.src = next;
+  paintWorldButton();
   reportView(false);
 }
 
@@ -821,6 +874,7 @@ function mountFrame(frameUrl) {
   frame.hidden = false;
   hideBrowserSettings();
   home.hidden = true;
+  paintWorldButton();
   status.hidden = true;
   const next = String(frameUrl);
   const apply = () => {
@@ -863,7 +917,7 @@ function renderShield(tab) {
   }
   if (tab?.kind === "node") {
     title.textContent = tab.synced ? "Node synced" : "Node";
-    copy.textContent = "The Warthog node keeps running while you use other tabs. It cannot read the wallet key. The Node button turns green when the node says it is synced.";
+    copy.textContent = "The Warthog node keeps running while you use other tabs. It cannot read the wallet key. Node on the new-tab page turns green when the node says it is synced.";
     return;
   }
   if (!tab?.url) {
@@ -918,7 +972,7 @@ function renderTab() {
   document.title = tab.url && tab.title ? `${tab.title} — Hog` : "Hog";
   const surface = tab.kind === "node" ? nodeFrame : frame;
   surface.style.zoom = String(tab.zoom || 1);
-  $("zoom-btn").textContent = `${Math.round((tab.zoom || 1) * 100)}%`;
+  paintZoom(tab);
   updateStar();
   updateNav();
   renderShield(tab);
@@ -973,7 +1027,7 @@ function createTab({ activate = true, kind = "", isolated = false, title = "" } 
     id: tabSeq++,
     kind,
     isolated: Boolean(isolated) && kind !== "node" && kind !== "shell",
-    title: title || (kind === "node" ? "Node" : isolated ? "Isolated" : "New tab"),
+    title: title || (kind === "node" ? "Node" : "New tab"),
     url: "",
     frameUrl: "",
     status: "",
@@ -1099,7 +1153,12 @@ function setZoom(next) {
     const surface = tab.kind === "node" ? nodeFrame : frame;
     surface.style.zoom = String(tab.zoom);
   }
-  $("zoom-btn").textContent = `${Math.round(tab.zoom * 100)}%`;
+  paintZoom(tab);
+}
+
+function paintZoom(tab) {
+  const label = $("zoom-label");
+  if (label) label.textContent = `${Math.round((tab?.zoom || 1) * 100)}%`;
 }
 
 function readList(key) {
@@ -1389,6 +1448,7 @@ function showFilesView(target = {}) {
   hideBookmarkRow();
   viewSeq += 1;
   home.hidden = true;
+  paintWorldButton();
   status.hidden = true;
   frame.hidden = true;
   $("view").classList.remove("is-page");
@@ -1396,6 +1456,7 @@ function showFilesView(target = {}) {
   if (frame.getAttribute("src")) frame.src = "about:blank";
   parkNode();
   addressInput.value = "hog://files";
+  markHomeIntro();
   files().open(target).catch((error) => showToast(error.message || "Files did not open.", "error"));
   reportView(false);
   // Same as hog://bookmarks: later frames must keep the page view hidden.
@@ -1649,6 +1710,11 @@ function paintSambaCard() {
     stateText.textContent = "Off. Turn it on to open ~/hog-shares as a drive on your phone or another computer in your tailnet.";
   }
   toggle.textContent = samba.running ? "Turn off" : samba.exists ? "Turn on" : "Download and turn on";
+  toggle.classList.toggle("primary", !samba.running && !samba.exists);
+  if (sambaBusy) setStatusPill("samba-pill", "Working", "warn");
+  else if (samba.running) setStatusPill("samba-pill", "On", "ok");
+  else if (samba.enabled) setStatusPill("samba-pill", "Stopped", "warn");
+  else setStatusPill("samba-pill", "Off", "muted");
   toggle.disabled = sambaBusy || (!samba.running && (!samba.user || !samba.passwordSet));
   toggle.title = !samba.user || !samba.passwordSet ? "Save a user and password first." : "";
   card.classList.toggle("is-on", Boolean(samba.running));
@@ -1752,6 +1818,7 @@ function showBookmarksView({ view, edit, add, favorite } = {}) {
   hideBookmarkRow();
   viewSeq += 1;
   home.hidden = true;
+  paintWorldButton();
   status.hidden = true;
   frame.hidden = true;
   $("view").classList.remove("is-page");
@@ -1761,6 +1828,7 @@ function showBookmarksView({ view, edit, add, favorite } = {}) {
   $("bookmarks-view").hidden = false;
   $("bookmarks-btn")?.classList.add("is-open");
   addressInput.value = "hog://bookmarks";
+  markHomeIntro();
   if (view) bmState.view = view;
   if (!bmViewValid(bmState.view)) bmState.view = "all";
   bmState.editing = null;
@@ -2378,6 +2446,10 @@ function closePopovers() {
   $("history-panel").hidden = true;
   $("shields").setAttribute("aria-expanded", "false");
   $("history-btn").setAttribute("aria-expanded", "false");
+  const pageMenu = $("page-menu");
+  if (pageMenu) pageMenu.hidden = true;
+  const pageBtn = $("page-menu-btn");
+  if (pageBtn) pageBtn.setAttribute("aria-expanded", "false");
   const menu = $("settings-menu");
   if (menu) menu.hidden = true;
   const settingsBtn = $("settings-btn");
@@ -2446,8 +2518,10 @@ function openNative(tab, href, { push = true } = {}) {
 
 function setNodeSynced(synced) {
   const on = synced === true;
-  $("node-btn").classList.toggle("is-synced", on);
-  $("node-btn").setAttribute("aria-label", on ? "Warthog node, synced" : "Warthog node");
+  document.querySelectorAll(".node-btn").forEach((button) => {
+    button.classList.toggle("is-synced", on);
+    button.setAttribute("aria-label", on ? "Warthog node, synced" : "Warthog node");
+  });
   let changed = false;
   for (const tab of tabs) {
     if (tab.kind !== "node" || tab.synced === on) continue;
@@ -2544,6 +2618,7 @@ async function openUrl(raw, { push = true, method, fields } = {}) {
     goHome();
     return;
   }
+  markHomeIntro();
   hideSuggestions();
   if (/^hog-post:/i.test(text)) {
     tab.status = "This browser opens links. It does not submit forms.";
@@ -3174,6 +3249,9 @@ function showWalletPage(name) {
   stopCelebrate();
   const page = WALLET_PAGES.includes(name) ? name : "home";
   for (const id of WALLET_PAGES) $(`wpage-${id}`).hidden = id !== page;
+  const stage = $("stage");
+  if (stage) stage.classList.toggle("is-trade-sheet", TRADE_PAGES.has(page));
+  if (page === "home") paintHomeActivity();
   const nav = navFor(page);
   document.querySelectorAll("#w-nav [data-wpage]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.wpage === nav);
@@ -3204,6 +3282,7 @@ function showShell(tab) {
   viewSeq += 1;
   hideBrowserSettings();
   home.hidden = true;
+  paintWorldButton();
   status.hidden = true;
   frame.hidden = true;
   view.classList.remove("is-page");
@@ -3857,6 +3936,10 @@ function paintTailscaleSetup(payload) {
       auth.textContent = payload.notice;
     }
   }
+  if (signedIn && state === "NeedsMachineAuth") setStatusPill("tailscale-pill", "Needs approval", "warn");
+  else if (signedIn) setStatusPill("tailscale-pill", "Signed in", "ok");
+  else if (live) setStatusPill("tailscale-pill", "Needs sign-in", "warn");
+  else setStatusPill("tailscale-pill", "Off", "muted");
   if (link) {
     link.hidden = !url;
     link.dataset.url = url;
@@ -4394,6 +4477,14 @@ function paintJellyfinGpu(payload) {
   }
 }
 
+function setStatusPill(id, label, tone) {
+  const el = $(id);
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = label;
+  el.className = `status-pill${tone ? ` is-${tone}` : ""}`;
+}
+
 function paintDocker(payload) {
   const state = $("docker-state");
   const button = $("start-docker");
@@ -4414,6 +4505,10 @@ function paintDocker(payload) {
   state.textContent = payload.dockerInstallLive
     ? "Installer output is in the terminal below."
     : parts.join(" ");
+  if (payload.dockerInstallLive) setStatusPill("docker-pill", "Installing", "warn");
+  else if (engine.ok || desktop.ok || payload.docker) setStatusPill("docker-pill", "Running", "ok");
+  else if (engine.available || desktop.available) setStatusPill("docker-pill", "Stopped", "warn");
+  else setStatusPill("docker-pill", "Not installed", "muted");
   const engineBtn = $("docker-engine-install");
   const desktopBtn = $("docker-desktop-install");
   const groupBtn = $("docker-group-join");
@@ -4521,6 +4616,11 @@ function paintUpdate(payload) {
   }
   if (gear) gear.classList.toggle("has-update", available && !needRestart);
   if (badge) badge.hidden = !(available && !needRestart);
+  if (payload.ok === false && !current) setStatusPill("hog-update-pill", "Problem", "bad");
+  else if (needRestart) setStatusPill("hog-update-pill", "Restart", "warn");
+  else if (available) setStatusPill("hog-update-pill", "Update", "warn");
+  else if (current) setStatusPill("hog-update-pill", "Current", "ok");
+  else setStatusPill("hog-update-pill", "Checking", "muted");
 }
 
 function openHogRelease(url) {
@@ -6178,6 +6278,38 @@ function paintHistory() {
   more.hidden = !canMore;
   more.disabled = historyLoading || historyLoadingMore;
   more.textContent = historyLoadingMore ? "Loading…" : "Show More";
+  paintHomeActivity();
+}
+
+function paintHomeActivity() {
+  const list = $("home-activity-list");
+  if (!list) return;
+  list.replaceChildren();
+  const wart = isWartChain();
+  const rows = (wart ? displayedHistory() : chainRows).slice(0, 3);
+  const loading = wart ? historyLoading : chainLoading;
+  if (!rows.length) {
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = loading ? "Checking recent transactions…" : "Recent transactions show here.";
+    list.append(note);
+    return;
+  }
+  for (const item of rows) {
+    const line = document.createElement("button");
+    line.type = "button";
+    line.className = "home-activity-line";
+    if (wart) {
+      const incoming = item.isIncoming != null ? item.isIncoming : item.direction === "in" || Boolean(item.isReward);
+      const label = item.isReward ? "Reward" : incoming ? "Received" : "Sent";
+      const amount = item.amount || item.amountRaw || "";
+      line.textContent = amount ? `${label} · ${amount}` : (item.description || label);
+    } else {
+      line.textContent = [item.title || item.symbol || "Activity", item.amount].filter(Boolean).join(" · ");
+    }
+    line.addEventListener("click", () => showWalletPage("activity"));
+    list.append(line);
+  }
 }
 
 function paintPendingList() {
@@ -6289,30 +6421,36 @@ function paintChainActivity() {
   if (!activeAddress()) {
     note.hidden = false;
     note.textContent = `${spec.label} needs an address before activity can load.`;
+    paintHomeActivity();
     return;
   }
   if (chainTab === "tunnels") {
     note.hidden = false;
     note.textContent = "No tunnels from this wallet yet.";
+    paintHomeActivity();
     return;
   }
   if (chainError) {
     note.hidden = false;
     note.textContent = chainError;
+    paintHomeActivity();
     return;
   }
   if (chainLoading && chainRows.length === 0) {
     note.hidden = false;
     note.textContent = "Loading…";
+    paintHomeActivity();
     return;
   }
   if (!chainRows.length) {
     note.hidden = false;
     note.textContent = `No ${spec.label} transactions yet.`;
+    paintHomeActivity();
     return;
   }
   note.hidden = true;
   for (const row of chainRows) list.append(paintChainCard(row, spec.label));
+  paintHomeActivity();
 }
 
 function paintActivity() {
@@ -7636,6 +7774,7 @@ const PAGE_MENUS = [
   { id: "suggestions", kind: "suggestions" },
   { id: "history-panel", kind: "history" },
   { id: "settings-menu", kind: "settings" },
+  { id: "page-menu", kind: "page" },
 ];
 
 function openMenuElements() {
@@ -7654,6 +7793,12 @@ function menuItems(kind) {
       return [{ title: note, sub: "", inert: true }];
     }
     return buttons.map((button) => ({
+      title: button.querySelector("span")?.textContent || "",
+      sub: button.querySelector("small")?.textContent || "",
+    }));
+  }
+  if (kind === "page") {
+    return [...$("page-menu").querySelectorAll("[role=menuitem]")].map((button) => ({
       title: button.querySelector("span")?.textContent || "",
       sub: button.querySelector("small")?.textContent || "",
     }));
@@ -7714,6 +7859,10 @@ window.__hogMenuActivate = (kind, index) => {
   if (kind === "settings") {
     const button = document.querySelectorAll("#settings-menu [data-settings]")[index];
     button?.click();
+    return;
+  }
+  if (kind === "page") {
+    $("page-menu")?.querySelectorAll("[role=menuitem]")[index]?.click();
     return;
   }
   const root = document.getElementById(kind === "history" ? "history-list" : "suggestions");
@@ -8020,7 +8169,17 @@ function bind() {
     }
     abortLoad(tab.id);
   });
-  $("home-btn").addEventListener("click", goHome);
+  $("home-btn").addEventListener("click", () => showSettingsPage("general"));
+  $("world-btn").addEventListener("click", () => goHome());
+  $("page-menu-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = $("page-menu");
+    const willOpen = menu.hidden;
+    closePopovers();
+    menu.hidden = !willOpen;
+    $("page-menu-btn").setAttribute("aria-expanded", willOpen ? "true" : "false");
+    syncPageView();
+  });
   $("new-tab").addEventListener("click", () => {
     createTab();
     addressInput.focus();
@@ -8031,7 +8190,10 @@ function bind() {
   });
   $("star").addEventListener("click", toggleBookmark);
   bindBookmarks();
-  $("zoom-btn").addEventListener("click", () => setZoom(1));
+  $("zoom-btn").addEventListener("click", () => {
+    setZoom(1);
+    closePopovers();
+  });
   $("shields").addEventListener("click", () => togglePopover("shields-panel", "shields"));
   $("history-btn").addEventListener("click", () => togglePopover("history-panel", "history-btn"));
   $("settings-btn").addEventListener("click", (event) => {
@@ -8062,7 +8224,7 @@ function bind() {
     });
     settingsNav.addEventListener("keydown", (event) => {
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-      const buttons = [...settingsNav.querySelectorAll("[data-settings]")];
+      const buttons = [...settingsNav.querySelectorAll("[data-settings]")].filter((button) => !button.hidden);
       const index = buttons.indexOf(document.activeElement);
       if (index < 0) return;
       event.preventDefault();
@@ -8517,6 +8679,7 @@ function bind() {
     button.disabled = true;
     button.textContent = "Starting…";
     $("docker-state").textContent = "Starting Docker Desktop. This can take a minute.";
+    setStatusPill("docker-pill", "Starting", "warn");
     $("container-error").textContent = "";
     desktopCommand("containers:engine-start");
   });
@@ -8539,6 +8702,7 @@ function bind() {
         log.textContent = "Waiting for Ubuntu's password dialog…\nThe installer output will appear here.\n";
       }
       $("docker-state").textContent = waiting;
+      setStatusPill("docker-pill", "Installing", "warn");
       desktopCommand(action);
     });
   };
@@ -8578,7 +8742,7 @@ function bind() {
         $("bm-more").setAttribute("aria-expanded", "false");
       }
     }
-    if (event.target.closest("#shields, #shields-panel, #history-btn, #history-panel, #settings-btn, #settings-menu")) return;
+    if (event.target.closest("#page-menu-btn, #page-menu, #shields, #shields-panel, #history-btn, #history-panel, #settings-btn, #settings-menu")) return;
     closePopovers();
   });
   document.addEventListener("keydown", (event) => {
@@ -8659,6 +8823,7 @@ function bind() {
     activityPage.addEventListener("click", onActivityClick);
     activityPage.addEventListener("keydown", onActivityKey);
   }
+  $("home-activity-all").addEventListener("click", () => showWalletPage("activity"));
   $("go-send").addEventListener("click", () => showWalletPage("send"));
   $("go-receive").addEventListener("click", () => showWalletPage("receive"));
   $("go-receive-defi").addEventListener("click", () => showWalletPage("receive"));
@@ -9068,23 +9233,21 @@ function bind() {
     paintAaveLive();
   });
   $("aave-review-go").addEventListener("click", () => runAave());
+  $("safe-key").addEventListener("input", () => paintSafeCheckButton());
+  $("safe-secret").addEventListener("input", () => paintSafeCheckButton());
   $("safe-key-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    const apiKey = $("safe-key").value.trim();
-    const secret = $("safe-secret").value.trim();
-    if (!apiKey || !secret) {
-      $("safe-error").textContent = "Enter both the API key and the secret.";
-      return;
-    }
-    safeCreds = { apiKey, secret };
-    $("safe-secret").value = "";
-    paintSafePage();
+    void checkSafeBalances();
   });
   $("safe-clear").addEventListener("click", () => {
     safeCreds = null;
     safeRows = [];
+    safeChecked = false;
+    safeChecking = false;
+    safeCheckGen += 1;
     $("safe-key").value = "";
     $("safe-secret").value = "";
+    $("safe-check-error").textContent = "";
     paintSafePage();
   });
   document.querySelector("#wpage-safetrade").addEventListener("click", (event) => {
@@ -9094,6 +9257,9 @@ function bind() {
       safeUi.confirm = false;
       $("safe-error").textContent = "";
       paintSafeChrome();
+      if (safeUi.panel === "limit" && safeChecked && safeCreds) {
+        paintSafeOrders().catch(() => paintSafeOrdersEmpty());
+      }
       return;
     }
     const slip = event.target.closest("[data-safe-slip]");
@@ -10765,7 +10931,7 @@ function paintSafeQuote() {
   if (safeUi.panel === "deposit") {
     $("safe-free").textContent = safeUi.walletFree?.missing
       || (safeUi.walletFree ? `${safeUi.walletFree.text} ${pay?.symbol || ""} in this wallet` : "Checking the wallet balance.");
-  } else if (!safeCreds) {
+  } else if (!safeChecked) {
     $("safe-free").textContent = "Check balances first.";
   } else if (spot) {
     $("safe-free").textContent = spot.locked > 0
@@ -10821,31 +10987,114 @@ function paintSafeChrome() {
   paintSafeQuote();
 }
 
+function safeKeyHint(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.length <= 4) return "saved";
+  return `····${trimmed.slice(-4)}`;
+}
+
+function safeBalanceLine(asset) {
+  const row = safeRows.find((item) => item.asset === asset);
+  if (!row) return "0 free";
+  const free = trimAmount(row.available);
+  if (row.locked > 0) return `${free} free · ${trimAmount(row.locked)} locked`;
+  return `${free} free`;
+}
+
+function paintSafeKeyStatus() {
+  const status = $("safe-key-status");
+  if (!status) return;
+  status.textContent = safeCreds
+    ? `Key in this session ${safeKeyHint(safeCreds.apiKey)}`
+    : "No SafeTrade key in this session yet.";
+}
+
+function paintSafeCheckButton() {
+  const button = $("safe-check");
+  if (!button) return;
+  const typed = Boolean($("safe-key").value.trim() || $("safe-secret").value.trim());
+  button.textContent = safeChecking ? "Checking…" : typed ? "Save and check balances" : "Check balances";
+  button.disabled = safeChecking;
+  $("safe-key").disabled = safeChecking;
+  $("safe-secret").disabled = safeChecking;
+  const clear = $("safe-clear");
+  if (clear) clear.disabled = safeChecking;
+}
+
 function paintSafeBalances() {
   const host = $("safe-balances");
+  if (!host) return;
   host.replaceChildren();
-  if (!safeCreds) {
-    const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = "Enter the API key to see free and locked balances.";
-    host.append(note);
-    return;
-  }
-  const rows = safeRows.filter((row) => row.available > 0 || row.locked > 0);
-  if (!rows.length) {
-    const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = "No spot balance on SafeTrade.";
-    host.append(note);
-    return;
-  }
-  for (const row of rows) {
+  if (!safeChecked) return;
+  const card = document.createElement("div");
+  card.className = "safe-accepted";
+  const title = document.createElement("p");
+  title.className = "safe-accepted-title";
+  title.textContent = "SafeTrade accepted this address";
+  card.append(title);
+  for (const asset of ["WART", "USDT"]) {
+    const label = document.createElement("p");
+    label.className = "safe-accepted-k";
+    label.textContent = asset;
     const line = document.createElement("p");
-    line.className = "note";
-    line.textContent = row.locked > 0
-      ? `${row.asset}: ${trimAmount(row.available)} free; ${trimAmount(row.locked)} locked in open orders.`
-      : `${row.asset}: ${trimAmount(row.available)} free`;
-    host.append(line);
+    line.className = "safe-accepted-line";
+    line.textContent = safeBalanceLine(asset);
+    card.append(label, line);
+  }
+  for (const row of safeRows) {
+    if (row.asset === "WART" || row.asset === "USDT") continue;
+    if (!(row.available > 0) && !(row.locked > 0)) continue;
+    const extra = document.createElement("p");
+    extra.className = "swap-fine";
+    extra.textContent = `${row.asset} ${safeBalanceLine(row.asset)}`;
+    card.append(extra);
+  }
+  host.append(card);
+}
+
+async function checkSafeBalances() {
+  const gen = ++safeCheckGen;
+  safeChecking = true;
+  $("safe-check-error").textContent = "";
+  $("safe-error").textContent = "";
+  paintSafeCheckButton();
+  try {
+    const typedKey = $("safe-key").value.trim();
+    const typedSecret = $("safe-secret").value.trim();
+    if (typedKey || typedSecret) {
+      if (!typedKey || !typedSecret) {
+        throw new Error("Enter both the API key and the secret, then check again.");
+      }
+      safeCreds = { apiKey: typedKey, secret: typedSecret };
+      $("safe-key").value = "";
+      $("safe-secret").value = "";
+    }
+    if (!safeCreds) throw new Error("Save a SafeTrade API key and secret first.");
+    safeChecked = false;
+    safeRows = [];
+    paintSafeKeyStatus();
+    paintSafeBalances();
+    paintSafeQuote();
+    const balances = await safeBalances(safeCreds);
+    if (gen !== safeCheckGen) return;
+    safeRows = balances;
+    safeChecked = true;
+    paintSafeBalances();
+    paintSafeQuote();
+    if (safeUi.panel === "limit") await paintSafeOrders();
+  } catch (error) {
+    if (gen !== safeCheckGen) return;
+    safeChecked = false;
+    safeRows = [];
+    paintSafeBalances();
+    paintSafeQuote();
+    $("safe-check-error").textContent = safeErrorText(error);
+  } finally {
+    if (gen === safeCheckGen) {
+      safeChecking = false;
+      paintSafeCheckButton();
+    }
   }
 }
 
@@ -10990,16 +11239,9 @@ async function paintSafePage() {
   const gen = ++safePaintGen;
   $("safe-error").textContent = "";
   paintSafeChrome();
-  if (safeCreds) {
-    const host = $("safe-balances");
-    host.replaceChildren();
-    const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = "Checking SafeTrade…";
-    host.append(note);
-  } else {
-    paintSafeBalances();
-  }
+  paintSafeKeyStatus();
+  paintSafeCheckButton();
+  if (!safeChecking) paintSafeBalances();
   const pair = currentSafePair();
   const pay = currentSafePay();
   try {
@@ -11015,6 +11257,7 @@ async function paintSafePage() {
   } catch (error) {
     if (gen === safePaintGen) $("safe-ticker").textContent = safeErrorText(error);
   }
+  if (gen !== safePaintGen) return;
   if (safeUi.panel === "swap" || safeUi.panel === "limit") void refreshSafeBook();
   else {
     safeUi.depth = null;
@@ -11022,27 +11265,29 @@ async function paintSafePage() {
   }
   if (!safeCreds) {
     safeRows = [];
-    paintSafeBalances();
-    paintSafeOrdersEmpty();
-  } else {
+    safeChecked = false;
+    if (!safeChecking) {
+      paintSafeBalances();
+      paintSafeOrdersEmpty();
+    }
+  } else if (safeChecked && !safeChecking) {
     try {
-      safeRows = await safeBalances(safeCreds);
-      if (gen !== safePaintGen) return;
+      const rows = await safeBalances(safeCreds);
+      if (gen !== safePaintGen || safeChecking) return;
+      safeRows = rows;
       paintSafeBalances();
       if (safeUi.panel === "limit") await paintSafeOrders();
       else paintSafeOrdersEmpty();
-    } catch (error) {
-      if (gen !== safePaintGen) return;
-      safeRows = [];
-      $("safe-error").textContent = safeErrorText(error);
-      const host = $("safe-balances");
-      host.replaceChildren();
-      const note = document.createElement("p");
-      note.className = "note";
-      note.textContent = "Balances are unavailable.";
-      host.append(note);
+    } catch {
+      if (gen !== safePaintGen || safeChecking) return;
+      if (safeUi.panel === "limit") {
+        try { await paintSafeOrders(); } catch { paintSafeOrdersEmpty(); }
+      }
     }
+  } else if (!safeChecking) {
+    paintSafeOrdersEmpty();
   }
+  if (gen !== safePaintGen) return;
   if (safeUi.panel === "deposit") void loadSafeWallet();
   paintSafeQuote();
 }
@@ -11068,6 +11313,10 @@ async function fillSafeMax() {
   $("safe-error").textContent = "";
   const pay = currentSafePay();
   if (!pay) return;
+  if (safeUi.panel !== "deposit" && !safeChecked) {
+    $("safe-error").textContent = "Check balances first.";
+    return;
+  }
   if (safeUi.panel === "deposit") {
     if (!safeUi.walletFree || safeUi.walletFree.missing) {
       $("safe-error").textContent = safeUi.walletFree?.missing || "Checking the wallet balance.";
@@ -11104,7 +11353,7 @@ async function fillSafeMax() {
 function safeProblem() {
   const pay = currentSafePay();
   const value = Number($("safe-amount").value);
-  if (!safeCreds) return "Enter the API key first.";
+  if (!safeChecked) return "Check balances first.";
   if (!pay || !(value > 0)) return "Enter an amount.";
   const trading = safeUi.panel === "swap" || safeUi.panel === "limit";
   if (trading) {
@@ -11262,7 +11511,7 @@ async function submitSafeTrade() {
   button.disabled = true;
   $("safe-error").textContent = "";
   try {
-    if (!safeCreds) throw new Error("Enter the API key first.");
+    if (!safeCreds || !safeChecked) throw new Error("Check balances first.");
     const pay = currentSafePay();
     const receive = currentSafeReceive();
     const value = Number($("safe-amount").value);
@@ -11489,6 +11738,8 @@ if (savedChain && CHAIN_VIEW[savedChain]) networkSelect.value = savedChain;
 bind();
 paintNetMenu();
 renderBookmarks();
+applyHomeIntro();
+paintHomeActivity();
 createTab();
 showSetup();
 setWalletOpen(localStorage.getItem(WALLET_OPEN_KEY) !== "0");
@@ -11577,9 +11828,12 @@ function paintMining(state) {
   setText("mining-last", state.lastResult || "");
   if (!on) {
     status.textContent = "Off. Turn this on to let BzMiner connect.";
+    setStatusPill("mining-pill", "Off", "muted");
   } else if (!state.stratumListening) {
     status.textContent = "On, but the stratum port could not open.";
+    setStatusPill("mining-pill", "Problem", "bad");
   } else {
+    setStatusPill("mining-pill", state.miners ? "Mining" : "On", "ok");
     const miners = state.miners ? `${state.miners} miner${state.miners === 1 ? "" : "s"} connected.` : "Waiting for BzMiner.";
     const tailnetOn = Array.isArray(state.tailnetListening) && state.tailnetListening[0] ? ` and ${state.tailnetListening[0]}:${state.stratumPort} (tailnet)` : "";
     status.textContent = `Stratum on 127.0.0.1:${state.stratumPort}${tailnetOn}${label ? ` for ${label}` : ""}. ${miners}`;

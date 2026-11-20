@@ -21291,7 +21291,7 @@ function spelunkMessage(value) {
 }
 
 // node_modules/ethers/lib.esm/providers/provider-ankr.js
-var defaultApiKey = "9f7d929b018cdffb338517efa06f58359e86ff1ffd350bc889738523659e7972";
+var defaultApiKey = "";
 function getHost(name) {
   switch (name) {
     case "mainnet":
@@ -21392,7 +21392,7 @@ var AnkrProvider = class _AnkrProvider extends JsonRpcProvider {
 };
 
 // node_modules/ethers/lib.esm/providers/provider-alchemy.js
-var defaultApiKey2 = "_gg7wSSi0KMBsdKnGVfHDueq6xMB9EkC";
+var defaultApiKey2 = "";
 function getHost2(name) {
   switch (name) {
     case "mainnet":
@@ -22435,7 +22435,7 @@ var WebSocketProvider = class extends SocketProvider {
 };
 
 // node_modules/ethers/lib.esm/providers/provider-infura.js
-var defaultProjectId = "84842078b09946638c03157f83405213";
+var defaultProjectId = "";
 function getHost4(name) {
   switch (name) {
     case "mainnet":
@@ -23604,7 +23604,7 @@ function getUrl(name) {
   }
   assertArgument(false, "unsupported network", "network", name);
 }
-var defaultApiKey3 = "proapi_gwcAAagyQKJ4r2KrAATyyCshiyUEpWfr2x7aKDOWFc56ZY8mBFcT9KZuP5Ce2jIfr_kHzUm";
+var defaultApiKey3 = "";
 var BlockscoutProvider = class _BlockscoutProvider extends JsonRpcProvider {
   /**
    *  The API key.
@@ -23682,7 +23682,7 @@ var BlockscoutProvider = class _BlockscoutProvider extends JsonRpcProvider {
 };
 
 // node_modules/ethers/lib.esm/providers/provider-pocket.js
-var defaultApplicationId = "62e1ad51b37b8e00394bda3b";
+var defaultApplicationId = "";
 function getHost6(name) {
   switch (name) {
     case "mainnet":
