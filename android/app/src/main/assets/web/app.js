@@ -342,11 +342,78 @@ function paintJellyfin(data) {
 }
 
 // ---------- mining ----------
+let nodePending = "";
+let nodePendingUntil = 0;
+
+function nodeReport(m) {
+  return Boolean(m) && (m.nodeRunning != null || m.nodeSynced != null);
+}
+
+function currentNodePending(m) {
+  if (nodePending && Date.now() > nodePendingUntil) nodePending = "";
+  if (nodePending === "start" && m && m.nodeRunning) nodePending = "";
+  if (nodePending === "stop" && m && nodeReport(m) && !m.nodeRunning) nodePending = "";
+  return nodePending;
+}
+
 function syncLine(m) {
-  if (!m || !m.enabled) return "Solo mining is off.";
-  if (!m.nodeTabConnected) return "Waiting for the node tab.";
-  if (m.synced) return `Synced at ${m.nodeHeight || m.height || "—"}`;
-  return `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
+  if (!m) return "Waiting for this hog.";
+  const pending = currentNodePending(m);
+  if (pending === "start") return "Starting the node.";
+  if (pending === "stop") return "Stopping the node.";
+  if (!nodeReport(m)) {
+    if (!m.enabled) return "Solo mining is off.";
+    if (!m.nodeTabConnected) return "Waiting for the node tab.";
+    if (m.synced) return `Synced at ${m.nodeHeight || m.height || "—"}`;
+    return `Syncing ${m.nodeHeight || 0} / ${m.tipHeight || "?"}`;
+  }
+  if (!m.nodeTabConnected) return "Open the Node tab in Hog.";
+  if (!m.nodeRunning) return "Node is stopped.";
+  if (m.nodeSynced) return `Synced at ${m.nodeHead || m.nodeHeight || m.height || "—"}`;
+  const height = m.nodeHead || m.nodeHeight || 0;
+  return height ? `Syncing at ${height}` : "Node is running.";
+}
+
+function nodeActions(m) {
+  if (!nodeReport(m) || !m.nodeTabConnected) return null;
+  const pending = currentNodePending(m);
+  if (pending === "start") {
+    return el("div", { class: "ct-actions", id: "node-actions" },
+      el("button", { class: "primary", type: "button", text: "Starting…", disabled: true }));
+  }
+  if (pending === "stop") {
+    return el("div", { class: "ct-actions", id: "node-actions" },
+      el("button", { class: "danger", type: "button", text: "Stopping…", disabled: true }));
+  }
+  if (m.nodeRunning) {
+    return el("div", { class: "ct-actions", id: "node-actions" },
+      el("button", { class: "danger", type: "button", text: "Stop node", onclick: () => confirmSheet(`Stop the node on ${hogLabel()}? The chain data stays on that computer.`, "Stop node", () => nodeAct("stop")) }));
+  }
+  return el("div", { class: "ct-actions", id: "node-actions" },
+    el("button", { class: "primary", type: "button", text: "Start node", onclick: () => nodeAct("start") }));
+}
+
+async function nodeAct(which) {
+  nodePending = which === "stop" ? "stop" : "start";
+  nodePendingUntil = Date.now() + 20000;
+  if (lastMining) {
+    paintHome();
+    paintMining(lastMining);
+  }
+  try {
+    const next = await apiPost("mining", { action: which === "stop" ? "node-stop" : "node-start" });
+    lastMining = next;
+    noteFetch();
+    paintHome();
+    paintMining(next);
+    const where = hogLabel();
+    toast(next.ok ? (which === "stop" ? `Stopping the node on ${where}.` : `Starting the node on ${where}.`) : (next.error || "That did not work."), !next.ok);
+    if (next.ok) setTimeout(() => { if (!$("app-view").hidden) refresh(current); }, 2000);
+  } catch (error) {
+    nodePending = "";
+    toast(error.message, true);
+    loadMining().catch(() => {});
+  }
 }
 
 function paintMining(m) {
@@ -505,7 +572,8 @@ function paintNode() {
     box.replaceChildren(
       head("This hog is the mining node"),
       el("p", { class: "mono", text: choice.pool }),
-      el("p", { class: "note", text: `${syncLine(lastMining)} Start on this computer mines to 127.0.0.1. The other computers mine to the address above.` }));
+      el("p", { class: "note", text: `${syncLine(lastMining)} Start on this computer mines to 127.0.0.1. The other computers mine to the address above.` }),
+      nodeActions(lastMining));
     return;
   }
   box.replaceChildren(
@@ -580,6 +648,7 @@ function paintHome() {
   $("home-sync").replaceChildren(
     el("p", { class: "sheet-title", text: where }),
     el("p", { text: syncLine(mining) }),
+    nodeActions(mining),
     el("p", { class: "note", text: fetchedNote() }));
   const state = !mining ? "Waiting for this hog." : mining.localMiner === "running" ? `BzMiner is running on ${where}.` : mining.localMiner === "missing" ? (mining.localMinerError || `Hog could not find BzMiner on ${where}.`) : `BzMiner is off on ${where}.`;
   $("home-mining").replaceChildren(
@@ -851,7 +920,8 @@ function hogSheet() {
     const here = hog.id === cfg.id;
     let sub = "latency — · sync — · miners —";
     if (here && lastMining) {
-      const height = lastMining.synced ? (lastMining.nodeHeight || lastMining.height || "—") : "—";
+      const synced = nodeReport(lastMining) ? lastMining.nodeSynced : lastMining.synced;
+      const height = synced ? (lastMining.nodeHead || lastMining.nodeHeight || lastMining.height || "—") : (lastMining.nodeRunning && lastMining.nodeHead ? lastMining.nodeHead : "—");
       const miners = Array.isArray(lastMining.workers) ? String(lastMining.workers.length) : "—";
       sub = `latency — · sync ${height} · ${miners} miners`;
     }
@@ -960,6 +1030,10 @@ function wire() {
 const demo = (() => {
   const params = new URLSearchParams(location.search);
   const miners = {};
+  const nodes = {
+    a: { running: true, synced: true, head: 5320405 },
+    b: { running: false, synced: false, head: 0 },
+  };
   let hogs = params.get("demo") === "pair" ? [] : [
     { id: "a", host: "hog.tail314642.ts.net", ip: "100.119.132.89", port: 4189, label: "Gaming-PC" },
     { id: "b", host: "hog-1.tail314642.ts.net", ip: "100.72.197.80", port: 4189, label: "hog-1" },
@@ -1056,8 +1130,9 @@ const demo = (() => {
       }
       if (route === "mining") {
         const demoMiner = miners[currentId] || "stopped";
+        const demoNode = nodes[currentId] || { running: false, synced: false, head: 0 };
         const demoIp = currentId === "b" ? "100.72.197.80" : "100.119.132.89";
-        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, stratumListening: true, synced: true, height: 4211873, nodeHeight: 4211873, tipHeight: 4211873, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, hashrate: 431645550, bzWorker: "hog-mainnet", bzPowerW: 192.6, devices: [{ name: "GPU", hashrate: 407285361, tempC: 62, powerW: 82.5 }, { name: "CPU", hashrate: 24360189, tempC: 90.2, powerW: 110.1 }], lastError: "", localMiner: demoMiner, localMinerError: "", tailnetAddress: demoIp, stratumPort: 3456, launcherPinned: false, launcherNote: "", launchers: demoLaunchers.map((item) => ({ ...item })), workers: [
+        return { ok: true, enabled: true, network: "mainnet", networkLabel: "Mainnet", nodeTabConnected: true, nodeRunning: demoNode.running, nodeSynced: demoNode.synced, nodeHead: demoNode.head, stratumListening: true, synced: demoNode.synced, height: demoNode.head, nodeHeight: demoNode.head, tipHeight: demoNode.head, jobs: 1822, shares: 92, blocks: 61, rejected: 7, stale: 24, pending: 0, miners: 2, hashrate: 431645550, bzWorker: "hog-mainnet", bzPowerW: 192.6, devices: [{ name: "GPU", hashrate: 407285361, tempC: 62, powerW: 82.5 }, { name: "CPU", hashrate: 24360189, tempC: 90.2, powerW: 110.1 }], lastError: "", localMiner: demoMiner, localMinerError: "", tailnetAddress: demoIp, stratumPort: 3456, launcherPinned: false, launcherNote: "", launchers: demoLaunchers.map((item) => ({ ...item })), workers: [
           { worker: "hog-mainnet", remote: false, connected: 1, shares: 80, blocks: 55, rejected: 6, stale: 2, lastShareAt: now - 42e3 },
           { worker: "rig2-mainnet", remote: true, connected: 1, shares: 12, blocks: 6, rejected: 1, stale: 1, lastShareAt: now - 6e5 },
         ] };
@@ -1074,6 +1149,8 @@ const demo = (() => {
       if (route === "mining") {
         if (body.action === "start") miners[currentId] = "running";
         if (body.action === "stop") miners[currentId] = "stopped";
+        if (body.action === "node-start") nodes[currentId] = { running: true, synced: true, head: 5320405 };
+        if (body.action === "node-stop") nodes[currentId] = { running: false, synced: false, head: 0 };
         if (body.action === "launcher" && body.op === "select") {
           demoLaunchers = demoLaunchers.map((item) => ({ ...item, active: item.id === body.id }));
         }

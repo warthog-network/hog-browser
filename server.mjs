@@ -159,9 +159,13 @@ function mobileHogInfo() {
 const MOBILE_API = createMobileApi({
   state: MOBILE_STATE,
   files: FILES,
-  prepareMining: () => refreshBzminer(),
+  prepareMining: async () => {
+    await refreshBzminer();
+    await sampleNode();
+  },
   mining: () => miningStatus(miningEnabled),
   miningAction: (action, extra) => mobileMiningAction(action, extra),
+  nodeAction: (action) => mobileNodeAction(action),
   containers: (action, name) => mobileContainers(action, name),
   info: mobileHogInfo,
 });
@@ -383,6 +387,58 @@ export function tailnetMiningInfo({ allow, listening, port, wallet, network, dns
   };
 }
 
+const NODE_SAMPLE_MS = 4_000;
+let nodeSample = { running: false, synced: false, height: 0, tab: false, at: 0 };
+let nodeSampleFlight = null;
+
+/**
+ * What a /chain/head relay answer means for the phone.
+ * A timeout keeps the previous reading; the node often goes quiet during a sync batch.
+ * @param {any} reply
+ */
+export function nodeLinkState(reply) {
+  if (!reply || reply.ok !== true) {
+    const code = String(reply?.code || "");
+    return { running: false, synced: false, height: 0, tab: code !== "no-page" && code !== "" };
+  }
+  return {
+    running: true,
+    synced: nodeSyncedFlag(reply.result),
+    height: nodeHeadHeight(reply.result),
+    tab: true,
+  };
+}
+
+/** Read the node tab's own synced flag. Does not wait for a miner. */
+export async function sampleNode(force = false) {
+  if (!force && nodeSample.at && Date.now() - nodeSample.at < NODE_SAMPLE_MS) return nodeSample;
+  if (nodeSampleFlight) return nodeSampleFlight;
+  nodeSampleFlight = readNodeSample().catch(() => nodeSample).finally(() => { nodeSampleFlight = null; });
+  return nodeSampleFlight;
+}
+
+async function readNodeSample() {
+  if (!MINING.status().pageConnected) {
+    nodeSample = { running: false, synced: false, height: 0, tab: false, at: Date.now() };
+    return nodeSample;
+  }
+  const net = currentMiningNetwork();
+  const head = await MINING.call("GET", "/chain/head", undefined, net?.page || "", { timeoutMs: 8_000 });
+  if (head?.code === "timeout" && nodeSample.running && Date.now() - nodeSample.at < 120_000) return nodeSample;
+  const next = nodeLinkState(head);
+  nodeSample = { ...next, at: Date.now() };
+  return nodeSample;
+}
+
+async function mobileNodeAction(action) {
+  queueNodeCommand(action);
+  const status = miningStatus(miningEnabled);
+  if (!status.pageConnected) {
+    return { ...status, ok: false, error: "Open the Node tab in Hog. The phone starts and stops the node in that tab." };
+  }
+  return { ...status, ok: true, error: "" };
+}
+
 function miningStatus(enabled) {
   let port = 0;
   let sport = 0;
@@ -421,6 +477,9 @@ function miningStatus(enabled) {
     ...localMinerFields(),
     ...minerLauncherFields(),
     bzminer: bzminerCache.value,
+    nodeRunning: Boolean(nodeSample.running),
+    nodeSynced: Boolean(nodeSample.synced),
+    nodeHead: Number(nodeSample.height) || 0,
   };
 }
 
@@ -672,16 +731,75 @@ export function nodeHeadMark(body) {
   return `${height}:${hash}`;
 }
 
+/**
+ * Press the node page's Start or Stop button. Start is "Start node" (or the
+ * memory-limit retry). Stop is "Stop node". A disabled button is left alone.
+ * @param {{ querySelectorAll: (sel: string) => Iterable<{ textContent?: string, disabled?: boolean, click: () => void }> }} doc
+ * @param {string} action "start" or "stop"
+ */
+export function nodeControlClick(doc, action) {
+  const buttons = [...doc.querySelectorAll("button")];
+  const labeled = (text) => buttons.find((button) => String(button.textContent || "").trim() === text);
+  if (action === "start") {
+    if (labeled("Stop node") || labeled("Node is running")) return { ok: true, running: true, already: true };
+    if (labeled("Starting…") || labeled("Please wait…") || labeled("Stopping…")) return { ok: true, running: false, pending: true };
+    const button = labeled("Start node") || labeled("Memory limit hit — Start to retry");
+    if (!button) return { ok: false, error: "Start is not on the node page yet." };
+    if (button.disabled) return { ok: false, error: "Start is not ready on the node page." };
+    button.click();
+    return { ok: true, running: false, pending: true };
+  }
+  if (action === "stop") {
+    if (labeled("Start node") && !labeled("Stop node")) return { ok: true, running: false, already: true };
+    const button = labeled("Stop node");
+    if (!button) return { ok: false, error: "Stop is not available. The node may still be starting." };
+    if (button.disabled) return { ok: false, error: "Stop is not ready yet." };
+    button.click();
+    return { ok: true, running: false, pending: true };
+  }
+  return { ok: false, error: "action must be start or stop" };
+}
+
+const NODE_CMD_MS = 20_000;
+let nodeCmd = null;
+
+/** Ask the open node tab to start or stop. The tab picks this up once. */
+export function queueNodeCommand(action) {
+  if (action !== "start" && action !== "stop") {
+    throw Object.assign(new Error("action must be start or stop"), { status: 400 });
+  }
+  nodeCmd = { action, at: Date.now() };
+  return { ok: true, action };
+}
+
+/** The command waiting for the node tab, or "". A command older than 20s is dropped. */
+export function takeNodeCommand(now = Date.now()) {
+  const cmd = nodeCmd;
+  nodeCmd = null;
+  if (!cmd || !Number.isFinite(cmd.at) || now - cmd.at > NODE_CMD_MS) return "";
+  return cmd.action === "start" || cmd.action === "stop" ? cmd.action : "";
+}
+
 export function nodeSyncScript() {
   return `(function () {
   if (window.__hogNodeSync) return;
   window.__hogNodeSync = true;
   var readSynced = ${nodeSyncedFlag.toString()};
+  var clickNode = ${nodeControlClick.toString()};
   var last = null;
   function on(synced) {
     if (last === synced) return;
     last = synced;
     try { parent.postMessage({ source: "hog", type: "node-sync", synced: synced }, "*"); } catch (e) {}
+  }
+  function pollCommand() {
+    fetch("/__hog/node-cmd", { cache: "no-store" }).then(function (res) {
+      if (!res.ok) return null;
+      return res.json();
+    }).then(function (body) {
+      if (!body || (body.action !== "start" && body.action !== "stop")) return;
+      try { clickNode(document, body.action); } catch (e) {}
+    }).catch(function () {});
   }
   function tick() {
     var mod = window.wartNode || window.Module;
@@ -693,7 +811,9 @@ export function nodeSyncScript() {
       on(readSynced(raw));
     }).catch(function () { on(false); });
   }
+  setInterval(pollCommand, 1000);
   setInterval(tick, 2000);
+  pollCommand();
   tick();
 })();`;
 }
@@ -2663,6 +2783,11 @@ async function handleSite(runtime, site, req, res) {
     return;
   }
   const url = new URL(req.url || "/", `http://${PAGE_HOST}:${site.port}`);
+  if (url.pathname === "/__hog/node-cmd" && (req.method === "GET" || req.method === "HEAD")) {
+    const action = req.method === "GET" ? takeNodeCommand() : "";
+    send(res, 200, req.method === "HEAD" ? "" : { ok: true, action }, "application/json; charset=utf-8", SITE_HEADERS);
+    return;
+  }
   if (url.pathname === "/__hog/opfs") {
     await handleOpfs(site, req, res, url);
     return;
@@ -2836,6 +2961,7 @@ async function handle(req, res, runtime) {
     if (url.pathname === "/api/mining" && req.method === "GET") {
       refreshTailnetName(tailnetAddresses().find((a) => a.family === 4)?.address || "");
       await refreshBzminer();
+      await sampleNode();
       send(res, 200, miningStatus(miningEnabled));
       return;
     }

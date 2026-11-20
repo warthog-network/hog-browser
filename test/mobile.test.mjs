@@ -269,6 +269,15 @@ test("mobile API: containers and mining show only what the phone needs", async (
     assert.equal(rated.bzWorker, "hog-mainnet");
     assert.equal(rated.devices[0].tempC, 60);
     assert.equal(rated.workers[0].stale, 2);
+    const caughtUp = mobileMiningView({ synced: false, pageConnected: true, nodeRunning: true, nodeSynced: true, nodeHead: 5320405, miners: 0 });
+    assert.equal(caughtUp.synced, true);
+    assert.equal(caughtUp.nodeRunning, true);
+    assert.equal(caughtUp.nodeHead, 5320405);
+    assert.equal(caughtUp.nodeHeight, 5320405);
+    assert.equal(caughtUp.miners, 0);
+    const older = mobileMiningView({ synced: true, nodeHeight: 3, pageConnected: true });
+    assert.equal(older.synced, true);
+    assert.equal(older.nodeRunning, undefined);
     assert.equal(JSON.stringify(rated).includes("wallet"), false);
     assert.equal(JSON.stringify(rated).includes("secret"), false);
   });
@@ -290,7 +299,13 @@ test("mobile API: the phone can start and stop the local miner and nothing else"
     running = action === "start";
     return { ...mining(), ok: true, error: "" };
   };
-  const api = createMobileApi({ state, files, mining, miningAction, containers: async () => ({ ok: true, items: [] }), info: () => ({}) });
+  let node = "stopped";
+  const nodeAction = async (action) => {
+    actions.push(`node-${action}`);
+    node = action === "start" ? "running" : "stopped";
+    return { ...mining(), ok: true, pageConnected: true, nodeRunning: node === "running", nodeSynced: node === "running", nodeHead: node === "running" ? 5320405 : 0, error: "" };
+  };
+  const api = createMobileApi({ state, files, mining, miningAction, nodeAction, containers: async () => ({ ok: true, items: [] }), info: () => ({}) });
   const listener = createMobileListener({ handler: api, findTailnet: () => [] });
   const port = await listener.start(0);
   try {
@@ -302,9 +317,19 @@ test("mobile API: the phone can start and stop the local miner and nothing else"
     assert.equal(start.json.ok, true);
     assert.equal(start.json.localMiner, "running");
     assert.equal(start.json.script, undefined);
+    const startedNode = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "node-start", script: "/tmp/evil.sh" } });
+    assert.equal(startedNode.status, 200);
+    assert.equal(startedNode.json.ok, true);
+    assert.equal(startedNode.json.nodeRunning, true);
+    assert.equal(startedNode.json.nodeSynced, true);
+    assert.equal(startedNode.json.nodeHead, 5320405);
+    assert.equal(startedNode.json.script, undefined);
+    const stoppedNode = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "node-stop" } });
+    assert.equal(stoppedNode.json.nodeRunning, false);
+    assert.equal(actions.includes("node-start") && actions.includes("node-stop"), true);
     const stop = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "stop" } });
     assert.equal(stop.json.localMiner, "stopped");
-    assert.deepEqual(actions, ["start", "stop"]);
+    assert.deepEqual(actions, ["start", "node-start", "node-stop", "stop"]);
     const bad = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "start", pool: "stratum+tcp://8.8.8.8:3456" } });
     assert.equal(bad.status, 400);
     const aimed = await call(port, { method: "POST", path: "/m/v1/mining", headers: auth, body: { action: "start", pool: "stratum+tcp://100.119.132.89:3456" } });

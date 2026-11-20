@@ -39,8 +39,12 @@ import {
   attachNodeBridge,
   isNodeGlue,
   nodeBridgeTarget,
+  nodeControlClick,
+  nodeLinkState,
   nodeSyncedFlag,
   nodeSyncScript,
+  queueNodeCommand,
+  takeNodeCommand,
   opfsRelative,
   parseBrowseUrl,
   preferredSitePort,
@@ -365,7 +369,41 @@ test("node sync is explicit and only injected on the node page", () => {
   const script = nodeSyncScript();
   assert.match(script, /virtual_get\("\/chain\/head"\)/);
   assert.match(script, /type: "node-sync"/);
+  assert.match(script, /\/__hog\/node-cmd/);
+  assert.match(script, /setInterval\(pollCommand, 1000\)/);
   assert.doesNotMatch(script, /<\/script/i);
+  const buttons = (labels, disabled = {}) => labels.map((text) => ({
+    textContent: text,
+    disabled: Boolean(disabled[text]),
+    clicked: false,
+    click() { this.clicked = true; },
+  }));
+  const doc = (list) => ({ querySelectorAll: () => list });
+  const startButtons = buttons(["Start node", "Import snapshot"]);
+  assert.equal(nodeControlClick(doc(startButtons), "start").pending, true);
+  assert.equal(startButtons[0].clicked, true);
+  const blocked = buttons(["Start node"], { "Start node": true });
+  assert.equal(nodeControlClick(doc(blocked), "start").ok, false);
+  assert.equal(blocked[0].clicked, false);
+  const running = buttons(["Node is running", "Stop node"]);
+  assert.equal(nodeControlClick(doc(running), "start").already, true);
+  assert.equal(running[1].clicked, false);
+  assert.equal(nodeControlClick(doc(running), "stop").pending, true);
+  assert.equal(running[1].clicked, true);
+  assert.equal(nodeControlClick(doc(buttons(["Start node"])), "stop").already, true);
+  assert.equal(takeNodeCommand(), "");
+  queueNodeCommand("start");
+  assert.equal(takeNodeCommand(), "start");
+  assert.equal(takeNodeCommand(), "");
+  queueNodeCommand("stop");
+  assert.equal(takeNodeCommand(Date.now() + 21_000), "");
+  assert.equal(nodeLinkState({ ok: false, code: "no-page" }).tab, false);
+  assert.equal(nodeLinkState({ ok: false, code: "not-running" }).running, false);
+  assert.equal(nodeLinkState({ ok: false, code: "not-running" }).tab, true);
+  assert.deepEqual(nodeLinkState({ ok: true, result: { data: { synced: true, chainHead: { height: 5320405 } } } }), {
+    running: true, synced: true, height: 5320405, tab: true,
+  });
+  assert.equal(nodeLinkState({ ok: false, code: "timeout" }).running, false);
   const html = rewriteHtml(
     "<!doctype html><html><head><title>node</title></head><body></body></html>",
     "https://browser-node.netlify.app/",

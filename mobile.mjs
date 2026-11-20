@@ -354,11 +354,16 @@ export function mobileMiningView(status) {
     networkLabel: String(s.miningNetworkLabel || ""),
     nodeTabConnected: Boolean(s.pageConnected),
     stratumListening: Boolean(s.stratumListening),
-    synced: Boolean(s.synced),
+    synced: s.nodeSynced == null ? Boolean(s.synced) : Boolean(s.nodeSynced),
     gate: String(s.gate || ""),
-    height: num(s.height),
-    nodeHeight: num(s.nodeHeight),
+    height: s.nodeHead > 0 ? num(s.nodeHead) : num(s.height),
+    nodeHeight: s.nodeHead > 0 ? num(s.nodeHead) : num(s.nodeHeight),
     tipHeight: num(s.tipHeight),
+    ...(s.nodeRunning == null ? {} : {
+      nodeRunning: Boolean(s.nodeRunning),
+      nodeSynced: Boolean(s.nodeSynced),
+      nodeHead: num(s.nodeHead),
+    }),
     jobs: num(s.jobs),
     shares: num(s.shares),
     blocks: num(s.blocks),
@@ -417,9 +422,10 @@ function bzminerPhoneFields(raw) {
  * The mobile API request handler.
  * @param {{ state: ReturnType<typeof createMobileState>, files: any, mining: () => any,
  *   miningAction?: (action: "start" | "stop" | "launcher", extra?: { pool?: string, op?: string, id?: string, name?: string, script?: string }) => Promise<any>,
+ *   nodeAction?: (action: "start" | "stop") => Promise<any>,
  *   containers: (action: string, name?: string) => Promise<any>, info?: () => any }} deps
  */
-export function createMobileApi({ state, files, mining, prepareMining, miningAction, containers, info = () => ({}) }) {
+export function createMobileApi({ state, files, mining, prepareMining, miningAction, nodeAction, containers, info = () => ({}) }) {
   return async function handle(req, res) {
     const problem = mobileRequestProblem(req);
     if (problem === "peer") {
@@ -477,6 +483,15 @@ export function createMobileApi({ state, files, mining, prepareMining, miningAct
           const view = mobileMiningView(status);
           if (status && status.ok === false) {
             return sendJson(res, 200, { ...view, ok: false, error: String(status.error || "Could not save that start file.").slice(0, 300) });
+          }
+          return sendJson(res, 200, view);
+        }
+        if (action === "node-start" || action === "node-stop") {
+          if (typeof nodeAction !== "function") return sendJson(res, 404, { ok: false, error: "Not available from the phone." });
+          const status = await nodeAction(action === "node-start" ? "start" : "stop");
+          const view = mobileMiningView(status);
+          if (status && status.ok === false) {
+            return sendJson(res, 200, { ...view, ok: false, error: String(status.error || "Could not change the node.").slice(0, 300) });
           }
           return sendJson(res, 200, view);
         }
